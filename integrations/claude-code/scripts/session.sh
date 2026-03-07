@@ -3,6 +3,7 @@
 #
 # Called on SessionStart. Creates an Intaris session via POST /api/v1/intention
 # so that subsequent PreToolUse evaluations have a session to reference.
+# Stores session state as JSON in a temp file for cross-hook communication.
 #
 # Environment variables:
 #   INTARIS_URL        - Intaris server URL (default: http://localhost:8060)
@@ -43,8 +44,8 @@ fi
 # Generate deterministic Intaris session ID
 INTARIS_SESSION_ID="cc-${SESSION_ID}"
 
-# Session file for tracking across hook calls
-SESSION_FILE="/tmp/intaris_session_${SESSION_ID}"
+# State file for tracking across hook calls (JSON format)
+SESSION_FILE="/tmp/intaris_state_${SESSION_ID}.json"
 
 # Build intention
 if [ -n "$INTARIS_INTENTION" ]; then
@@ -90,16 +91,28 @@ RESPONSE=$(curl -s --max-time 2 \
 # Check if session was created (or already exists — 409 is fine)
 if echo "$RESPONSE" | jq -e '.ok' >/dev/null 2>&1; then
     log "Session created: $INTARIS_SESSION_ID"
-    echo "$INTARIS_SESSION_ID" > "$SESSION_FILE"
 elif echo "$RESPONSE" | jq -e '.detail' >/dev/null 2>&1; then
     # 409 conflict means session already exists — that's fine
     log "Session already exists or error: $(echo "$RESPONSE" | jq -r '.detail // "unknown"')"
-    echo "$INTARIS_SESSION_ID" > "$SESSION_FILE"
 else
     log "Failed to create session: $RESPONSE"
-    # Still save the session ID — evaluate.sh will try lazy creation
-    echo "$INTARIS_SESSION_ID" > "$SESSION_FILE"
 fi
+
+# Write initial JSON state file (always, even on failure — evaluate.sh will retry)
+# NOTE: Keep JSON schema in sync with evaluate.sh (lazy creation path)
+jq -n \
+    --arg sid "$INTARIS_SESSION_ID" \
+    --arg cwd "$CWD" \
+    '{
+        session_id: $sid,
+        call_count: 0,
+        approved: 0,
+        denied: 0,
+        escalated: 0,
+        recent_tools: [],
+        cwd: $cwd
+    }' > "$SESSION_FILE"
+chmod 600 "$SESSION_FILE"
 
 # Output empty (no modifications to Claude's behavior)
 echo '{}'

@@ -14,6 +14,7 @@ The `intaris.ts` plugin intercepts every tool call via `tool.execute.before` and
 - Configurable fail-open/fail-closed behavior
 - Session lifecycle management
 - Structured logging via OpenCode's log system
+- Behavioral analysis: periodic checkpoints, session completion signals, agent summaries
 
 ### Approach B: MCP Proxy
 
@@ -38,6 +39,7 @@ export INTARIS_AGENT_ID=opencode           # optional, defaults to "opencode"
 export INTARIS_USER_ID=your-username       # optional if API key maps to user
 export INTARIS_FAIL_OPEN=false             # optional, defaults to false
 export INTARIS_INTENTION=""                # optional, auto-generated from cwd
+export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disabled)
 ```
 
 | Variable | Default | Description |
@@ -48,6 +50,7 @@ export INTARIS_INTENTION=""                # optional, auto-generated from cwd
 | `INTARIS_USER_ID` | (empty) | User ID (optional if API key maps to a user) |
 | `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed when Intaris is unreachable. Default is `false` (fail-closed) -- tool calls are blocked when Intaris is down. |
 | `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"OpenCode coding session in <cwd>"` |
+| `INTARIS_CHECKPOINT_INTERVAL` | `25` | Number of evaluate calls between periodic checkpoints. Set to `0` to disable checkpoints. Each checkpoint consumes one rate limit slot. |
 
 ### 2. Install the Plugin
 
@@ -102,19 +105,34 @@ See `opencode.json` in this directory for a complete example.
 
 ### Plugin Flow
 
-1. **`session.created`**: Creates an Intaris session via `POST /api/v1/intention` with the working directory as context.
+1. **`session.created`**: Creates an Intaris session via `POST /api/v1/intention` with the working directory as context. Child sessions (subagent tasks) are created with `parent_session_id` for session chain analysis.
 2. **`tool.execute.before`**: Before every tool call:
    - Ensures an Intaris session exists (lazy creation for resumed sessions)
    - Calls `POST /api/v1/evaluate` with the tool name and arguments
    - **approve**: tool executes normally
    - **deny**: throws an error with reasoning (blocks execution)
    - **escalate**: throws an error directing the user to the Intaris UI for approval
+   - Tracks per-decision statistics (approve/deny/escalate counts)
+   - Sends periodic checkpoints via `POST /api/v1/checkpoint` (every N calls)
+3. **`session.deleted`**: Signals session completion to Intaris:
+   - `PATCH /api/v1/session/{id}/status` to `"completed"`
+   - `POST /api/v1/session/{id}/agent-summary` with session statistics
 
 ### MCP Proxy Flow
 
 1. OpenCode connects to Intaris at `/mcp` as a remote MCP server.
 2. `tools/list` returns aggregated tools from all upstream servers.
 3. `tools/call` evaluates each call through the safety pipeline before forwarding.
+
+## Behavioral Analysis
+
+The plugin supports Intaris's behavioral analysis pipeline (L1 data collection):
+
+- **Periodic checkpoints**: Every `INTARIS_CHECKPOINT_INTERVAL` evaluate calls, the plugin sends a checkpoint with enriched content (call counts, decision breakdown, recent tool names). Checkpoints share the rate limit budget with evaluate calls.
+- **Session completion**: When a session is explicitly deleted, the plugin signals completion (`PATCH /status`) and sends an agent summary with session statistics.
+- **Parent session tracking**: Child sessions (subagent tasks) are created with `parent_session_id` linking them to the parent session for chain analysis.
+
+**Limitation**: OpenCode does not fire a session-end event on normal exit. If the user closes OpenCode without deleting the session, the completion signal is not sent. The server's background sweep handles this by transitioning idle sessions after `SESSION_IDLE_TIMEOUT_MINUTES`.
 
 ## Tool Name Conventions
 
@@ -143,3 +161,4 @@ When using the **MCP proxy** approach, tools are namespaced as `server_name:tool
 - **All tool calls allowed**: Ensure the plugin is loaded (check for "Plugin initialized" in logs). If using `INTARIS_FAIL_OPEN=true`, Intaris may be unreachable.
 - **Slow first tool call**: The first tool call creates an Intaris session (~1-2s) before evaluating. Subsequent calls are faster.
 - **Double evaluation**: If you see each tool call evaluated twice, you may have both the plugin and MCP proxy configured. Use only one approach.
+- **Checkpoints not appearing**: Verify `INTARIS_CHECKPOINT_INTERVAL` is not set to `0`. Check that the rate limit is not exhausted (checkpoints share the budget with evaluate calls).

@@ -7,18 +7,24 @@
  *
  * Flow:
  * 1. session.created: Creates an Intaris session via POST /api/v1/intention
+ *    (including child sessions with parent_session_id)
  * 2. tool.execute.before: Evaluates every tool call via POST /api/v1/evaluate
  *    - approve: tool executes normally
  *    - deny: throws error with reasoning (blocks execution)
  *    - escalate: throws error directing user to Intaris UI for approval
+ *    - Periodic checkpoints sent every N calls (configurable)
+ * 3. session.deleted: Signals session completion to Intaris
+ *    - PATCH /session/{id}/status to "completed"
+ *    - POST /session/{id}/agent-summary with session statistics
  *
  * Configuration via environment variables:
- *   INTARIS_URL        - Intaris server URL (default: http://localhost:8060)
- *   INTARIS_API_KEY    - API key for authentication (required)
- *   INTARIS_AGENT_ID   - Agent ID (default: opencode)
- *   INTARIS_USER_ID    - User ID (optional if API key maps to user)
- *   INTARIS_FAIL_OPEN  - Allow tool calls if Intaris is unreachable (default: false)
- *   INTARIS_INTENTION  - Session intention override (default: auto-generated)
+ *   INTARIS_URL                  - Intaris server URL (default: http://localhost:8060)
+ *   INTARIS_API_KEY              - API key for authentication (required)
+ *   INTARIS_AGENT_ID             - Agent ID (default: opencode)
+ *   INTARIS_USER_ID              - User ID (optional if API key maps to user)
+ *   INTARIS_FAIL_OPEN            - Allow tool calls if Intaris is unreachable (default: false)
+ *   INTARIS_INTENTION            - Session intention override (default: auto-generated)
+ *   INTARIS_CHECKPOINT_INTERVAL  - Evaluate calls between checkpoints (default: 25, 0=disabled)
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
@@ -26,6 +32,12 @@ import type { Plugin } from "@opencode-ai/plugin"
 interface SessionState {
   intarisSessionId: string | null
   sessionCreated: boolean
+  callCount: number
+  approvedCount: number
+  deniedCount: number
+  escalatedCount: number
+  recentTools: string[]
+  parentSessionId: string | null
 }
 
 interface EvaluateResponse {
@@ -47,11 +59,17 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     (process.env.INTARIS_FAIL_OPEN || "false").toLowerCase() === "true"
   const intentionOverride = process.env.INTARIS_INTENTION || ""
   const workingDirectory = worktree || directory || ""
+  const rawInterval = parseInt(
+    process.env.INTARIS_CHECKPOINT_INTERVAL || "25",
+    10,
+  )
+  const checkpointInterval = isNaN(rawInterval) ? 25 : rawInterval
 
   // -- State ----------------------------------------------------------------
   // Track Intaris session per OpenCode session.
   // Bounded to prevent unbounded growth in long-running instances.
   const MAX_SESSIONS = 100
+  const MAX_RECENT_TOOLS = 10
   const sessions = new Map<string, SessionState>()
 
   // -- API Client -----------------------------------------------------------
@@ -117,6 +135,12 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       state = {
         intarisSessionId: null,
         sessionCreated: false,
+        callCount: 0,
+        approvedCount: 0,
+        deniedCount: 0,
+        escalatedCount: 0,
+        recentTools: [],
+        parentSessionId: null,
       }
       sessions.set(sessionId, state)
       // Evict oldest entries if over limit
@@ -145,6 +169,31 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
   }
 
   /**
+   * Build a checkpoint content string with enriched session statistics.
+   */
+  function buildCheckpointContent(state: SessionState): string {
+    const interval = Math.floor(state.callCount / checkpointInterval)
+    const tools = state.recentTools.join(", ") || "none"
+    return (
+      `Checkpoint #${interval}: ${state.callCount} calls ` +
+      `(${state.approvedCount} approved, ${state.deniedCount} denied, ` +
+      `${state.escalatedCount} escalated). Recent tools: ${tools}`
+    )
+  }
+
+  /**
+   * Build an agent summary string with session statistics.
+   */
+  function buildAgentSummary(state: SessionState): string {
+    return (
+      `OpenCode session completed. ${state.callCount} tool calls ` +
+      `(${state.approvedCount} approved, ${state.deniedCount} denied, ` +
+      `${state.escalatedCount} escalated). ` +
+      `Working directory: ${workingDirectory || "unknown"}`
+    )
+  }
+
+  /**
    * Ensure an Intaris session exists for the given OpenCode session.
    * Creates one via POST /api/v1/intention if needed.
    * Returns the Intaris session_id, or null on failure.
@@ -158,17 +207,24 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     // Generate a deterministic Intaris session ID from the OpenCode session
     const intarisSessionId = `oc-${sessionId}`
 
+    const intentionBody: Record<string, any> = {
+      session_id: intarisSessionId,
+      intention: buildIntention(),
+      details: {
+        source: "opencode",
+        working_directory: workingDirectory,
+      },
+    }
+
+    // Include parent_session_id for child sessions (session continuation chains)
+    if (state.parentSessionId) {
+      intentionBody.parent_session_id = state.parentSessionId
+    }
+
     const result = await callApi(
       "POST",
       "/api/v1/intention",
-      {
-        session_id: intarisSessionId,
-        intention: buildIntention(),
-        details: {
-          source: "opencode",
-          working_directory: workingDirectory,
-        },
-      },
+      intentionBody,
       2000, // 2s timeout for session creation (leaves headroom for evaluate)
     )
 
@@ -190,6 +246,52 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     }
 
     return state.intarisSessionId
+  }
+
+  /**
+   * Send a periodic checkpoint to Intaris (fire-and-forget).
+   */
+  function sendCheckpoint(
+    intarisSessionId: string,
+    state: SessionState,
+  ): void {
+    if (checkpointInterval <= 0) return
+    if (state.callCount % checkpointInterval !== 0) return
+
+    callApi(
+      "POST",
+      "/api/v1/checkpoint",
+      {
+        session_id: intarisSessionId,
+        content: buildCheckpointContent(state),
+      },
+      2000,
+    ).catch(() => {})
+  }
+
+  /**
+   * Signal session completion to Intaris (fire-and-forget).
+   * Sends status update and agent summary in parallel.
+   */
+  function signalCompletion(
+    intarisSessionId: string,
+    state: SessionState,
+  ): void {
+    // Fire both calls in parallel — neither blocks the other
+    Promise.all([
+      callApi(
+        "PATCH",
+        `/api/v1/session/${intarisSessionId}/status`,
+        { status: "completed" },
+        2000,
+      ),
+      callApi(
+        "POST",
+        `/api/v1/session/${intarisSessionId}/agent-summary`,
+        { summary: buildAgentSummary(state) },
+        2000,
+      ),
+    ]).catch(() => {})
   }
 
   // -- Initialization -------------------------------------------------------
@@ -226,7 +328,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         service: "intaris",
         level: "info",
         message: "Plugin initialized",
-        extra: { baseUrl, agentId, failOpen },
+        extra: { baseUrl, agentId, failOpen, checkpointInterval },
       },
     })
     .catch(() => {})
@@ -240,12 +342,33 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         const sessionId: string = event.properties?.info?.id
         if (!sessionId) return
 
-        // Skip child sessions (subagent tasks)
-        if (event.properties?.info?.parentID) return
-
         const state = getOrCreateState(sessionId)
+
+        // Track parent session for child sessions (subagent tasks).
+        // Child sessions are created with parent_session_id for session
+        // chain analysis, rather than being skipped.
+        const parentID: string | undefined = event.properties?.info?.parentID
+        if (parentID) {
+          state.parentSessionId = `oc-${parentID}`
+        }
+
         // Pre-create the Intaris session (best-effort, non-blocking)
         ensureSession(sessionId, state).catch(() => {})
+      }
+
+      // Signal session completion when explicitly deleted.
+      // Note: OpenCode does not fire a session-end event on normal exit.
+      // Sessions that are not explicitly deleted will be transitioned to
+      // "idle" by the server's background sweep after SESSION_IDLE_TIMEOUT_MINUTES.
+      if (event.type === "session.deleted") {
+        const sessionId: string = event.properties?.info?.id
+        if (!sessionId) return
+
+        const state = sessions.get(sessionId)
+        if (!state?.intarisSessionId) return
+
+        signalCompletion(state.intarisSessionId, state)
+        sessions.delete(sessionId)
       }
     },
 
@@ -299,6 +422,15 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         )
       }
 
+      // Track decision statistics
+      state.callCount++
+      if (result.decision === "approve") state.approvedCount++
+      else if (result.decision === "deny") state.deniedCount++
+      else if (result.decision === "escalate") state.escalatedCount++
+
+      // Track recent tool names (bounded to last MAX_RECENT_TOOLS)
+      state.recentTools = [...state.recentTools, tool].slice(-MAX_RECENT_TOOLS)
+
       await client.app
         .log({
           body: {
@@ -312,6 +444,9 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           },
         })
         .catch(() => {})
+
+      // Send periodic checkpoint (fire-and-forget, non-blocking)
+      sendCheckpoint(intarisSessionId, state)
 
       if (result.decision === "deny") {
         const reason = result.reasoning || "Tool call denied by safety evaluation"

@@ -2,7 +2,8 @@
 # intaris evaluate hook for Claude Code
 #
 # Called on PreToolUse. Evaluates the tool call through Intaris's safety
-# pipeline and blocks denied or escalated calls.
+# pipeline and blocks denied or escalated calls. Tracks per-session
+# statistics and sends periodic checkpoints.
 #
 # Input (JSON on stdin):
 #   { "session_id": "...", "tool_name": "...", "tool_input": {...}, ... }
@@ -11,13 +12,14 @@
 #   {} = allow, {"decision": "block", "reason": "..."} = block
 #
 # Environment variables:
-#   INTARIS_URL        - Intaris server URL (default: http://localhost:8060)
-#   INTARIS_API_KEY    - API key for authentication (required)
-#   INTARIS_AGENT_ID   - Agent ID (default: claude-code)
-#   INTARIS_USER_ID    - User ID (optional if API key maps to user)
-#   INTARIS_FAIL_OPEN  - Allow tool calls if Intaris is unreachable (default: false)
-#   INTARIS_INTENTION  - Session intention override (default: auto-generated)
-#   INTARIS_DEBUG      - Enable debug logging to stderr (default: false)
+#   INTARIS_URL                  - Intaris server URL (default: http://localhost:8060)
+#   INTARIS_API_KEY              - API key for authentication (required)
+#   INTARIS_AGENT_ID             - Agent ID (default: claude-code)
+#   INTARIS_USER_ID              - User ID (optional if API key maps to user)
+#   INTARIS_FAIL_OPEN            - Allow tool calls if Intaris is unreachable (default: false)
+#   INTARIS_INTENTION            - Session intention override (default: auto-generated)
+#   INTARIS_CHECKPOINT_INTERVAL  - Evaluate calls between checkpoints (default: 25, 0=disabled)
+#   INTARIS_DEBUG                - Enable debug logging to stderr (default: false)
 
 set -euo pipefail
 
@@ -27,6 +29,7 @@ INTARIS_AGENT_ID="${INTARIS_AGENT_ID:-claude-code}"
 INTARIS_USER_ID="${INTARIS_USER_ID:-}"
 INTARIS_FAIL_OPEN="${INTARIS_FAIL_OPEN:-false}"
 INTARIS_INTENTION="${INTARIS_INTENTION:-}"
+INTARIS_CHECKPOINT_INTERVAL="${INTARIS_CHECKPOINT_INTERVAL:-25}"
 INTARIS_DEBUG="${INTARIS_DEBUG:-false}"
 
 log() {
@@ -59,14 +62,34 @@ if [ -n "$INTARIS_USER_ID" ]; then
     HEADERS+=(-H "X-User-Id: $INTARIS_USER_ID")
 fi
 
-# -- Session Management -----------------------------------------------------
-# Load or create Intaris session ID
+# -- Session State Management -----------------------------------------------
+# Load or create Intaris session state from JSON state file.
+# Supports both new JSON format and legacy plain-text format for
+# backward compatibility during upgrades.
 
-SESSION_FILE="/tmp/intaris_session_${SESSION_ID:-default}"
+SESSION_FILE="/tmp/intaris_state_${SESSION_ID:-default}.json"
 INTARIS_SESSION_ID=""
+CALL_COUNT=0
+APPROVED=0
+DENIED=0
+ESCALATED=0
+RECENT_TOOLS="[]"
 
 if [ -f "$SESSION_FILE" ]; then
-    INTARIS_SESSION_ID=$(cat "$SESSION_FILE" 2>/dev/null || true)
+    # Try JSON format first (new format from updated session.sh)
+    if jq -e '.session_id' "$SESSION_FILE" >/dev/null 2>&1; then
+        INTARIS_SESSION_ID=$(jq -r '.session_id // empty' "$SESSION_FILE" 2>/dev/null || true)
+        CALL_COUNT=$(jq -r '.call_count // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+        APPROVED=$(jq -r '.approved // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+        DENIED=$(jq -r '.denied // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+        ESCALATED=$(jq -r '.escalated // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+        RECENT_TOOLS=$(jq -c '.recent_tools // []' "$SESSION_FILE" 2>/dev/null || echo "[]")
+    else
+        # Legacy format: plain session ID or session_id:count
+        LEGACY=$(cat "$SESSION_FILE" 2>/dev/null || true)
+        IFS=':' read -r INTARIS_SESSION_ID CALL_COUNT <<< "$LEGACY"
+        CALL_COUNT=${CALL_COUNT:-0}
+    fi
 fi
 
 # Lazy session creation if SessionStart hook didn't fire
@@ -104,7 +127,21 @@ if [ -z "$INTARIS_SESSION_ID" ]; then
         -d "$INTENTION_BODY" \
         "${INTARIS_URL}/api/v1/intention" >/dev/null 2>&1 || true
 
-    echo "$INTARIS_SESSION_ID" > "$SESSION_FILE"
+    # Write initial JSON state file
+    # NOTE: Keep JSON schema in sync with session.sh
+    jq -n \
+        --arg sid "$INTARIS_SESSION_ID" \
+        --arg cwd "$CWD" \
+        '{
+            session_id: $sid,
+            call_count: 0,
+            approved: 0,
+            denied: 0,
+            escalated: 0,
+            recent_tools: [],
+            cwd: $cwd
+        }' > "$SESSION_FILE"
+    chmod 600 "$SESSION_FILE"
 fi
 
 # -- Evaluate ----------------------------------------------------------------
@@ -167,6 +204,60 @@ PATH_TYPE=$(echo "$BODY" | jq -r '.path // ""' 2>/dev/null || echo "")
 LATENCY=$(echo "$BODY" | jq -r '.latency_ms // 0' 2>/dev/null || echo "0")
 
 log "$TOOL_NAME: $DECISION ($PATH_TYPE, ${LATENCY}ms, risk=$RISK)"
+
+# -- Update Session State ---------------------------------------------------
+
+CALL_COUNT=$((CALL_COUNT + 1))
+case "$DECISION" in
+    approve) APPROVED=$((APPROVED + 1)) ;;
+    deny) DENIED=$((DENIED + 1)) ;;
+    escalate) ESCALATED=$((ESCALATED + 1)) ;;
+esac
+
+# Update recent tools (keep last 10)
+RECENT_TOOLS=$(echo "$RECENT_TOOLS" | jq --arg t "$TOOL_NAME" '(. + [$t])[-10:]' 2>/dev/null || echo "[]")
+
+# Write updated state file
+jq -n \
+    --arg sid "$INTARIS_SESSION_ID" \
+    --argjson cc "$CALL_COUNT" \
+    --argjson ap "$APPROVED" \
+    --argjson dn "$DENIED" \
+    --argjson es "$ESCALATED" \
+    --argjson rt "$RECENT_TOOLS" \
+    --arg cwd "$CWD" \
+    '{
+        session_id: $sid,
+        call_count: $cc,
+        approved: $ap,
+        denied: $dn,
+        escalated: $es,
+        recent_tools: $rt,
+        cwd: $cwd
+    }' > "$SESSION_FILE"
+chmod 600 "$SESSION_FILE"
+
+# -- Periodic Checkpoint (fire-and-forget) -----------------------------------
+
+if [ "$INTARIS_CHECKPOINT_INTERVAL" -gt 0 ] 2>/dev/null && [ $((CALL_COUNT % INTARIS_CHECKPOINT_INTERVAL)) -eq 0 ]; then
+    CHECKPOINT_NUM=$((CALL_COUNT / INTARIS_CHECKPOINT_INTERVAL))
+    TOOLS_LIST=$(echo "$RECENT_TOOLS" | jq -r 'join(", ")' 2>/dev/null || echo "unknown")
+    CHECKPOINT_CONTENT="Checkpoint #${CHECKPOINT_NUM}: ${CALL_COUNT} calls (${APPROVED} approved, ${DENIED} denied, ${ESCALATED} escalated). Recent tools: ${TOOLS_LIST}"
+
+    CHECKPOINT_BODY=$(jq -n \
+        --arg sid "$INTARIS_SESSION_ID" \
+        --arg content "$CHECKPOINT_CONTENT" \
+        '{session_id: $sid, content: $content}')
+
+    log "Sending checkpoint #${CHECKPOINT_NUM}"
+    curl -s --max-time 2 \
+        -X POST \
+        "${HEADERS[@]}" \
+        -d "$CHECKPOINT_BODY" \
+        "${INTARIS_URL}/api/v1/checkpoint" >/dev/null 2>&1 || true
+fi
+
+# -- Output Decision --------------------------------------------------------
 
 case "$DECISION" in
     approve)
