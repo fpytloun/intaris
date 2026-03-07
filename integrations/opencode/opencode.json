@@ -1,0 +1,13 @@
+{
+  "mcp": {
+    "intaris": {
+      "type": "remote",
+      "url": "http://localhost:8060/mcp",
+      "headers": {
+        "Authorization": "Bearer your-api-key",
+        "X-Agent-Id": "opencode",
+        "X-Intaris-Intention": "OpenCode coding session"
+      }
+    }
+  }
+}

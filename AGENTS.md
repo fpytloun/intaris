@@ -15,6 +15,17 @@
 
 ```
 intaris/
+├── integrations/
+│   ├── opencode/
+│   │   ├── intaris.ts     # TypeScript plugin (tool.execute.before interception)
+│   │   ├── opencode.json  # MCP proxy config example
+│   │   └── README.md      # Setup and usage guide
+│   └── claude-code/
+│       ├── hooks.json     # Hook configuration (SessionStart + PreToolUse)
+│       ├── scripts/
+│       │   ├── session.sh # SessionStart handler (creates Intaris session)
+│       │   └── evaluate.sh # PreToolUse handler (calls /api/v1/evaluate)
+│       └── README.md      # Setup and usage guide
 ├── server.py              # HTTP server entry point, health endpoint, auth middleware, lifespan, MCP mount
 ├── config.py              # Configuration from environment variables (dataclasses)
 ├── crypto.py              # Fernet encryption/decryption for secrets at rest
@@ -449,3 +460,38 @@ File-defined servers are stored with `source="file"` in the database. On startup
 - **Session policy**: Uses fnmatch glob patterns (NOT regex) for custom allow/deny rules to prevent ReDoS attacks.
 - **Redaction immutability**: `redact()` always returns a deep copy. Never mutates input args.
 - **Sub-app state propagation**: The Starlette parent app initializes `rate_limiter`, `webhook`, `event_bus`, and `mcp_proxy` in its lifespan, then propagates them to the FastAPI sub-app's `state`. This is necessary because `request.app` in FastAPI endpoints refers to the sub-app, not the parent.
+
+## Integrations
+
+Client integrations live in `integrations/` and provide two approaches for each tool:
+
+1. **REST API plugin** (recommended): Intercepts tool calls in the client and evaluates them via `POST /api/v1/evaluate`. Gives fine-grained control over error messages, fail-open/fail-closed behavior, and session lifecycle.
+2. **MCP proxy**: Configures the client to point at Intaris's `/mcp` endpoint. Zero code — just configuration. Full MCP proxy features (tool preferences, escalation retry, namespacing).
+
+**Do not use both approaches simultaneously** — tool calls would be evaluated twice.
+
+### OpenCode
+
+- **Plugin**: `integrations/opencode/intaris.ts` — TypeScript plugin using `tool.execute.before` hook. Creates Intaris sessions on `session.created`, evaluates every tool call before execution.
+- **MCP config**: `integrations/opencode/opencode.json` — Remote MCP server pointing at `/mcp`.
+- **Env vars**: `INTARIS_URL`, `INTARIS_API_KEY`, `INTARIS_AGENT_ID` (default: `opencode`), `INTARIS_USER_ID`, `INTARIS_FAIL_OPEN` (default: `false`), `INTARIS_INTENTION`.
+- **Install**: Copy `intaris.ts` to `~/.config/opencode/plugins/` (global) or `.opencode/plugins/` (project).
+
+### Claude Code
+
+- **Hooks**: `integrations/claude-code/hooks.json` — `SessionStart` creates session, `PreToolUse` evaluates tool calls.
+- **Scripts**: `integrations/claude-code/scripts/session.sh` and `evaluate.sh` — Bash scripts using `curl` and `jq`.
+- **Env vars**: Same as OpenCode, plus `INTARIS_DEBUG` (default: `false`) for stderr logging.
+- **Install**: Copy scripts to `~/.claude/scripts/`, merge `hooks.json` into `~/.claude/settings.json`.
+
+### Tool name conventions
+
+Different clients use different tool naming conventions:
+
+| Client | Built-in tools | MCP tools |
+|---|---|---|
+| **OpenCode** | `read`, `edit`, `write`, `bash` | MCP tool name directly (e.g., `add_memory`) |
+| **Claude Code** | `Read`, `Edit`, `Write`, `Bash` (capitalized) | `mcp__server__tool` (double underscore, e.g., `mcp__mnemory__add_memory`) |
+| **Intaris MCP proxy** | N/A | `server_name:tool_name` (colon, e.g., `mnemory:add_memory`) |
+
+Session policies (fnmatch patterns) must use the naming convention of the integration approach being used.
