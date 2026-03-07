@@ -134,11 +134,19 @@ class ServerConfig:
 class WebhookConfig:
     """Webhook callback configuration (for Cognis integration).
 
-    Deferred to Week 2 — schema defined here for config completeness.
+    When configured, Intaris sends an HMAC-signed HTTP POST to the webhook
+    URL on every escalation decision. This enables Cognis (or any external
+    system) to populate an approval queue.
     """
 
     url: str = field(default_factory=lambda: _env("WEBHOOK_URL"))
     secret: str = field(default_factory=lambda: _env("WEBHOOK_SECRET"))
+    timeout_ms: int = field(
+        default_factory=lambda: _env_int("WEBHOOK_TIMEOUT_MS", 3000)
+    )
+    # Base URL for constructing intaris_url in webhook payloads.
+    # If unset, derived from the request Host header (less secure).
+    base_url: str = field(default_factory=lambda: _env("INTARIS_BASE_URL"))
 
 
 @dataclass
@@ -171,6 +179,13 @@ class Config:
             raise ValueError(
                 "INTARIS_API_KEYS is set but could not be parsed. "
                 'Must be a JSON object: {"key": "username", ...}'
+            )
+
+        # Webhook secret is required when webhook URL is configured.
+        if self.webhook.url and not self.webhook.secret:
+            raise ValueError(
+                "WEBHOOK_SECRET is required when WEBHOOK_URL is set. "
+                "Unsigned webhooks are not allowed."
             )
 
 

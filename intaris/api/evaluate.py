@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from intaris.api.deps import SessionContext, get_session_context
 from intaris.api.schemas import EvaluateRequest, EvaluateResponse
@@ -17,20 +18,33 @@ router = APIRouter()
 @router.post("/evaluate", response_model=EvaluateResponse)
 async def evaluate(
     request: EvaluateRequest,
+    http_request: Request,
     ctx: SessionContext = Depends(get_session_context),
 ) -> EvaluateResponse:
     """Evaluate a tool call for safety and intention alignment.
 
     Runs the full evaluation pipeline:
-    1. Classify (read-only allowlist -> auto-approve)
-    2. Critical pattern check (-> auto-deny)
-    3. LLM safety evaluation (-> decision matrix)
-    4. Audit logging
-    5. Session counter update
+    1. Rate limit check
+    2. Classify (read-only allowlist -> auto-approve)
+    3. Critical pattern check (-> auto-deny)
+    4. LLM safety evaluation (-> decision matrix)
+    5. Audit logging
+    6. Session counter update
+    7. Webhook notification (async, fire-and-forget) on escalation
+    8. EventBus publish
 
     Returns the decision with reasoning, risk level, and latency.
     """
     from intaris.server import _get_evaluator
+
+    # Rate limit check
+    rate_limiter = getattr(http_request.app.state, "rate_limiter", None)
+    if rate_limiter is not None:
+        if not rate_limiter.check_and_record(ctx.user_id, request.session_id):
+            raise HTTPException(
+                status_code=429,
+                detail="Rate limit exceeded: max evaluations per session per minute",
+            )
 
     try:
         evaluator = _get_evaluator()
@@ -44,6 +58,45 @@ async def evaluate(
             args=request.args,
             context=request.context,
         )
+
+        # Fire-and-forget webhook on escalation
+        webhook = getattr(http_request.app.state, "webhook", None)
+        if (
+            webhook is not None
+            and webhook.is_configured()
+            and result.get("decision") == "escalate"
+        ):
+            asyncio.create_task(
+                webhook.send_escalation(
+                    call_id=result["call_id"],
+                    session_id=request.session_id,
+                    user_id=ctx.user_id,
+                    agent_id=agent_id,
+                    tool=request.tool,
+                    args_redacted=result.get("args_redacted"),
+                    risk=result.get("risk"),
+                    reasoning=result.get("reasoning"),
+                )
+            )
+
+        # Publish event to EventBus
+        event_bus = getattr(http_request.app.state, "event_bus", None)
+        if event_bus is not None:
+            event_bus.publish(
+                {
+                    "type": "evaluated",
+                    "call_id": result["call_id"],
+                    "session_id": request.session_id,
+                    "user_id": ctx.user_id,
+                    "agent_id": agent_id,
+                    "decision": result["decision"],
+                    "risk": result.get("risk"),
+                    "path": result["path"],
+                    "latency_ms": result["latency_ms"],
+                    "tool": request.tool,
+                }
+            )
+
         return EvaluateResponse(**result)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e

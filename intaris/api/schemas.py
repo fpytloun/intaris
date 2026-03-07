@@ -132,6 +132,32 @@ class AuditListResponse(BaseModel):
     pages: int
 
 
+# ── Session List ──────────────────────────────────────────────────────
+
+
+class SessionListResponse(BaseModel):
+    """Paginated session list response."""
+
+    items: list[SessionResponse]
+    total: int
+    page: int
+    pages: int
+
+
+class StatusUpdateRequest(BaseModel):
+    """Request to update session status."""
+
+    status: Literal["active", "completed", "suspended", "terminated"] = Field(
+        ..., description="New session status"
+    )
+
+
+class StatusUpdateResponse(BaseModel):
+    """Response from session status update."""
+
+    ok: bool = True
+
+
 # ── Error ─────────────────────────────────────────────────────────────
 
 

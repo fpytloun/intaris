@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from intaris.api.deps import SessionContext, get_session_context
 from intaris.api.schemas import (
     IntentionRequest,
     IntentionResponse,
+    SessionListResponse,
     SessionResponse,
+    StatusUpdateRequest,
+    StatusUpdateResponse,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,4 +74,62 @@ async def get_session(
         raise HTTPException(
             status_code=500,
             detail="Internal error fetching session",
+        )
+
+
+@router.get("/sessions", response_model=SessionListResponse)
+async def list_sessions(
+    ctx: SessionContext = Depends(get_session_context),
+    status: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    limit: int = Query(50, ge=1, le=200),
+) -> SessionListResponse:
+    """List sessions with optional status filter and pagination."""
+    from intaris.server import _get_db
+    from intaris.session import SessionStore
+
+    try:
+        store = SessionStore(_get_db())
+        result = store.list_sessions(
+            user_id=ctx.user_id,
+            status=status,
+            page=page,
+            limit=limit,
+        )
+        return SessionListResponse(**result)
+    except Exception:
+        logger.exception("Error in /sessions")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error listing sessions",
+        )
+
+
+@router.patch("/session/{session_id}/status", response_model=StatusUpdateResponse)
+async def update_session_status(
+    session_id: str,
+    request: StatusUpdateRequest,
+    ctx: SessionContext = Depends(get_session_context),
+) -> StatusUpdateResponse:
+    """Update session status.
+
+    Verifies session ownership before allowing the update.
+    """
+    from intaris.server import _get_db
+    from intaris.session import SessionStore
+
+    try:
+        store = SessionStore(_get_db())
+        store.update_status(session_id, request.status, user_id=ctx.user_id)
+        return StatusUpdateResponse(ok=True)
+    except ValueError as e:
+        detail = str(e)
+        if "not found" in detail:
+            raise HTTPException(status_code=404, detail=detail) from e
+        raise HTTPException(status_code=400, detail=detail) from e
+    except Exception:
+        logger.exception("Error in /session/{session_id}/status")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error updating session status",
         )

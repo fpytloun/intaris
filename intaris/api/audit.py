@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from intaris.api.deps import SessionContext, get_session_context
 from intaris.api.schemas import (
@@ -89,6 +89,7 @@ async def get_audit_record(
 @router.post("/decision", response_model=DecisionResponse)
 async def resolve_decision(
     request: DecisionRequest,
+    http_request: Request,
     ctx: SessionContext = Depends(get_session_context),
 ) -> DecisionResponse:
     """Resolve an escalated tool call.
@@ -107,6 +108,26 @@ async def resolve_decision(
             user_note=request.note,
             user_id=ctx.user_id,
         )
+
+        # Publish event to EventBus
+        event_bus = getattr(http_request.app.state, "event_bus", None)
+        if event_bus is not None:
+            # Look up the audit record to get session_id
+            try:
+                record = store.get_by_call_id(request.call_id, user_id=ctx.user_id)
+                event_bus.publish(
+                    {
+                        "type": "decided",
+                        "call_id": request.call_id,
+                        "session_id": record.get("session_id"),
+                        "user_id": ctx.user_id,
+                        "user_decision": request.decision,
+                        "user_note": request.note,
+                    }
+                )
+            except ValueError:
+                pass  # Record not found — skip event
+
         return DecisionResponse(ok=True)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

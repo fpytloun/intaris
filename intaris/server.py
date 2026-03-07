@@ -20,7 +20,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount, Route
+from starlette.routing import Mount, Route, WebSocketRoute
 
 from intaris import __version__
 from intaris.config import load_config
@@ -216,9 +216,42 @@ async def lifespan(app):
     _get_db()
     logger.info("Database initialized")
 
+    # Initialize rate limiter
+    cfg = _get_config()
+    from intaris.ratelimit import RateLimiter
+
+    app.state.rate_limiter = RateLimiter(
+        max_calls=cfg.server.rate_limit, window_seconds=60
+    )
+    logger.info("Rate limiter initialized (max=%d/min)", cfg.server.rate_limit)
+
+    # Initialize webhook client
+    from intaris.webhook import WebhookClient
+
+    app.state.webhook = WebhookClient(cfg.webhook)
+    if app.state.webhook.is_configured():
+        logger.info("Webhook client initialized (url=%s)", cfg.webhook.url)
+    else:
+        logger.info("Webhook not configured (standalone mode)")
+
+    # Initialize EventBus
+    from intaris.api.stream import EventBus
+
+    app.state.event_bus = EventBus()
+    logger.info("EventBus initialized")
+
+    # Propagate state to FastAPI sub-app so endpoints can access it
+    # via request.app.state (request.app is the sub-app, not parent)
+    api_app = getattr(app.state, "_api_app", None)
+    if api_app is not None:
+        api_app.state.rate_limiter = app.state.rate_limiter
+        api_app.state.webhook = app.state.webhook
+        api_app.state.event_bus = app.state.event_bus
+
     yield
 
     # Cleanup
+    await app.state.webhook.close()
     db = _get_db()
     db.close()
     logger.info("Intaris shutting down")
@@ -228,16 +261,24 @@ def create_app() -> Starlette:
     """Create the Starlette application."""
     middleware = [Middleware(APIKeyMiddleware)]
 
+    from intaris.api.stream import stream_websocket
+
+    api_app = _create_api_app()
+
     routes = [
         Route("/health", health_check),
-        Mount("/api/v1", app=_create_api_app()),
+        Mount("/api/v1", app=api_app),
+        WebSocketRoute("/api/v1/stream", stream_websocket),
     ]
 
-    return Starlette(
+    starlette_app = Starlette(
         routes=routes,
         middleware=middleware,
         lifespan=lifespan,
     )
+    # Store reference to sub-app so lifespan can propagate state
+    starlette_app.state._api_app = api_app
+    return starlette_app
 
 
 def _create_api_app():

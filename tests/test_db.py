@@ -111,8 +111,10 @@ class TestSessionStore:
     def test_list_sessions(self, session_store):
         session_store.create(user_id=TEST_USER, session_id="sess_a", intention="A")
         session_store.create(user_id=TEST_USER, session_id="sess_b", intention="B")
-        sessions = session_store.list_sessions(user_id=TEST_USER)
-        assert len(sessions) == 2
+        result = session_store.list_sessions(user_id=TEST_USER)
+        assert result["total"] == 2
+        assert len(result["items"]) == 2
+        assert result["page"] == 1
 
     def test_list_sessions_by_status(self, session_store):
         session_store.create(
@@ -123,9 +125,10 @@ class TestSessionStore:
         )
         session_store.update_status("sess_done", "completed", user_id=TEST_USER)
 
-        active = session_store.list_sessions(user_id=TEST_USER, status="active")
-        assert len(active) == 1
-        assert active[0]["session_id"] == "sess_active"
+        result = session_store.list_sessions(user_id=TEST_USER, status="active")
+        assert result["total"] == 1
+        assert len(result["items"]) == 1
+        assert result["items"][0]["session_id"] == "sess_active"
 
 
 class TestSessionIsolation:
@@ -142,8 +145,9 @@ class TestSessionIsolation:
         session_store.create(
             user_id=TEST_USER, session_id="sess_iso2", intention="Test"
         )
-        sessions = session_store.list_sessions(user_id=OTHER_USER)
-        assert len(sessions) == 0
+        result = session_store.list_sessions(user_id=OTHER_USER)
+        assert result["total"] == 0
+        assert len(result["items"]) == 0
 
     def test_cross_user_update_not_found(self, session_store):
         """User B cannot update User A's session."""

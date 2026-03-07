@@ -93,6 +93,38 @@ class Evaluator:
         # Get session for intention and policy (verifies ownership)
         session = self._sessions.get(session_id, user_id=user_id)
 
+        # Check session status — deny evaluation for inactive sessions
+        session_status = session.get("status", "active")
+        if session_status in ("suspended", "terminated"):
+            latency_ms = int((time.monotonic() - start_time) * 1000)
+            self._audit.insert(
+                call_id=call_id,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                tool=tool,
+                args_redacted=redact(args),
+                classification="write",
+                evaluation_path="fast",
+                decision="deny",
+                risk="low",
+                reasoning=f"Session is {session_status} — evaluation denied",
+                latency_ms=latency_ms,
+            )
+            try:
+                self._sessions.increment_counter(session_id, "deny", user_id=user_id)
+            except ValueError:
+                pass
+            return {
+                "call_id": call_id,
+                "decision": "deny",
+                "reasoning": f"Session is {session_status} — evaluation denied",
+                "risk": "low",
+                "path": "fast",
+                "latency_ms": latency_ms,
+                "args_redacted": redact(args),
+            }
+
         # Redact secrets from args
         args_redacted = redact(args)
 
@@ -157,6 +189,7 @@ class Evaluator:
             "risk": decision.risk,
             "path": decision.path,
             "latency_ms": latency_ms,
+            "args_redacted": args_redacted,
         }
 
     def _llm_evaluate(

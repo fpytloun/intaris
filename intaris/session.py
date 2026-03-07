@@ -184,28 +184,46 @@ class SessionStore:
         *,
         user_id: str,
         status: str | None = None,
+        page: int = 1,
         limit: int = 50,
-    ) -> list[dict[str, Any]]:
-        """List sessions for a user, optionally filtered by status.
+    ) -> dict[str, Any]:
+        """List sessions for a user with pagination and optional status filter.
 
         Args:
             user_id: Tenant identifier.
             status: Optional status filter.
-            limit: Max results to return.
+            page: Page number (1-indexed).
+            limit: Max results per page.
 
         Returns:
-            List of session dicts, ordered by most recent first.
+            Dict with items, total, page, pages.
         """
+        offset = (page - 1) * limit
+
         with self._db.cursor() as cur:
+            # Count total matching sessions
+            if status:
+                cur.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND status = ?",
+                    (user_id, status),
+                )
+            else:
+                cur.execute(
+                    "SELECT COUNT(*) FROM sessions WHERE user_id = ?",
+                    (user_id,),
+                )
+            total = cur.fetchone()[0]
+
+            # Fetch page
             if status:
                 cur.execute(
                     """
                     SELECT * FROM sessions
                     WHERE user_id = ? AND status = ?
                     ORDER BY updated_at DESC
-                    LIMIT ?
+                    LIMIT ? OFFSET ?
                     """,
-                    (user_id, status, limit),
+                    (user_id, status, limit, offset),
                 )
             else:
                 cur.execute(
@@ -213,13 +231,19 @@ class SessionStore:
                     SELECT * FROM sessions
                     WHERE user_id = ?
                     ORDER BY updated_at DESC
-                    LIMIT ?
+                    LIMIT ? OFFSET ?
                     """,
-                    (user_id, limit),
+                    (user_id, limit, offset),
                 )
             rows = cur.fetchall()
 
-        return [_row_to_dict(row) for row in rows]
+        pages = max(1, (total + limit - 1) // limit)
+        return {
+            "items": [_row_to_dict(row) for row in rows],
+            "total": total,
+            "page": page,
+            "pages": pages,
+        }
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
