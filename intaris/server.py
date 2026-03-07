@@ -444,8 +444,8 @@ def create_app() -> Starlette:
     routes.extend(
         [
             Route("/health", health_check),
-            Mount("/api/v1", app=api_app),
             WebSocketRoute("/api/v1/stream", stream_websocket),
+            Mount("/api/v1", app=api_app),
         ]
     )
 
