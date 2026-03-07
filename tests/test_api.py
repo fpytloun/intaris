@@ -670,10 +670,13 @@ class TestWhoami:
         assert data["user_id"] == "user-who"
         assert data["agent_id"] == "agent-1"
 
-    def test_whoami_requires_user(self, client_no_auth):
-        """Whoami without user identity returns 401."""
+    def test_whoami_no_user(self, client_no_auth):
+        """Whoami without user identity returns 200 with user_id=null."""
         resp = client_no_auth.get("/api/v1/whoami")
-        assert resp.status_code == 401
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["user_id"] is None
+        assert data["can_switch_user"] is True
 
     def test_whoami_auth_required(self, client_with_auth):
         """Whoami requires auth when configured."""

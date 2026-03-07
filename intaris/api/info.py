@@ -14,18 +14,22 @@ router = APIRouter()
 
 
 @router.get("/whoami")
-async def whoami(
-    ctx: SessionContext = Depends(get_session_context),
-) -> dict:
+async def whoami() -> dict:
     """Return the authenticated user's identity.
 
     Used by the management UI to verify the API key and determine
     whether user switching is allowed.
+
+    Unlike other endpoints, this does NOT require user_id — wildcard
+    API keys and no-auth mode may not have a user bound yet. The UI
+    uses this to decide whether to show the user switcher.
     """
+    from intaris.server import _session_agent_id, _session_user_bound, _session_user_id
+
     return {
-        "user_id": ctx.user_id,
-        "agent_id": ctx.agent_id,
-        "can_switch_user": not ctx.user_bound,
+        "user_id": _session_user_id.get(),
+        "agent_id": _session_agent_id.get(),
+        "can_switch_user": not _session_user_bound.get(),
     }
 
 

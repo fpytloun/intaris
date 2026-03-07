@@ -27,32 +27,41 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    async login(apiKey) {
+    async login(apiKey, userId) {
       this.error = '';
       this.loading = true;
-      IntarisAPI.setKey(apiKey);
+      IntarisAPI.setKey(apiKey || '');
+      // Set user ID before /whoami so X-User-Id header is sent
+      if (userId) {
+        IntarisAPI.setSelectedUser(userId);
+      }
       try {
         const identity = await IntarisAPI.whoami();
         this.identity = identity;
+        // Resolve effective user: from key binding, from header, or from input
+        const effectiveUser = identity.user_id || userId || '';
+        if (!effectiveUser) {
+          throw new Error('User ID is required. Enter a User ID or use a bound API key.');
+        }
         this.authenticated = true;
         if (identity.can_switch_user) {
-          await this.loadUsers();
-          if (!identity.user_id && this.users.length > 0) {
-            this.switchUser(this.users[0]);
-          } else {
-            this.selectedUser = identity.user_id || '';
-            IntarisAPI.setSelectedUser('');
+          // Ensure the selected user is set for subsequent API calls
+          if (!identity.user_id && userId) {
+            IntarisAPI.setSelectedUser(userId);
           }
+          this.selectedUser = effectiveUser;
+          await this.loadUsers();
         } else {
           this.selectedUser = identity.user_id || '';
           IntarisAPI.setSelectedUser('');
         }
       } catch (e) {
         IntarisAPI.clearKey();
+        IntarisAPI.setSelectedUser('');
         this.authenticated = false;
         this.error = e.message === 'Unauthorized'
           ? 'Invalid API key'
-          : `Connection failed: ${e.message}`;
+          : e.message || `Connection failed`;
       } finally {
         this.loading = false;
       }
@@ -63,17 +72,17 @@ document.addEventListener('alpine:init', () => {
       try {
         const identity = await IntarisAPI.whoami();
         this.identity = identity;
+        const stored = IntarisAPI.getSelectedUser();
+        const effectiveUser = identity.user_id || stored || '';
+        if (!effectiveUser) {
+          // No user identity available — need to re-login with User ID
+          this.authenticated = false;
+          return;
+        }
         this.authenticated = true;
         if (identity.can_switch_user) {
+          this.selectedUser = effectiveUser;
           await this.loadUsers();
-          const stored = IntarisAPI.getSelectedUser();
-          if (stored) {
-            this.selectedUser = stored;
-          } else if (identity.user_id) {
-            this.selectedUser = identity.user_id;
-          } else if (this.users.length > 0) {
-            this.switchUser(this.users[0]);
-          }
         } else {
           this.selectedUser = identity.user_id || '';
         }

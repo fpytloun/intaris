@@ -27,31 +27,37 @@
   <!-- ── Login Screen ────────────────────────────────────────── -->
   <div x-show="!$store.auth.loading && !$store.auth.authenticated" x-cloak
        class="fixed inset-0 flex items-center justify-center bg-brand-bg z-40">
-    <div class="card w-full max-w-sm mx-4" x-data="{ key: '' }">
+    <div class="card w-full max-w-sm mx-4" x-data="{ key: '', userId: '' }">
       <div class="text-center mb-8">
         <h1 class="text-3xl font-bold text-brand-accent mb-1">intaris</h1>
         <p class="text-sm text-secondary">Guardrails Management UI</p>
       </div>
 
-      <form @submit.prevent="$store.auth.login(key)" class="space-y-4">
+      <form @submit.prevent="$store.auth.login(key, userId)" class="space-y-4">
         <div>
           <label class="block text-sm text-secondary mb-1.5">API Key</label>
           <input type="password" x-model="key" placeholder="Enter your API key"
-                 class="input" autofocus required>
+                 class="input" autofocus>
+        </div>
+
+        <div>
+          <label class="block text-sm text-secondary mb-1.5">User ID <span class="text-muted">(optional if key is bound)</span></label>
+          <input type="text" x-model="userId" placeholder="e.g. your-username"
+                 class="input">
         </div>
 
         <div x-show="$store.auth.error" x-text="$store.auth.error"
              class="text-sm text-red-400 bg-red-500/10 rounded-lg px-3 py-2"></div>
 
         <button type="submit" class="btn-primary w-full"
-                :disabled="!key || $store.auth.loading">
+                :disabled="(!key && !userId) || $store.auth.loading">
           <span x-show="!$store.auth.loading">Sign In</span>
           <span x-show="$store.auth.loading">Authenticating...</span>
         </button>
       </form>
 
       <p class="text-xs text-muted text-center mt-6">
-        Authenticate with your Intaris API key
+        Enter API key and/or User ID to authenticate
       </p>
     </div>
   </div>
