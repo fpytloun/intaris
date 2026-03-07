@@ -121,23 +121,25 @@ function sessionsTab() {
           session.updated_at = new Date().toISOString();
         }
 
-        // If this session is expanded, add to its audit feed
-        if (this.expandedId === data.session_id) {
-          this.sessionAudit.unshift({
-            call_id: data.call_id,
-            decision: data.decision,
-            tool: data.tool,
-            risk: data.risk,
-            record_type: data.record_type || 'tool_call',
-            classification: data.classification,
-            evaluation_path: data.path,
-            latency_ms: data.latency_ms,
-            session_id: data.session_id,
-            timestamp: data.timestamp || new Date().toISOString(),
-          });
-          if (this.sessionAudit.length > 20) {
-            this.sessionAudit = this.sessionAudit.slice(0, 20);
-          }
+        // If this session is expanded, add to its audit feed.
+        // Deduplicate by call_id to prevent Alpine x-for duplicate key crashes.
+        if (this.expandedId === data.session_id && data.call_id) {
+          const auditCallId = data.call_id;
+          this.sessionAudit = [
+            {
+              call_id: auditCallId,
+              decision: data.decision,
+              tool: data.tool,
+              risk: data.risk,
+              record_type: data.record_type || 'tool_call',
+              classification: data.classification,
+              evaluation_path: data.path,
+              latency_ms: data.latency_ms,
+              session_id: data.session_id,
+              timestamp: data.timestamp || new Date().toISOString(),
+            },
+            ...this.sessionAudit.filter(r => r.call_id !== auditCallId),
+          ].slice(0, 20);
         }
       }
     },

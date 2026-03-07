@@ -74,20 +74,25 @@ function dashboardTab() {
         const approved = this.stats.decisions.approve || 0;
         this.stats.approval_rate = Math.round((approved / total) * 100);
 
-        // Prepend to recent activity (keep last 10)
-        this.recentActivity.unshift({
-          call_id: data.call_id,
-          decision: data.decision,
-          tool: data.tool,
-          record_type: data.record_type || 'tool_call',
-          risk: data.risk,
-          session_id: data.session_id,
-          timestamp: data.timestamp || new Date().toISOString(),
-          evaluation_path: data.path,
-          latency_ms: data.latency_ms,
-        });
-        if (this.recentActivity.length > 10) {
-          this.recentActivity = this.recentActivity.slice(0, 10);
+        // Prepend to recent activity (keep last 10).
+        // Deduplicate by call_id to prevent Alpine x-for duplicate key crashes
+        // when a WebSocket event arrives for a record already loaded via REST.
+        const callId = data.call_id;
+        if (callId) {
+          this.recentActivity = [
+            {
+              call_id: callId,
+              decision: data.decision,
+              tool: data.tool,
+              record_type: data.record_type || 'tool_call',
+              risk: data.risk,
+              session_id: data.session_id,
+              timestamp: data.timestamp || new Date().toISOString(),
+              evaluation_path: data.path,
+              latency_ms: data.latency_ms,
+            },
+            ...this.recentActivity.filter(r => r.call_id !== callId),
+          ].slice(0, 10);
         }
       }
 
