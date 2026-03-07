@@ -182,6 +182,10 @@ const IntarisAPI = {
     return this.del(`/mcp/servers/${encodeURIComponent(name)}`);
   },
 
+  refreshMCPServerTools(name) {
+    return this.post(`/mcp/servers/${encodeURIComponent(name)}/refresh`);
+  },
+
   getMCPToolPreferences(serverName) {
     return this.get(`/mcp/servers/${encodeURIComponent(serverName)}/preferences`);
   },

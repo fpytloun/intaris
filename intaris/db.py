@@ -99,6 +99,12 @@ class Database:
             conn.execute("ALTER TABLE audit_log ADD COLUMN args_hash TEXT")
             logger.info("Migration: added args_hash column to audit_log")
 
+        # Migration: create escalation retry index (requires args_hash column)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_escalation_retry "
+            "ON audit_log(user_id, session_id, tool, args_hash, user_decision)"
+        )
+
     @staticmethod
     def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
         """Check if a column exists in a table."""
@@ -205,8 +211,4 @@ CREATE TABLE IF NOT EXISTS mcp_tool_preferences (
     FOREIGN KEY (user_id, server_name) REFERENCES mcp_servers(user_id, name)
         ON DELETE CASCADE
 );
-
--- MCP proxy: index for escalation retry lookup
-CREATE INDEX IF NOT EXISTS idx_audit_escalation_retry
-    ON audit_log(user_id, session_id, tool, args_hash, user_decision);
 """

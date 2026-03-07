@@ -443,6 +443,7 @@ File-defined servers are stored with `source="file"` in the database. On startup
 | `/api/v1/mcp/servers/{name}` | GET | Get a single server config |
 | `/api/v1/mcp/servers/{name}` | PUT | Create or update a server |
 | `/api/v1/mcp/servers/{name}` | DELETE | Delete a server |
+| `/api/v1/mcp/servers/{name}/refresh` | POST | Force-refresh tools cache from upstream |
 | `/api/v1/mcp/servers/{name}/tools/{tool}/preference` | GET | Get tool preference |
 | `/api/v1/mcp/servers/{name}/tools/{tool}/preference` | PUT | Set tool preference |
 | `/api/v1/mcp/servers/{name}/tools/{tool}/preference` | DELETE | Remove tool preference |

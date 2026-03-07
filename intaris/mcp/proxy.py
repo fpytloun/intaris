@@ -126,6 +126,65 @@ class MCPProxy:
         self._session_map.clear()
         self._user_session_index.clear()
 
+    async def refresh_server_tools(
+        self,
+        *,
+        user_id: str,
+        server_name: str,
+    ) -> list[dict[str, Any]]:
+        """Connect to an upstream server, fetch tools, and update the cache.
+
+        Used by the REST API to force-refresh the tools cache for a
+        specific server. Raises ValueError if the server is not found.
+
+        Returns:
+            List of tool definitions (name, description, inputSchema).
+        """
+        server_cfg = await asyncio.to_thread(
+            self._server_store.get_server,
+            user_id=user_id,
+            name=server_name,
+            decrypt_secrets=True,
+        )
+        if server_cfg is None:
+            raise ValueError(f"Server not found: {server_name}")
+
+        mcp_session_id = self._get_or_create_mcp_session_id(user_id, None)
+        client = await self._conn_mgr.get_or_connect(
+            mcp_session_id=mcp_session_id,
+            server_config=server_cfg,
+            user_id=user_id,
+        )
+        result = await client.list_tools()
+        tools_cache = [
+            {
+                "name": t.name,
+                "description": t.description,
+                "inputSchema": t.inputSchema,
+            }
+            for t in result.tools
+        ]
+
+        # Cache the tools and server instructions.
+        instructions = self._conn_mgr.get_server_instructions(
+            mcp_session_id, server_name
+        )
+        await asyncio.to_thread(
+            self._server_store.update_tools_cache,
+            user_id=user_id,
+            name=server_name,
+            tools=tools_cache,
+            server_instructions=instructions,
+        )
+
+        logger.info(
+            "Refreshed tools for server '%s' (user=%s): %d tools",
+            server_name,
+            user_id,
+            len(tools_cache),
+        )
+        return tools_cache
+
     def _register_handlers(self) -> None:
         """Register MCP protocol handlers on the server."""
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from intaris.api.deps import SessionContext, get_session_context
@@ -199,6 +199,39 @@ async def delete_server(
     except Exception as exc:
         logger.exception("Failed to delete MCP server %s", name)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/servers/{name}/refresh")
+async def refresh_server_tools(
+    name: str,
+    request: Request,
+    ctx: SessionContext = Depends(get_session_context),
+):
+    """Force-refresh the tools cache for an MCP server.
+
+    Connects to the upstream server, fetches the current tool list,
+    and updates the cache. Returns the refreshed tool list.
+    """
+    from intaris.mcp.proxy import MCPProxy
+
+    mcp_proxy: MCPProxy | None = getattr(request.app.state, "mcp_proxy", None)
+    if mcp_proxy is None:
+        raise HTTPException(
+            status_code=503,
+            detail="MCP proxy is not available",
+        )
+
+    try:
+        tools = await mcp_proxy.refresh_server_tools(
+            user_id=ctx.user_id,
+            server_name=name,
+        )
+        return {"tools": tools, "count": len(tools)}
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to refresh tools for server %s", name)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 # ── Tool Preferences ─────────────────────────────────────────────────

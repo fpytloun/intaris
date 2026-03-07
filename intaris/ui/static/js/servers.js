@@ -11,6 +11,7 @@ function serversTab() {
     servers: [],
     expandedName: null,
     expandedPrefs: {},
+    refreshing: false,
 
     // Add/Edit form state
     showForm: false,
@@ -168,6 +169,21 @@ function serversTab() {
       }
     },
 
+    async refreshTools(server) {
+      this.refreshing = true;
+      try {
+        const data = await IntarisAPI.refreshMCPServerTools(server.name);
+        Alpine.store('notify').success(
+          `Refreshed ${data.count} tool${data.count !== 1 ? 's' : ''} from ${server.name}`
+        );
+        await this.load();
+      } catch (e) {
+        Alpine.store('notify').error('Failed to refresh tools: ' + e.message);
+      } finally {
+        this.refreshing = false;
+      }
+    },
+
     // ── Tool Preferences ──────────────────────────────────────
 
     async setPreference(serverName, toolName, preference) {
@@ -211,6 +227,16 @@ function serversTab() {
         'sse': 'SSE',
       };
       return map[transport] || transport;
+    },
+
+    formatCacheTime(isoStr) {
+      if (!isoStr) return '';
+      try {
+        const d = new Date(isoStr);
+        return d.toLocaleString();
+      } catch {
+        return isoStr;
+      }
     },
   };
 }

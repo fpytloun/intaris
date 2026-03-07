@@ -559,7 +559,16 @@
                   <span class="text-xs text-muted" x-text="server.source === 'file' ? '(file)' : ''"></span>
                 </div>
                 <div class="flex items-center gap-3 text-xs text-muted">
-                  <span x-text="(server.tools_cache || []).length + ' tools'" x-show="server.tools_cache"></span>
+                  <span class="flex items-center gap-1" x-show="server.tools_cache">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>
+                    <span x-text="(server.tools_cache || []).length + ' tools'"></span>
+                  </span>
+                  <span class="flex items-center gap-1" x-show="!server.tools_cache">
+                    <span class="w-2 h-2 rounded-full bg-zinc-500 inline-block"></span>
+                    <span>no tools</span>
+                  </span>
+                  <span x-show="server.tools_cache_at" class="text-xs text-muted"
+                        x-text="'cached ' + formatCacheTime(server.tools_cache_at)"></span>
                   <span x-text="server.agent_pattern !== '*' ? 'agent: ' + server.agent_pattern : ''"></span>
                 </div>
               </div>
@@ -593,9 +602,23 @@
                 </div>
 
                 <!-- Tools with Preferences -->
-                <div x-show="server.tools_cache && server.tools_cache.length > 0" class="mb-4">
-                  <div class="text-xs text-muted mb-2">Tools</div>
-                  <div class="space-y-1">
+                <div class="mb-4">
+                  <div class="flex items-center justify-between mb-2">
+                    <div class="text-xs text-muted">Tools</div>
+                    <button @click.stop="refreshTools(server)"
+                            :disabled="refreshing"
+                            class="btn-secondary text-xs py-0.5 px-2 flex items-center gap-1">
+                      <svg x-show="refreshing" class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+                      </svg>
+                      <span x-text="refreshing ? 'Refreshing...' : 'Refresh Tools'"></span>
+                    </button>
+                  </div>
+                  <div x-show="!server.tools_cache || server.tools_cache.length === 0" class="text-xs text-muted py-3 text-center bg-brand-elevated rounded">
+                    No tools discovered yet — click Refresh Tools to fetch from upstream.
+                  </div>
+                  <div x-show="server.tools_cache && server.tools_cache.length > 0" class="space-y-1">
                     <template x-for="tool in server.tools_cache" :key="tool.name">
                       <div class="flex items-center justify-between py-1.5 border-b border-brand-border last:border-0">
                         <div class="flex items-center gap-2">
