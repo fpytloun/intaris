@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
+import threading
 import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
@@ -386,35 +388,52 @@ class MCPConnectionManager:
                 await self._close_connection(key)
 
 
-class _StderrLogger(io.StringIO):
-    """Captures subprocess stderr and routes it to Python logging.
+class _StderrLogger(io.RawIOBase):
+    """Routes subprocess stderr to Python logging via an OS pipe.
 
     Used as the errlog parameter for stdio_client to capture upstream
     server error output with proper server name prefixing.
 
-    Inherits from StringIO to satisfy the TextIO protocol expected
-    by stdio_client.
+    Uses a real OS pipe so that subprocess.Popen can wire up the child
+    process's stderr via fileno(). A background daemon thread reads
+    from the pipe and routes complete lines through Python logging.
     """
 
     def __init__(self, server_name: str):
         super().__init__()
         self._server_name = server_name
-        self._line_buffer = ""
+        self._read_fd, self._write_fd = os.pipe()
+        self._thread = threading.Thread(
+            target=self._reader_loop, daemon=True, name=f"stderr-{server_name}"
+        )
+        self._thread.start()
 
-    def write(self, s: str) -> int:
-        """Buffer and log complete lines from stderr."""
-        self._line_buffer += s
-        while "\n" in self._line_buffer:
-            line, self._line_buffer = self._line_buffer.split("\n", 1)
-            if line.strip():
-                logger.warning("[%s stderr] %s", self._server_name, line.rstrip())
-        return len(s)
+    def _reader_loop(self) -> None:
+        """Read lines from the pipe and log them."""
+        try:
+            with os.fdopen(self._read_fd, "r", errors="replace") as f:
+                for line in f:
+                    stripped = line.rstrip()
+                    if stripped:
+                        logger.warning("[%s stderr] %s", self._server_name, stripped)
+        except Exception:
+            pass  # Pipe closed — subprocess exited.
 
-    def flush(self) -> None:
-        """Flush any remaining buffered content."""
-        if self._line_buffer.strip():
-            logger.warning(
-                "[%s stderr] %s", self._server_name, self._line_buffer.rstrip()
-            )
-            self._line_buffer = ""
-        super().flush()
+    def fileno(self) -> int:
+        """Return the write end of the pipe for subprocess stderr."""
+        return self._write_fd
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, b: bytes | bytearray) -> int:
+        """Write bytes to the pipe (used if called directly)."""
+        return os.write(self._write_fd, b)
+
+    def close(self) -> None:
+        """Close the write end of the pipe."""
+        try:
+            os.close(self._write_fd)
+        except OSError:
+            pass  # Already closed.
+        super().close()
