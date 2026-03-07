@@ -380,7 +380,7 @@ class SessionStore:
                     """
                     SELECT * FROM sessions
                     WHERE user_id = ? AND status = ?
-                    ORDER BY updated_at DESC
+                    ORDER BY created_at DESC
                     LIMIT ? OFFSET ?
                     """,
                     (user_id, status, limit, offset),
@@ -390,7 +390,7 @@ class SessionStore:
                     """
                     SELECT * FROM sessions
                     WHERE user_id = ?
-                    ORDER BY updated_at DESC
+                    ORDER BY created_at DESC
                     LIMIT ? OFFSET ?
                     """,
                     (user_id, limit, offset),

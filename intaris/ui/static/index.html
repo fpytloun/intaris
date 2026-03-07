@@ -249,22 +249,24 @@
                   <span x-show="session._depth > 0" class="tree-connector text-muted">&#x2514;</span>
                   <span :class="statusBadgeClass(session.status)" x-text="session.status"></span>
                   <span class="font-mono text-sm text-brand-accent" x-text="session.session_id"></span>
-                  <span x-show="session.parent_session_id" class="text-xs text-muted"
-                        x-text="session.details?.agent_type ? '(' + session.details.agent_type + ')' : '(child)'"></span>
+                  <span x-show="session.parent_session_id && !session.details?.agent_type" class="text-xs text-muted">(child)</span>
                   <!-- Child count indicator when collapsed -->
                   <span x-show="treeView && session._children.length > 0 && collapsedSessions[session.session_id]"
                         class="text-xs text-muted"
                         x-text="'(' + session._children.length + ' sub)'"></span>
                 </div>
                 <div class="flex items-center gap-4 text-sm text-muted">
+                  <span x-show="session.details?.agent_type" class="font-mono text-xs"
+                        x-text="session.details?.agent_type"></span>
                   <span x-text="session.total_calls + ' calls'"></span>
-                  <span x-text="formatTime(session.created_at)"></span>
+                  <span x-text="formatTime(session.last_activity_at || session.created_at)"
+                        :title="'Created: ' + formatTime(session.created_at)"></span>
                 </div>
               </div>
               <div class="mt-2 text-sm text-secondary" x-text="truncate(session.intention, 120)"></div>
 
               <!-- Expanded Detail -->
-              <div x-show="expandedId === session.session_id" x-cloak class="mt-4 pt-4 border-t border-brand-border">
+              <div x-show="expandedId === session.session_id" x-cloak @click.stop class="mt-4 pt-4 border-t border-brand-border">
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
                   <div class="text-center">
                     <div class="text-lg font-bold text-emerald-400" x-text="session.approved_count"></div>
@@ -282,6 +284,14 @@
                     <div class="text-lg font-bold" x-text="session.total_calls"></div>
                     <div class="text-xs text-muted">Total</div>
                   </div>
+                </div>
+
+                <!-- Session Metadata -->
+                <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted mb-4">
+                  <div>Created: <span x-text="formatTime(session.created_at)"></span></div>
+                  <div>Last Active: <span x-text="formatTime(session.last_activity_at || session.created_at)"></span></div>
+                  <div x-show="session.details?.agent_type">Agent: <span class="font-mono" x-text="session.details?.agent_type"></span></div>
+                  <div>User: <span class="font-mono" x-text="session.user_id"></span></div>
                 </div>
 
                 <!-- Intention -->
@@ -443,6 +453,7 @@
                   <span :class="pathBadgeClass(r.evaluation_path)" x-text="r.evaluation_path"></span>
                 </div>
                 <div class="flex items-center gap-3 text-xs text-muted">
+                  <span x-show="r.agent_id" class="font-mono" x-text="r.agent_id"></span>
                   <span x-text="r.session_id"></span>
                   <span x-text="formatTime(r.timestamp)"></span>
                   <span x-text="r.latency_ms + 'ms'"></span>

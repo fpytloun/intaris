@@ -116,6 +116,18 @@ class TestSessionStore:
         assert len(result["items"]) == 2
         assert result["page"] == 1
 
+    def test_list_sessions_sorted_newest_first(self, session_store):
+        """Sessions are returned newest-created first (stable sort)."""
+        import time
+
+        session_store.create(user_id=TEST_USER, session_id="sess_old", intention="Old")
+        time.sleep(0.02)
+        session_store.create(user_id=TEST_USER, session_id="sess_new", intention="New")
+
+        result = session_store.list_sessions(user_id=TEST_USER)
+        assert result["items"][0]["session_id"] == "sess_new"
+        assert result["items"][1]["session_id"] == "sess_old"
+
     def test_list_sessions_by_status(self, session_store):
         session_store.create(
             user_id=TEST_USER, session_id="sess_active", intention="Active"

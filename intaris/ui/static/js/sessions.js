@@ -53,6 +53,7 @@ function sessionsTab() {
             escalated_count: 0,
             parent_session_id: data.parent_session_id || null,
             details: data.details || null,
+            last_activity_at: new Date().toISOString(),
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           });
@@ -64,6 +65,7 @@ function sessionsTab() {
         const session = this.sessions.find(s => s.session_id === data.session_id);
         if (session) {
           session.status = data.status;
+          session.last_activity_at = new Date().toISOString();
           session.updated_at = new Date().toISOString();
         }
       }
@@ -73,12 +75,14 @@ function sessionsTab() {
         if (session) {
           if (data.intention) session.intention = data.intention;
           if (data.details) session.details = data.details;
+          session.last_activity_at = new Date().toISOString();
           session.updated_at = new Date().toISOString();
         }
         // Also update the expanded session if it's the same one
         if (this.expandedSession && this.expandedSession.session_id === data.session_id) {
           if (data.intention) this.expandedSession.intention = data.intention;
           if (data.details) this.expandedSession.details = data.details;
+          this.expandedSession.last_activity_at = new Date().toISOString();
         }
       }
 
@@ -90,6 +94,7 @@ function sessionsTab() {
           if (data.decision === 'approve') session.approved_count = (session.approved_count || 0) + 1;
           else if (data.decision === 'deny') session.denied_count = (session.denied_count || 0) + 1;
           else if (data.decision === 'escalate') session.escalated_count = (session.escalated_count || 0) + 1;
+          session.last_activity_at = new Date().toISOString();
           session.updated_at = new Date().toISOString();
         }
 
@@ -179,7 +184,7 @@ function sessionsTab() {
       const result = [];
       for (const root of roots) {
         // Sort children by created_at
-        root._children.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+        root._children.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
         result.push(root);
         if (!this.collapsedSessions[root.session_id]) {
           for (const child of root._children) {
