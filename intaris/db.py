@@ -78,10 +78,33 @@ class Database:
                 cursor.close()
 
     def _ensure_tables(self) -> None:
-        """Create tables and indexes if they don't exist."""
+        """Create tables and indexes if they don't exist.
+
+        Also runs schema migrations for columns added after initial release.
+        """
         with self.connection() as conn:
             conn.executescript(_SCHEMA_SQL)
+            self._migrate(conn)
         logger.info("Database tables ensured at %s", self._path)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """Run schema migrations for columns added after initial release.
+
+        Uses PRAGMA table_info to detect missing columns and adds them
+        via ALTER TABLE. SQLite does not support ADD COLUMN IF NOT EXISTS,
+        so we check first.
+        """
+        # Migration: add args_hash to audit_log (for MCP proxy escalation retry)
+        if not self._column_exists(conn, "audit_log", "args_hash"):
+            conn.execute("ALTER TABLE audit_log ADD COLUMN args_hash TEXT")
+            logger.info("Migration: added args_hash column to audit_log")
+
+    @staticmethod
+    def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+        """Check if a column exists in a table."""
+        cursor = conn.execute(f"PRAGMA table_info({table})")
+        columns = {row[1] for row in cursor.fetchall()}
+        return column in columns
 
     def close(self) -> None:
         """Close the thread-local connection if open."""
@@ -128,6 +151,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     user_decision TEXT,
     user_note TEXT,
     resolved_at TEXT,
+    args_hash TEXT,
     FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
 );
 
@@ -142,4 +166,47 @@ CREATE INDEX IF NOT EXISTS idx_audit_decision
 
 CREATE INDEX IF NOT EXISTS idx_audit_record_type
     ON audit_log(record_type);
+
+-- MCP proxy: upstream server configurations (per-user)
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    user_id       TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    transport     TEXT NOT NULL,
+    command       TEXT,
+    args          TEXT,
+    env_encrypted TEXT,
+    cwd           TEXT,
+    url           TEXT,
+    headers_encrypted TEXT,
+    agent_pattern TEXT NOT NULL DEFAULT '*',
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    source        TEXT NOT NULL DEFAULT 'api',
+    server_instructions TEXT,
+    tools_cache   TEXT,
+    tools_cache_at TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    PRIMARY KEY (user_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_user
+    ON mcp_servers(user_id, enabled);
+
+-- MCP proxy: per-tool preference overrides
+CREATE TABLE IF NOT EXISTS mcp_tool_preferences (
+    user_id     TEXT NOT NULL,
+    server_name TEXT NOT NULL,
+    tool_name   TEXT NOT NULL,
+    preference  TEXT NOT NULL DEFAULT 'evaluate'
+        CHECK (preference IN ('auto-approve', 'evaluate', 'escalate', 'deny')),
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (user_id, server_name, tool_name),
+    FOREIGN KEY (user_id, server_name) REFERENCES mcp_servers(user_id, name)
+        ON DELETE CASCADE
+);
+
+-- MCP proxy: index for escalation retry lookup
+CREATE INDEX IF NOT EXISTS idx_audit_escalation_retry
+    ON audit_log(user_id, session_id, tool, args_hash, user_decision);
 """

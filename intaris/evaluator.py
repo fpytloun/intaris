@@ -5,10 +5,18 @@ Orchestrates the full evaluation pipeline:
 
 This is the main entry point for tool call evaluation. The /evaluate
 API endpoint delegates to this module.
+
+For MCP proxy calls, the evaluator also supports:
+- Tool preference overrides (auto-approve, escalate, deny)
+- Escalation retry: reuses a prior approval if the same tool+args
+  combination was approved within the last 10 minutes.
+- args_hash storage for escalation retry lookups.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 import uuid
@@ -30,6 +38,9 @@ from intaris.prompts import (
 )
 from intaris.redactor import redact
 from intaris.session import SessionStore
+
+# Escalation retry: reuse approval if same tool+args approved within this window.
+_ESCALATION_RETRY_TTL_MINUTES = 10
 
 logger = logging.getLogger(__name__)
 
@@ -61,17 +72,19 @@ class Evaluator:
         tool: str,
         args: dict[str, Any],
         context: dict[str, Any] | None = None,
+        tool_preferences: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Evaluate a tool call for safety and intention alignment.
 
         This is the main entry point for the evaluation pipeline:
         1. Redact secrets from args
-        2. Classify the tool call (read/write/critical)
+        2. Classify the tool call (read/write/critical/escalate)
         3. For read-only: auto-approve (fast path)
         4. For critical: auto-deny (fast path)
-        5. For write: LLM safety evaluation → decision matrix
-        6. Log audit record
-        7. Update session counters
+        5. For escalate: check retry cache, else escalate (fast path)
+        6. For write: LLM safety evaluation → decision matrix
+        7. Log audit record (with args_hash for escalation retry)
+        8. Update session counters
 
         Args:
             user_id: Tenant identifier.
@@ -80,6 +93,9 @@ class Evaluator:
             tool: Tool name (e.g., "bash", "edit", "mcp:add_memory").
             args: Tool arguments (will be redacted before storage).
             context: Optional additional context for evaluation.
+            tool_preferences: Optional per-tool preference overrides
+                mapping 'server:tool' → preference string. Used by
+                the MCP proxy to pass user-configured tool policies.
 
         Returns:
             Dict with: call_id, decision, reasoning, risk, path, latency_ms.
@@ -128,13 +144,21 @@ class Evaluator:
         # Redact secrets from args
         args_redacted = redact(args)
 
+        # Compute args_hash for escalation retry lookups
+        args_hash = _compute_args_hash(args)
+
         # Get session policy for classifier
         session_policy = session.get("policy")
 
-        # Step 1-2: Classify
-        classification = classify(tool, args, session_policy=session_policy)
+        # Step 1-2: Classify (with tool preferences for MCP proxy)
+        classification = classify(
+            tool,
+            args,
+            session_policy=session_policy,
+            tool_preferences=tool_preferences,
+        )
 
-        # Step 3-4: Fast path for read-only and critical
+        # Step 3-5: Fast paths for read-only, critical, and escalate
         if classification == Classification.READ:
             decision = make_fast_decision(
                 "read",
@@ -145,8 +169,23 @@ class Evaluator:
                 "critical",
                 f"Critical pattern detected in {tool} call",
             )
+        elif classification == Classification.ESCALATE:
+            # Check escalation retry: reuse prior approval if same
+            # tool+args was approved within the TTL window.
+            retry_decision = self._check_escalation_retry(
+                user_id=user_id,
+                tool=tool,
+                args_hash=args_hash,
+            )
+            if retry_decision is not None:
+                decision = retry_decision
+            else:
+                decision = make_fast_decision(
+                    "escalate",
+                    f"Tool preference requires escalation for {tool}",
+                )
         else:
-            # Step 5: LLM safety evaluation
+            # Step 6: LLM safety evaluation
             decision = self._llm_evaluate(
                 session=session,
                 tool=tool,
@@ -158,7 +197,7 @@ class Evaluator:
         # Calculate latency
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
-        # Step 6: Audit
+        # Step 7: Audit (with args_hash for escalation retry)
         self._audit.insert(
             call_id=call_id,
             user_id=user_id,
@@ -172,9 +211,10 @@ class Evaluator:
             risk=decision.risk,
             reasoning=decision.reasoning,
             latency_ms=latency_ms,
+            args_hash=args_hash,
         )
 
-        # Step 7: Update session counters
+        # Step 8: Update session counters
         try:
             self._sessions.increment_counter(
                 session_id, decision.decision, user_id=user_id
@@ -191,6 +231,58 @@ class Evaluator:
             "latency_ms": latency_ms,
             "args_redacted": args_redacted,
         }
+
+    def _check_escalation_retry(
+        self,
+        *,
+        user_id: str,
+        tool: str,
+        args_hash: str,
+    ) -> Decision | None:
+        """Check if a prior escalation for the same tool+args was approved.
+
+        Looks for an audit record within the retry TTL window where:
+        - Same user, tool, and args_hash (session-independent so approvals
+          survive MCP proxy reconnects)
+        - The escalation was resolved with user_decision='approve'
+
+        Returns:
+            Decision to approve (reusing prior approval), or None if no
+            valid prior approval found.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=_ESCALATION_RETRY_TTL_MINUTES)
+        ).isoformat()
+
+        row = self._audit.find_approved_escalation(
+            user_id=user_id,
+            tool=tool,
+            args_hash=args_hash,
+            cutoff=cutoff,
+        )
+
+        if row is not None:
+            prior_call_id = row["call_id"]
+            logger.info(
+                "Escalation retry: reusing approval from %s for %s",
+                prior_call_id,
+                tool,
+            )
+            return Decision(
+                decision="approve",
+                risk="low",
+                reasoning=(
+                    f"Reusing prior approval (call {prior_call_id}) — "
+                    f"same tool and arguments approved within "
+                    f"{_ESCALATION_RETRY_TTL_MINUTES} minutes"
+                ),
+                path="fast",
+            )
+
+        return None
 
     def _llm_evaluate(
         self,
@@ -265,3 +357,25 @@ class Evaluator:
                 reasoning="LLM evaluation failed — escalating as safe default",
                 path="llm",
             )
+
+
+def _compute_args_hash(args: dict[str, Any]) -> str:
+    """Compute a deterministic SHA-256 hash of tool arguments.
+
+    Used for escalation retry: if the same tool+args combination was
+    previously approved, the approval can be reused within the TTL window.
+
+    Falls back to hashing the repr() if args contain non-JSON-serializable
+    values (e.g., bytes, datetime objects).
+
+    Args:
+        args: Tool arguments dict.
+
+    Returns:
+        Hex-encoded SHA-256 hash string.
+    """
+    try:
+        canonical = json.dumps(args, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        canonical = repr(sorted(args.items()))
+    return hashlib.sha256(canonical.encode()).hexdigest()

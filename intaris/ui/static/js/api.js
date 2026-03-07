@@ -150,4 +150,52 @@ const IntarisAPI = {
   resolveDecision(callId, decision, note) {
     return this.post('/decision', { call_id: callId, decision, note: note || null });
   },
+
+  // ── MCP Server Management ───────────────────────────────
+
+  /** PUT with JSON body */
+  async put(path, body = {}) {
+    return this._fetch(path, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  },
+
+  /** DELETE */
+  async del(path) {
+    return this._fetch(path, { method: 'DELETE' });
+  },
+
+  listMCPServers(params = {}) {
+    return this.get('/mcp/servers', params);
+  },
+
+  getMCPServer(name) {
+    return this.get(`/mcp/servers/${encodeURIComponent(name)}`);
+  },
+
+  upsertMCPServer(name, body) {
+    return this.put(`/mcp/servers/${encodeURIComponent(name)}`, body);
+  },
+
+  deleteMCPServer(name) {
+    return this.del(`/mcp/servers/${encodeURIComponent(name)}`);
+  },
+
+  getMCPToolPreferences(serverName) {
+    return this.get(`/mcp/servers/${encodeURIComponent(serverName)}/preferences`);
+  },
+
+  setMCPToolPreference(serverName, toolName, preference) {
+    return this.put(
+      `/mcp/servers/${encodeURIComponent(serverName)}/preferences/${encodeURIComponent(toolName)}`,
+      { preference }
+    );
+  },
+
+  deleteMCPToolPreference(serverName, toolName) {
+    return this.del(
+      `/mcp/servers/${encodeURIComponent(serverName)}/preferences/${encodeURIComponent(toolName)}`
+    );
+  },
 };

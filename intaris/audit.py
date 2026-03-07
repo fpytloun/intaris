@@ -47,6 +47,7 @@ class AuditStore:
         latency_ms: int,
         record_type: str = "tool_call",
         content: str | None = None,
+        args_hash: str | None = None,
     ) -> dict[str, Any]:
         """Insert an audit record.
 
@@ -65,6 +66,7 @@ class AuditStore:
             latency_ms: Time taken for the evaluation in milliseconds.
             record_type: Record type: "tool_call", "reasoning", or "checkpoint".
             content: Reasoning or checkpoint text (null for tool_call records).
+            args_hash: SHA-256 hash of canonical args for escalation retry.
 
         Returns:
             The created audit record as a dict.
@@ -84,8 +86,9 @@ class AuditStore:
                 INSERT INTO audit_log
                     (id, call_id, record_type, user_id, session_id, agent_id,
                      timestamp, tool, args_redacted, content, classification,
-                     evaluation_path, decision, risk, reasoning, latency_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     evaluation_path, decision, risk, reasoning, latency_ms,
+                     args_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record_id,
@@ -104,6 +107,7 @@ class AuditStore:
                     risk,
                     reasoning,
                     latency_ms,
+                    args_hash,
                 ),
             )
 
@@ -272,6 +276,47 @@ class AuditStore:
             rows = cur.fetchall()
 
         return [_row_to_dict(row) for row in rows]
+
+    def find_approved_escalation(
+        self,
+        *,
+        user_id: str,
+        tool: str,
+        args_hash: str,
+        cutoff: str,
+    ) -> dict[str, Any] | None:
+        """Find a prior approved escalation for the same tool+args.
+
+        Used by the evaluator for escalation retry: if the same tool+args
+        combination was approved within the TTL window, the approval can
+        be reused.
+
+        Args:
+            user_id: Tenant identifier.
+            tool: Tool name.
+            args_hash: SHA-256 hash of canonical args.
+            cutoff: ISO timestamp — only consider approvals after this time.
+
+        Returns:
+            Audit record dict if a matching approval is found, else None.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                SELECT call_id, reasoning FROM audit_log
+                WHERE user_id = ? AND tool = ?
+                  AND args_hash = ? AND user_decision = 'approve'
+                  AND resolved_at >= ?
+                ORDER BY resolved_at DESC
+                LIMIT 1
+                """,
+                (user_id, tool, args_hash, cutoff),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+        return dict(row)
 
     def resolve_escalation(
         self,

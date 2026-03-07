@@ -1,11 +1,22 @@
 """Tool call classifier for intaris.
 
-Classifies tool calls into READ, WRITE, or CRITICAL categories using
-an explicit read-only allowlist and critical pattern detection.
+Classifies tool calls into READ, WRITE, CRITICAL, or ESCALATE categories
+using an explicit read-only allowlist, critical pattern detection, and
+optional per-tool preference overrides.
 
 Security model: default-deny. Everything not explicitly allowlisted
 as read-only goes through LLM evaluation. Unknown tools, third-party
 MCP tools, and unrecognized bash commands are all classified as WRITE.
+
+Classification priority (deny always wins):
+1. Session policy deny (deny_tools, deny_commands) → CRITICAL
+2. Tool preference deny → CRITICAL
+3. Tool preference escalate → ESCALATE
+4. Session policy allow (allow_tools, allow_commands) → READ
+5. Tool preference auto-approve → READ
+6. Critical pattern detection (bash only) → CRITICAL
+7. Built-in read-only allowlist → READ
+8. Default → WRITE
 """
 
 from __future__ import annotations
@@ -25,6 +36,7 @@ class Classification(Enum):
     READ = "read"
     WRITE = "write"
     CRITICAL = "critical"
+    ESCALATE = "escalate"
 
 
 # ── Read-Only Allowlist ───────────────────────────────────────────────
@@ -177,41 +189,89 @@ def classify(
     args: dict[str, Any],
     *,
     session_policy: dict[str, Any] | None = None,
+    tool_preferences: dict[str, str] | None = None,
 ) -> Classification:
-    """Classify a tool call as READ, WRITE, or CRITICAL.
+    """Classify a tool call as READ, WRITE, CRITICAL, or ESCALATE.
 
-    Classification priority:
-    1. Session policy overrides (if provided)
-    2. Critical pattern detection (for bash commands)
-    3. Read-only allowlist
-    4. Default: WRITE (goes to LLM evaluation)
+    Classification priority (deny always wins):
+    1. Session policy deny (deny_tools, deny_commands) → CRITICAL
+    2. Tool preference deny → CRITICAL
+    3. Tool preference escalate → ESCALATE
+    4. Session policy allow (allow_tools, allow_commands) → READ
+    5. Tool preference auto-approve → READ
+    6. Critical pattern detection (bash only) → CRITICAL
+    7. Built-in read-only allowlist → READ
+    8. Default → WRITE (goes to LLM evaluation)
 
     Args:
         tool: Tool name (e.g., "bash", "edit", "read", "mcp:add_memory").
         args: Tool arguments.
         session_policy: Optional per-session policy with custom rules.
+        tool_preferences: Optional per-tool preference overrides mapping
+            'server:tool' or 'tool' → preference string.
 
     Returns:
         Classification enum value.
     """
-    # Step 1: Check session policy overrides
+    # Step 1: Session policy deny rules (highest priority deny)
     if session_policy:
-        override = _check_session_policy(tool, args, session_policy)
-        if override is not None:
-            return override
+        deny_override = _check_session_policy_deny(tool, args, session_policy)
+        if deny_override is not None:
+            return deny_override
 
-    # Step 2: Check critical patterns (bash only)
+    # Step 2: Tool preference deny
+    pref = _get_tool_preference(tool, tool_preferences)
+    if pref == "deny":
+        return Classification.CRITICAL
+
+    # Step 3: Tool preference escalate
+    if pref == "escalate":
+        return Classification.ESCALATE
+
+    # Step 4: Session policy allow rules
+    if session_policy:
+        allow_override = _check_session_policy_allow(tool, args, session_policy)
+        if allow_override is not None:
+            return allow_override
+
+    # Step 5: Tool preference auto-approve
+    if pref == "auto-approve":
+        return Classification.READ
+
+    # Step 6: Check critical patterns (bash only)
     if tool == "bash":
         command = _extract_bash_command(args)
         if command and _is_critical(command):
             return Classification.CRITICAL
 
-    # Step 3: Check read-only allowlist
+    # Step 7: Check read-only allowlist
     if _is_read_only(tool, args):
         return Classification.READ
 
-    # Step 4: Default to WRITE (goes to LLM evaluation)
+    # Step 8: Default to WRITE (goes to LLM evaluation)
     return Classification.WRITE
+
+
+def _get_tool_preference(tool: str, preferences: dict[str, str] | None) -> str | None:
+    """Look up tool preference with fallback.
+
+    Tries exact match first (e.g., 'server:tool'), then just the
+    tool name part after the colon.
+    """
+    if not preferences:
+        return None
+
+    # Exact match (e.g., "tavily:search")
+    if tool in preferences:
+        return preferences[tool]
+
+    # Fallback: just the tool name after colon (e.g., "search")
+    if ":" in tool:
+        tool_name = tool.split(":", 1)[1]
+        if tool_name in preferences:
+            return preferences[tool_name]
+
+    return None
 
 
 def _extract_bash_command(args: dict[str, Any]) -> str:
@@ -469,9 +529,20 @@ def _check_session_policy(
     Returns:
         Classification override, or None if no policy match.
     """
+    deny = _check_session_policy_deny(tool, args, policy)
+    if deny is not None:
+        return deny
+    return _check_session_policy_allow(tool, args, policy)
+
+
+def _check_session_policy_deny(
+    tool: str,
+    args: dict[str, Any],
+    policy: dict[str, Any],
+) -> Classification | None:
+    """Check session policy deny rules only."""
     import fnmatch
 
-    # Check deny rules first (higher priority)
     deny_tools = policy.get("deny_tools", [])
     if tool in deny_tools:
         return Classification.CRITICAL
@@ -483,7 +554,17 @@ def _check_session_policy(
             if isinstance(pattern, str) and fnmatch.fnmatch(command, pattern):
                 return Classification.CRITICAL
 
-    # Check allow rules
+    return None
+
+
+def _check_session_policy_allow(
+    tool: str,
+    args: dict[str, Any],
+    policy: dict[str, Any],
+) -> Classification | None:
+    """Check session policy allow rules only."""
+    import fnmatch
+
     allow_tools = policy.get("allow_tools", [])
     if tool in allow_tools:
         return Classification.READ

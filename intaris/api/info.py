@@ -35,6 +35,7 @@ async def whoami() -> dict:
 
 @router.get("/stats")
 async def stats(
+    request: Request,
     ctx: SessionContext = Depends(get_session_context),
 ) -> dict:
     """Return aggregated statistics for the dashboard.
@@ -105,6 +106,36 @@ async def stats(
         else:
             users = [ctx.user_id]
 
+        # MCP proxy stats
+        mcp_stats = {}
+        try:
+            with db.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM mcp_servers WHERE user_id = ?",
+                    (ctx.user_id,),
+                )
+                mcp_stats["total_servers"] = cur.fetchone()[0]
+
+            with db.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM mcp_servers "
+                    "WHERE user_id = ? AND enabled = 1",
+                    (ctx.user_id,),
+                )
+                mcp_stats["enabled_servers"] = cur.fetchone()[0]
+
+            mcp_proxy = getattr(
+                getattr(request, "app", None),
+                "state",
+                None,
+            )
+            mcp_proxy = getattr(mcp_proxy, "mcp_proxy", None)
+            if mcp_proxy is not None:
+                mcp_stats["active_sessions"] = mcp_proxy.active_sessions
+                mcp_stats["active_connections"] = mcp_proxy.connection_count
+        except Exception:
+            pass  # MCP tables may not exist in older DBs.
+
         return {
             "total_sessions": total_sessions,
             "sessions_by_status": status_counts,
@@ -114,6 +145,7 @@ async def stats(
             "pending_approvals": pending_approvals,
             "avg_latency_ms": avg_latency_ms,
             "users": users,
+            "mcp": mcp_stats,
         }
     except Exception:
         logger.exception("Error in /stats")
@@ -157,6 +189,12 @@ async def config(
             "rate_limit": cfg.server.rate_limit,
             "webhook_configured": bool(cfg.webhook.url),
             "auth_configured": bool(cfg.server.api_keys or cfg.server.api_key),
+            "mcp": {
+                "config_file": bool(cfg.mcp.config_file),
+                "allow_stdio": cfg.mcp.allow_stdio,
+                "encryption_configured": bool(cfg.mcp.encryption_key),
+                "upstream_timeout_ms": cfg.mcp.upstream_timeout_ms,
+            },
         }
     except Exception:
         logger.exception("Error in /config")

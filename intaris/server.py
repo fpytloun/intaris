@@ -1,8 +1,8 @@
 """HTTP server for intaris.
 
 FastAPI application with health endpoint, API key authentication
-middleware with multi-tenant user_id resolution, and REST API sub-app
-for safety evaluation endpoints.
+middleware with multi-tenant user_id resolution, REST API sub-app
+for safety evaluation endpoints, and MCP proxy server.
 """
 
 from __future__ import annotations
@@ -48,11 +48,18 @@ _session_user_bound: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # When True, the UI should prevent user impersonation (X-User-Id override).
 # Enforcement is deferred to the UI layer — the middleware always sets it.
 
+_session_intention: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "session_intention", default=None
+)
+# Optional intention hint for MCP proxy session auto-creation.
+# Set from X-Intaris-Intention header.
+
 # ── Lazy Initialization ──────────────────────────────────────────────
 
 _config = None
 _db = None
 _evaluator = None
+_mcp_proxy_ref = None  # Module-level reference for _MCPEndpoint ASGI wrapper
 
 
 def _get_config():
@@ -173,12 +180,17 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             agent_id = request.headers.get("x-agent-id", "").strip() or None
             _session_agent_id.set(agent_id)
 
+            # Read optional intention hint for MCP proxy sessions
+            intention = request.headers.get("x-intaris-intention", "").strip() or None
+            _session_intention.set(intention)
+
             return await call_next(request)
         finally:
             # Always reset ContextVars to prevent identity leakage
             _session_user_id.set(None)
             _session_agent_id.set(None)
             _session_user_bound.set(False)
+            _session_intention.set(None)
 
 
 def _extract_token(request: Request) -> str:
@@ -210,6 +222,55 @@ def _set_user_from_header(request: Request) -> None:
     """Set user_id from request headers (fallback when key doesn't bind)."""
     user_id = request.headers.get("x-user-id", "").strip() or None
     _session_user_id.set(user_id)
+
+
+# ── MCP Endpoint ─────────────────────────────────────────────────────
+
+
+class _MCPEndpoint:
+    """ASGI wrapper for the MCP session manager.
+
+    Delegates to the MCPProxy's session manager, which is initialized
+    during the lifespan. Before initialization, returns 503.
+
+    This is mounted at /mcp and handles all MCP protocol traffic.
+    The auth middleware has already run, so ContextVars are set.
+
+    Uses a module-level reference to the proxy instead of scope["app"]
+    because Starlette's Mount sets scope["app"] to the Mount instance,
+    not the root app — so state would not be accessible.
+    """
+
+    async def __call__(self, scope, receive, send):
+        """ASGI interface."""
+        if scope["type"] not in ("http", "websocket"):
+            return
+
+        # Get the MCP proxy from the module-level reference.
+        mcp_proxy = _mcp_proxy_ref
+
+        if mcp_proxy is None:
+            # MCP proxy not initialized — return 503.
+            if scope["type"] == "http":
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 503,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                        ],
+                    }
+                )
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b'{"error": "MCP proxy not available"}',
+                    }
+                )
+            return
+
+        # Delegate to the session manager's ASGI handler.
+        await mcp_proxy.session_manager.handle_request(scope, receive, send)
 
 
 # ── Application Factory ──────────────────────────────────────────────
@@ -248,6 +309,12 @@ async def lifespan(app):
     app.state.event_bus = EventBus()
     logger.info("EventBus initialized")
 
+    # Initialize MCP proxy
+    global _mcp_proxy_ref
+    mcp_proxy = _init_mcp_proxy(cfg)
+    app.state.mcp_proxy = mcp_proxy
+    _mcp_proxy_ref = mcp_proxy
+
     # Propagate state to FastAPI sub-app so endpoints can access it
     # via request.app.state (request.app is the sub-app, not parent)
     api_app = getattr(app.state, "_api_app", None)
@@ -255,14 +322,89 @@ async def lifespan(app):
         api_app.state.rate_limiter = app.state.rate_limiter
         api_app.state.webhook = app.state.webhook
         api_app.state.event_bus = app.state.event_bus
+        api_app.state.mcp_proxy = mcp_proxy
 
-    yield
+    if mcp_proxy is not None:
+        await mcp_proxy.start()
+        # The session manager requires run() as an async context manager
+        # to manage its internal task group for handling MCP sessions.
+        async with mcp_proxy.session_manager.run():
+            logger.info("MCP proxy initialized")
+            yield
+            # Cleanup MCP proxy before exiting the session manager context.
+            await mcp_proxy.shutdown()
+    else:
+        yield
 
     # Cleanup
+    _mcp_proxy_ref = None
     await app.state.webhook.close()
     db = _get_db()
     db.close()
     logger.info("Intaris shutting down")
+
+
+def _init_mcp_proxy(cfg):
+    """Initialize the MCP proxy if configured.
+
+    Returns MCPProxy instance or None if MCP proxy is not needed.
+    The proxy is always created — it's lightweight and allows dynamic
+    server configuration via the REST API even without a config file.
+    """
+    from intaris.audit import AuditStore
+    from intaris.mcp.client import MCPConnectionManager
+    from intaris.mcp.proxy import MCPProxy
+    from intaris.mcp.store import MCPServerStore
+    from intaris.session import SessionStore
+
+    db = _get_db()
+
+    # Warn if encrypted data exists without encryption key.
+    if not cfg.mcp.encryption_key:
+        try:
+            with db.cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM mcp_servers "
+                    "WHERE env_encrypted IS NOT NULL OR headers_encrypted IS NOT NULL"
+                )
+                count = cur.fetchone()[0]
+                if count > 0:
+                    logger.warning(
+                        "Found %d MCP server(s) with encrypted secrets but "
+                        "INTARIS_ENCRYPTION_KEY is not set. These servers will "
+                        "not be able to connect until the key is provided.",
+                        count,
+                    )
+        except Exception:
+            pass  # Table may not exist yet on first run.
+
+    # Sync file-based config if configured.
+    if cfg.mcp.config_file:
+        try:
+            from intaris.mcp.config import sync_file_configs
+
+            server_store = MCPServerStore(db, cfg.mcp.encryption_key)
+            sync_file_configs(
+                store=server_store,
+                path=cfg.mcp.config_file,
+            )
+            logger.info("Synced MCP config from %s", cfg.mcp.config_file)
+        except Exception:
+            logger.exception("Failed to sync MCP config file")
+
+    conn_mgr = MCPConnectionManager(
+        upstream_timeout_ms=cfg.mcp.upstream_timeout_ms,
+        allow_stdio=cfg.mcp.allow_stdio,
+    )
+
+    return MCPProxy(
+        connection_manager=conn_mgr,
+        evaluator=_get_evaluator(),
+        session_store=SessionStore(db),
+        audit_store=AuditStore(db),
+        server_store=MCPServerStore(db, cfg.mcp.encryption_key),
+        upstream_timeout_ms=cfg.mcp.upstream_timeout_ms,
+    )
 
 
 def create_app() -> Starlette:
@@ -290,6 +432,14 @@ def create_app() -> Starlette:
         routes.append(Route("/ui", _ui_redirect))
         routes.append(Mount("/ui", app=StaticFiles(directory=ui_static_dir, html=True)))
         logger.info("Management UI mounted at /ui")
+
+    # Mount MCP proxy endpoint. The session manager's handle_request is
+    # an ASGI handler that processes MCP protocol messages over HTTP.
+    # Auth middleware runs before this, setting ContextVars for identity.
+    routes.append(
+        Mount("/mcp", app=_MCPEndpoint()),
+    )
+    logger.info("MCP proxy endpoint mounted at /mcp")
 
     routes.extend(
         [

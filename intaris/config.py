@@ -150,6 +150,34 @@ class WebhookConfig:
 
 
 @dataclass
+class MCPConfig:
+    """MCP proxy configuration.
+
+    Controls the MCP proxy feature: file-based server config,
+    stdio transport gating, encryption for secrets at rest,
+    and upstream call timeouts.
+    """
+
+    # Path to multi-user MCP config JSON file (optional).
+    config_file: str = field(default_factory=lambda: _env("MCP_CONFIG_FILE"))
+
+    # Allow stdio transport for MCP servers (disable in multi-tenant).
+    allow_stdio: bool = field(
+        default_factory=lambda: _env_bool("MCP_ALLOW_STDIO", default=True)
+    )
+
+    # Fernet key for encrypting secrets at rest (env vars, HTTP headers).
+    # Required when MCP servers have secrets. Generate with:
+    # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    encryption_key: str = field(default_factory=lambda: _env("INTARIS_ENCRYPTION_KEY"))
+
+    # Timeout in milliseconds for upstream MCP server calls.
+    upstream_timeout_ms: int = field(
+        default_factory=lambda: _env_int("MCP_UPSTREAM_TIMEOUT_MS", 30000)
+    )
+
+
+@dataclass
 class Config:
     """Root configuration container."""
 
@@ -157,6 +185,7 @@ class Config:
     db: DBConfig = field(default_factory=DBConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
 
     def validate(self) -> None:
         """Validate that required configuration is present."""
@@ -187,6 +216,22 @@ class Config:
                 "WEBHOOK_SECRET is required when WEBHOOK_URL is set. "
                 "Unsigned webhooks are not allowed."
             )
+
+        # Validate encryption key format if provided.
+        if self.mcp.encryption_key:
+            from intaris.crypto import validate_key
+
+            if not validate_key(self.mcp.encryption_key):
+                raise ValueError(
+                    "INTARIS_ENCRYPTION_KEY is not a valid Fernet key. "
+                    "Generate one with: python -c "
+                    '"from cryptography.fernet import Fernet; '
+                    'print(Fernet.generate_key().decode())"'
+                )
+
+        # Validate config file exists if specified.
+        if self.mcp.config_file and not os.path.isfile(self.mcp.config_file):
+            raise ValueError(f"MCP_CONFIG_FILE={self.mcp.config_file} does not exist.")
 
 
 def load_config() -> Config:

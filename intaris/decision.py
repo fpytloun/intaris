@@ -166,5 +166,12 @@ def make_fast_decision(
             reasoning=reasoning,
             path="critical",
         )
+    elif classification == "escalate":
+        return Decision(
+            decision="escalate",
+            risk="high",
+            reasoning=reasoning,
+            path="fast",
+        )
     else:
         raise ValueError(f"Invalid fast-path classification: {classification}")

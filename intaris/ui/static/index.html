@@ -11,6 +11,7 @@
   <script src="/ui/js/sessions.js"></script>
   <script src="/ui/js/audit.js"></script>
   <script src="/ui/js/approvals.js"></script>
+  <script src="/ui/js/servers.js"></script>
   <script src="/ui/js/settings.js"></script>
   <script src="/ui/vendor/alpine.min.js" defer></script>
 </head>
@@ -82,6 +83,7 @@
               { id: 'sessions', label: 'Sessions' },
               { id: 'audit', label: 'Audit' },
               { id: 'approvals', label: 'Approvals' },
+              { id: 'servers', label: 'Servers' },
               { id: 'settings', label: 'Settings' },
             ]">
               <button @click="$store.nav.setTab(tab.id)"
@@ -465,6 +467,171 @@
         </div>
       </div>
 
+      <!-- Servers Tab -->
+      <div x-show="$store.nav.activeTab === 'servers'" x-data="serversTab()" x-init="init()">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-medium">MCP Servers</h2>
+          <button @click="openAddForm()" class="btn-primary text-sm">Add Server</button>
+        </div>
+
+        <div x-show="loading && !initialized" class="text-center py-12 text-secondary">Loading servers...</div>
+        <div x-show="!loading && servers.length === 0 && !showForm" class="text-center py-12 text-muted">No MCP servers configured</div>
+
+        <!-- Add/Edit Form -->
+        <div x-show="showForm" x-cloak class="card mb-4">
+          <h3 class="text-sm font-medium text-secondary mb-3" x-text="editMode ? 'Edit Server' : 'Add Server'"></h3>
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="block text-xs text-muted mb-1">Name</label>
+              <input x-model="form.name" :disabled="editMode" class="input text-sm" placeholder="e.g. tavily">
+            </div>
+            <div>
+              <label class="block text-xs text-muted mb-1">Transport</label>
+              <select x-model="form.transport" class="select text-sm">
+                <option value="streamable-http">Streamable HTTP</option>
+                <option value="sse">SSE</option>
+                <option value="stdio">stdio</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- HTTP/SSE fields -->
+          <div x-show="form.transport !== 'stdio'" class="grid grid-cols-1 gap-3 mb-3">
+            <div>
+              <label class="block text-xs text-muted mb-1">URL</label>
+              <input x-model="form.url" class="input text-sm" placeholder="https://mcp.example.com/mcp">
+            </div>
+            <div>
+              <label class="block text-xs text-muted mb-1">Headers (JSON, encrypted at rest)</label>
+              <input x-model="form.headers" class="input text-sm" placeholder='{"Authorization": "Bearer ..."}'>
+            </div>
+          </div>
+
+          <!-- stdio fields -->
+          <div x-show="form.transport === 'stdio'" class="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="block text-xs text-muted mb-1">Command</label>
+              <input x-model="form.command" class="input text-sm" placeholder="npx">
+            </div>
+            <div>
+              <label class="block text-xs text-muted mb-1">Args (space-separated)</label>
+              <input x-model="form.args" class="input text-sm" placeholder="-y tavily-mcp">
+            </div>
+            <div>
+              <label class="block text-xs text-muted mb-1">Working Directory</label>
+              <input x-model="form.cwd" class="input text-sm" placeholder="/path/to/dir">
+            </div>
+            <div>
+              <label class="block text-xs text-muted mb-1">Env (JSON, encrypted at rest)</label>
+              <input x-model="form.env" class="input text-sm" placeholder='{"API_KEY": "..."}'>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3 mb-3">
+            <div>
+              <label class="block text-xs text-muted mb-1">Agent Pattern</label>
+              <input x-model="form.agent_pattern" class="input text-sm" placeholder="*">
+            </div>
+            <div class="flex items-end">
+              <label class="flex items-center gap-2 text-sm">
+                <input type="checkbox" x-model="form.enabled" class="rounded">
+                Enabled
+              </label>
+            </div>
+          </div>
+
+          <div class="flex gap-2">
+            <button @click="saveServer()" class="btn-primary text-sm">Save</button>
+            <button @click="showForm = false" class="btn-secondary text-sm">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Server List -->
+        <div class="space-y-3">
+          <template x-for="server in servers" :key="server.name">
+            <div class="card">
+              <div class="flex items-center justify-between cursor-pointer" @click="toggleExpand(server)">
+                <div class="flex items-center gap-3">
+                  <span :class="server.enabled ? 'badge badge-approve' : 'badge badge-deny'"
+                        x-text="server.enabled ? 'enabled' : 'disabled'"></span>
+                  <span class="font-mono text-sm text-brand-accent" x-text="server.name"></span>
+                  <span class="badge" x-text="transportLabel(server.transport)"></span>
+                  <span class="text-xs text-muted" x-text="server.source === 'file' ? '(file)' : ''"></span>
+                </div>
+                <div class="flex items-center gap-3 text-xs text-muted">
+                  <span x-text="(server.tools_cache || []).length + ' tools'" x-show="server.tools_cache"></span>
+                  <span x-text="server.agent_pattern !== '*' ? 'agent: ' + server.agent_pattern : ''"></span>
+                </div>
+              </div>
+
+              <!-- Expanded Detail -->
+              <div x-show="expandedName === server.name" x-cloak class="mt-4 pt-4 border-t border-brand-border">
+                <!-- Server Info -->
+                <div class="grid grid-cols-2 gap-3 text-sm mb-4">
+                  <div x-show="server.url">
+                    <div class="text-xs text-muted">URL</div>
+                    <div class="font-mono text-xs" x-text="server.url"></div>
+                  </div>
+                  <div x-show="server.command">
+                    <div class="text-xs text-muted">Command</div>
+                    <div class="font-mono text-xs" x-text="server.command + ' ' + (server.args || []).join(' ')"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Secrets</div>
+                    <div class="text-xs">
+                      <span x-show="server.has_env" class="text-amber-400">env</span>
+                      <span x-show="server.has_headers" class="text-amber-400">headers</span>
+                      <span x-show="!server.has_env && !server.has_headers" class="text-muted">none</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Server Instructions -->
+                <div x-show="server.server_instructions" class="mb-4">
+                  <div class="text-xs text-muted mb-1">Server Instructions</div>
+                  <div class="text-xs bg-brand-elevated rounded p-2 max-h-32 overflow-y-auto" x-text="server.server_instructions"></div>
+                </div>
+
+                <!-- Tools with Preferences -->
+                <div x-show="server.tools_cache && server.tools_cache.length > 0" class="mb-4">
+                  <div class="text-xs text-muted mb-2">Tools</div>
+                  <div class="space-y-1">
+                    <template x-for="tool in server.tools_cache" :key="tool.name">
+                      <div class="flex items-center justify-between py-1.5 border-b border-brand-border last:border-0">
+                        <div class="flex items-center gap-2">
+                          <span class="font-mono text-xs" x-text="tool.name"></span>
+                          <span class="text-xs text-muted truncate max-w-xs" x-text="tool.description"></span>
+                        </div>
+                        <div class="flex items-center gap-1">
+                          <span :class="prefBadgeClass(getPreference(tool.name))"
+                                x-text="getPreference(tool.name)" class="text-xs"></span>
+                          <select class="select text-xs py-0.5 w-28"
+                                  :value="getPreference(tool.name)"
+                                  @change="setPreference(server.name, tool.name, $event.target.value)">
+                            <option value="evaluate">evaluate</option>
+                            <option value="auto-approve">auto-approve</option>
+                            <option value="escalate">escalate</option>
+                            <option value="deny">deny</option>
+                          </select>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- Actions -->
+                <div class="flex gap-2">
+                  <button @click.stop="openEditForm(server)" class="btn-secondary text-sm">Edit</button>
+                  <button @click.stop="toggleEnabled(server)" class="btn-secondary text-sm"
+                          x-text="server.enabled ? 'Disable' : 'Enable'"></button>
+                  <button @click.stop="deleteServer(server.name)" class="btn-danger text-sm">Delete</button>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <!-- Settings Tab -->
       <div x-show="$store.nav.activeTab === 'settings'" x-data="settingsTab()" x-init="init()">
         <div x-show="loading" class="text-center py-12 text-secondary">Loading settings...</div>
@@ -520,6 +687,31 @@
                 </div>
               </div>
             </div>
+
+            <!-- MCP Proxy Configuration -->
+            <template x-if="config.mcp">
+              <div class="card">
+                <h3 class="text-sm font-medium text-secondary mb-3">MCP Proxy</h3>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <div class="text-xs text-muted">Config File</div>
+                    <div x-text="config.mcp.config_file ? 'Configured' : 'Not configured'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">stdio Transport</div>
+                    <div x-text="config.mcp.allow_stdio ? 'Allowed' : 'Disabled'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Encryption</div>
+                    <div x-text="config.mcp.encryption_configured ? 'Configured' : 'Not configured'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Upstream Timeout</div>
+                    <div x-text="config.mcp.upstream_timeout_ms + 'ms'"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
           </div>
         </template>
       </div>

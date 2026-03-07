@@ -15,19 +15,26 @@
 
 ```
 intaris/
-├── server.py              # HTTP server entry point, health endpoint, auth middleware, lifespan
+├── server.py              # HTTP server entry point, health endpoint, auth middleware, lifespan, MCP mount
 ├── config.py              # Configuration from environment variables (dataclasses)
-├── db.py                  # SQLite connection management, table creation, indexes
+├── crypto.py              # Fernet encryption/decryption for secrets at rest
+├── db.py                  # SQLite connection management, table creation, indexes, migrations
 ├── session.py             # Session CRUD + counter updates (paginated list)
-├── audit.py               # Audit log storage + querying
-├── classifier.py          # Tool call classification (read/write/critical)
+├── audit.py               # Audit log storage + querying (with args_hash for escalation retry)
+├── classifier.py          # Tool call classification (read/write/critical/escalate)
 ├── redactor.py            # Secret redaction for audit args
 ├── llm.py                 # OpenAI-compatible LLM client with structured output
 ├── prompts.py             # Safety evaluation prompt templates + JSON schema
-├── evaluator.py           # Evaluation pipeline orchestrator (session status enforcement)
-├── decision.py            # Decision matrix (priority-ordered)
+├── evaluator.py           # Evaluation pipeline orchestrator (ESCALATE branch, retry, args_hash)
+├── decision.py            # Decision matrix (priority-ordered, escalate fast path)
 ├── ratelimit.py           # In-memory sliding window rate limiter
 ├── webhook.py             # Async webhook client with HMAC-SHA256 signing
+├── mcp/
+│   ├── __init__.py        # Package marker
+│   ├── store.py           # MCPServerStore CRUD + tool preferences (encrypted secrets)
+│   ├── config.py          # File-based config loader with orphan reconciliation
+│   ├── client.py          # MCPConnectionManager (upstream connections, idle sweep)
+│   └── proxy.py           # MCP Server with list_tools/call_tool handlers
 ├── api/
 │   ├── __init__.py        # FastAPI sub-app factory
 │   ├── deps.py            # SessionContext dependency (identity from ContextVars)
@@ -35,7 +42,8 @@ intaris/
 │   ├── evaluate.py        # POST /api/v1/evaluate (rate limiting, webhook, EventBus)
 │   ├── intention.py       # POST /api/v1/intention, GET /api/v1/session/{id}, GET /sessions, PATCH /session/{id}/status
 │   ├── audit.py           # GET /api/v1/audit, POST /api/v1/decision (EventBus publish)
-│   ├── info.py            # GET /whoami, /stats, /config (management UI support)
+│   ├── info.py            # GET /whoami, /stats, /config (management UI support, MCP stats)
+│   ├── mcp.py             # MCP server CRUD + tool preference endpoints
 │   └── stream.py          # EventBus + WebSocket streaming (first-message auth)
 └── ui/
     ├── __init__.py        # Package marker
@@ -43,16 +51,17 @@ intaris/
     ├── src/
     │   └── input.css      # Tailwind source CSS with component classes
     └── static/
-        ├── index.html     # Single-page app (Alpine.js + Tailwind)
+        ├── index.html     # Single-page app (Alpine.js + Tailwind, 6 tabs)
         ├── css/
         │   └── app.css    # Pre-built Tailwind output (committed)
         ├── js/
-        │   ├── api.js     # IntarisAPI client singleton
+        │   ├── api.js     # IntarisAPI client singleton (with MCP methods)
         │   ├── app.js     # Alpine.js stores (auth, nav, notify)
         │   ├── dashboard.js # Dashboard tab component
         │   ├── sessions.js  # Sessions tab component
         │   ├── audit.js     # Audit tab component
         │   ├── approvals.js # Approvals tab component (10s polling)
+        │   ├── servers.js   # Servers tab component (MCP server management)
         │   └── settings.js  # Settings tab component
         └── vendor/
             └── alpine.min.js # Vendored Alpine.js (no CDN)
@@ -131,6 +140,10 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `WEBHOOK_SECRET` | HMAC-SHA256 secret for signing webhook payloads (required if WEBHOOK_URL is set) |
 | `WEBHOOK_TIMEOUT_MS` | Webhook HTTP timeout in milliseconds (default 3000) |
 | `INTARIS_BASE_URL` | Base URL for constructing `intaris_url` in webhook payloads (optional) |
+| `INTARIS_ENCRYPTION_KEY` | Fernet key for encrypting MCP server secrets at rest (required if secrets present) |
+| `MCP_CONFIG_FILE` | Path to JSON file defining MCP servers (optional, reconciled on startup) |
+| `MCP_ALLOW_STDIO` | Allow stdio transport for MCP servers (default `false`) |
+| `MCP_UPSTREAM_TIMEOUT_MS` | Timeout for upstream MCP server calls in milliseconds (default `30000`) |
 
 ## Build / Run / Test
 
@@ -291,7 +304,7 @@ Single-page web UI served at `/ui` for monitoring and managing Intaris. Built wi
 ### Architecture
 
 - **No build step at runtime**: Alpine.js is vendored (`static/vendor/alpine.min.js`), Tailwind CSS is pre-built and committed (`static/css/app.css`).
-- **Tab-based navigation**: 5 tabs — Dashboard, Sessions, Audit, Approvals, Settings.
+- **Tab-based navigation**: 6 tabs — Dashboard, Sessions, Audit, Approvals, Servers, Settings.
 - **Auth**: API key stored in `localStorage`, sent via `X-API-Key` header. User impersonation via `X-User-Id` header when `can_switch_user` is true.
 - **Polling**: Approvals tab polls every 10s for pending escalations (WebSocket deferred to Phase 2).
 
@@ -303,6 +316,7 @@ Single-page web UI served at `/ui` for monitoring and managing Intaris. Built wi
 | **Sessions** | Filterable session list with expandable detail | `GET /sessions`, `GET /session/{id}`, `GET /audit`, `PATCH /session/{id}/status` |
 | **Audit** | Filterable audit log table with expandable detail | `GET /audit` |
 | **Approvals** | Pending escalations with approve/deny actions | `GET /audit?decision=escalate&resolved=false`, `POST /decision` |
+| **Servers** | MCP server management — add/edit/delete upstream servers, tool preferences | `GET/PUT/DELETE /mcp/servers/{name}`, `GET/PUT/DELETE /mcp/servers/{name}/tools/{tool}/preference` |
 | **Settings** | Read-only server configuration display | `GET /config` |
 
 ### API endpoints for UI
@@ -330,10 +344,108 @@ The pre-built `app.css` is committed to the repository so no build step is neede
 - Auth middleware skips `/ui` paths (static files don't need auth; API calls use `X-API-Key` from `localStorage`).
 - Redirect from `/ui` → `/ui/` for consistent URL handling.
 
+## MCP Proxy
+
+Intaris can act as an MCP proxy, sitting between LLM clients (Claude Code, OpenCode, Cursor, etc.) and upstream MCP servers. Every tool call is evaluated through the safety pipeline before being forwarded upstream.
+
+### How it works
+
+1. Client connects to Intaris at `/mcp` using the MCP Streamable HTTP transport.
+2. Client calls `tools/list` → Intaris aggregates tools from all configured upstream servers, namespaced as `server_name:tool_name`.
+3. Client calls `tools/call` → Intaris evaluates the call through the full safety pipeline (classify → LLM → decide → audit), then forwards approved calls to the upstream server.
+4. Escalated calls return an `isError: true` result with a message directing the user to the Intaris UI for approval.
+
+### Modules
+
+| Module | Responsibility |
+|---|---|
+| `mcp/store.py` | CRUD for MCP server configs and tool preferences. Secrets encrypted at rest via `crypto.py`. Name validation: `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, max 64 chars. |
+| `mcp/config.py` | Loads server definitions from a JSON file (`MCP_CONFIG_FILE`). Reconciles orphaned `source="file"` entries on restart. |
+| `mcp/client.py` | `MCPConnectionManager` — lazy upstream connections with 30-min idle timeout, max 10 connections per user, background sweep task. Supports stdio, HTTP, and SSE transports. |
+| `mcp/proxy.py` | `MCPProxy` — MCP server that handles `tools/list` and `tools/call`. Auto-creates sessions, aggregates tools with 5-min cache, routes calls through the evaluator. |
+| `crypto.py` | Fernet encrypt/decrypt for secrets at rest. `ValueError` if `INTARIS_ENCRYPTION_KEY` missing when secrets are present. |
+
+### Tool namespacing
+
+Tools are namespaced as `server_name:tool_name` (colon separator). When a client calls a namespaced tool, the proxy strips the prefix, routes to the correct upstream server, and forwards the original tool name.
+
+### Classification with tool preferences
+
+Tool preferences (`mcp_tool_preferences` table) allow per-tool overrides of the default classification behavior. Priority chain (deny-first):
+
+1. Session policy deny → **DENY**
+2. Tool preference deny → **DENY**
+3. Tool preference escalate → **ESCALATE**
+4. Session policy allow → classification from allowlist/patterns
+5. Tool preference auto-approve → **READ** (skip LLM)
+6. Critical patterns → **CRITICAL**
+7. Read-only allowlist → **READ**
+8. Default → **WRITE** (goes through LLM evaluation)
+
+### Escalation retry
+
+When a tool call is escalated and later approved, subsequent identical calls (same tool + same args) reuse the approval for 10 minutes. Identity is based on SHA-256 of `json.dumps(args, sort_keys=True, separators=(',', ':'))`, stored in `audit_log.args_hash`.
+
+### Session auto-creation
+
+The MCP proxy auto-creates sessions for new connections. Intention is resolved in priority order:
+1. `X-Intaris-Intention` request header
+2. `server_instructions` from the MCP initialize request
+3. Default: `"MCP proxy session — evaluate all tool calls for safety"`
+
+### Transports
+
+| Transport | Config key | Description |
+|---|---|---|
+| `stdio` | `command`, `args`, `env` | Subprocess-based. Requires `MCP_ALLOW_STDIO=true`. |
+| `streamable-http` | `url`, `headers` | HTTP-based (MCP SDK `streamablehttp_client`). |
+| `sse` | `url`, `headers` | Server-Sent Events (MCP SDK `sse_client`). |
+
+### File-based configuration
+
+Servers can be defined in a JSON file pointed to by `MCP_CONFIG_FILE`. Format:
+
+```json
+{
+  "users": {
+    "user@example.com": {
+      "mcpServers": {
+        "my-server": {
+          "type": "streamable-http",
+          "url": "https://example.com/mcp",
+          "headers": {"Authorization": "Bearer token"},
+          "agent_pattern": "*"
+        }
+      }
+    }
+  }
+}
+```
+
+File-defined servers are stored with `source="file"` in the database. On startup, the config loader reconciles: new servers are inserted, existing ones are updated, and orphaned file-sourced entries (removed from the file) are deleted.
+
+### REST API endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/v1/mcp/servers` | GET | List all configured MCP servers |
+| `/api/v1/mcp/servers/{name}` | GET | Get a single server config |
+| `/api/v1/mcp/servers/{name}` | PUT | Create or update a server |
+| `/api/v1/mcp/servers/{name}` | DELETE | Delete a server |
+| `/api/v1/mcp/servers/{name}/tools/{tool}/preference` | GET | Get tool preference |
+| `/api/v1/mcp/servers/{name}/tools/{tool}/preference` | PUT | Set tool preference |
+| `/api/v1/mcp/servers/{name}/tools/{tool}/preference` | DELETE | Remove tool preference |
+
+### Database tables
+
+- **`mcp_servers`**: `name` (PK), `user_id`, `transport`, `config_json` (encrypted if secrets), `enabled`, `source` ("api"/"file"), `tools_cache`, `tools_cache_at`, `created_at`, `updated_at`.
+- **`mcp_tool_preferences`**: `server_name` + `tool_name` (compound PK), `user_id`, `preference` (CHECK: auto-approve/escalate/deny), `created_at`.
+- **`audit_log.args_hash`**: SHA-256 column for escalation retry lookup. Indexed via `idx_audit_escalation_retry(user_id, tool, args_hash, decision)`.
+
 ## Important Notes
 
 - **Evaluation pipeline**: classify → critical check → LLM → decision matrix → audit. Fast path skips LLM for read-only and critical classifications.
 - **LLM timeout**: Configured via `LLM_TIMEOUT_MS` (default 4000ms). Must be under the 5-second circuit breaker in the Executor Adapter.
 - **Session policy**: Uses fnmatch glob patterns (NOT regex) for custom allow/deny rules to prevent ReDoS attacks.
 - **Redaction immutability**: `redact()` always returns a deep copy. Never mutates input args.
-- **Sub-app state propagation**: The Starlette parent app initializes `rate_limiter`, `webhook`, and `event_bus` in its lifespan, then propagates them to the FastAPI sub-app's `state`. This is necessary because `request.app` in FastAPI endpoints refers to the sub-app, not the parent.
+- **Sub-app state propagation**: The Starlette parent app initializes `rate_limiter`, `webhook`, `event_bus`, and `mcp_proxy` in its lifespan, then propagates them to the FastAPI sub-app's `state`. This is necessary because `request.app` in FastAPI endpoints refers to the sub-app, not the parent.
