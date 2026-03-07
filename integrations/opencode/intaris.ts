@@ -14,7 +14,8 @@
  *    - deny: throws error with reasoning (blocks execution)
  *    - escalate: throws error directing user to Intaris UI for approval
  *    - Periodic checkpoints sent every N calls (configurable)
- * 4. session.deleted / session.idle: Signals session completion to Intaris
+ * 4. session.updated: Updates Intaris intention when session title changes
+ * 5. session.deleted / session.idle: Signals session completion to Intaris
  *    - PATCH /session/{id}/status to "completed"
  *    - POST /session/{id}/agent-summary with session statistics
  *
@@ -318,12 +319,39 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           },
         })
         .catch(() => {})
+    } else if (status === 409) {
+      // Session already exists (resumed OpenCode session) — reuse it
+      state.intarisSessionId = intarisSessionId
+      await client.app
+        .log({
+          body: {
+            service: "intaris",
+            level: "info",
+            message: `Session already exists, reusing: ${intarisSessionId}`,
+          },
+        })
+        .catch(() => {})
+
+      // Re-activate the session (may have been swept to idle/completed)
+      // and update intention in case the title changed since creation
+      callApi(
+        "PATCH",
+        `/api/v1/session/${intarisSessionId}/status`,
+        { status: "active" },
+        2000,
+      ).catch(() => {})
+      callApi(
+        "PATCH",
+        `/api/v1/session/${intarisSessionId}`,
+        { intention: buildIntention(state), details: buildDetails(state) },
+        2000,
+      ).catch(() => {})
     } else if (status !== null && status >= 400 && status < 500) {
       // Client error (auth, validation) — propagate detail, don't retry
       state.lastError = error || `HTTP ${status}`
       return null
     } else {
-      // Session may already exist (409 conflict) or server error — try using it anyway
+      // Server error or network issue — try using it anyway
       state.intarisSessionId = intarisSessionId
     }
 
@@ -430,7 +458,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
   // -- Hooks ----------------------------------------------------------------
 
   return {
-    // -- Agent Name Capture -------------------------------------------------
+    // -- Agent Name Capture + User Message Forwarding -----------------------
     "chat.message": async (
       input: {
         sessionID: string
@@ -438,11 +466,13 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         model?: { providerID: string; modelID: string }
         messageID?: string
       },
-      _output: any,
+      output: { message?: any; parts?: any[] },
     ) => {
-      if (!input.sessionID || !input.agent) return
-      const state = sessions.get(input.sessionID)
-      if (state && !state.agentName) {
+      if (!input.sessionID) return
+      const state = sessions.get(input.sessionID) || getOrCreateState(input.sessionID)
+
+      // Capture agent name on first message
+      if (input.agent && !state.agentName) {
         state.agentName = input.agent
         // If session already created, update intention with agent info
         if (state.intarisSessionId && !state.intentionUpdated) {
@@ -453,6 +483,29 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
             "PATCH",
             `/api/v1/session/${state.intarisSessionId}`,
             { intention, details },
+            2000,
+          ).catch(() => {})
+        }
+      }
+
+      // Extract user message text from parts and send as reasoning record.
+      // This gives Intaris visibility into what the user is asking the agent
+      // to do, enabling better intention tracking and safety evaluation.
+      if (state.intarisSessionId && output?.parts && Array.isArray(output.parts)) {
+        const userText = output.parts
+          .filter((p: any) => p.type === "text" && !p.synthetic)
+          .map((p: any) => p.text)
+          .join("\n")
+          .trim()
+
+        if (userText) {
+          callApi(
+            "POST",
+            "/api/v1/reasoning",
+            {
+              session_id: state.intarisSessionId,
+              content: `User message: ${userText}`,
+            },
             2000,
           ).catch(() => {})
         }
@@ -483,6 +536,28 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
         // Pre-create the Intaris session (best-effort, non-blocking)
         ensureSession(sessionId, state).catch(() => {})
+      }
+
+      // Update Intaris intention when session title changes.
+      // OpenCode starts with a generic title and updates it after the
+      // first user message (e.g., "New session" → "Fix login bug").
+      if (event.type === "session.updated") {
+        const sessionId: string = event.properties?.info?.id
+        if (!sessionId) return
+
+        const state = sessions.get(sessionId)
+        if (!state?.intarisSessionId) return
+
+        const title: string | undefined = event.properties?.info?.title
+        if (title && title !== state.sessionTitle) {
+          state.sessionTitle = title
+          callApi(
+            "PATCH",
+            `/api/v1/session/${state.intarisSessionId}`,
+            { intention: buildIntention(state), details: buildDetails(state) },
+            2000,
+          ).catch(() => {})
+        }
       }
 
       // Signal session completion when explicitly deleted.

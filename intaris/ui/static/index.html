@@ -217,10 +217,16 @@
                       x-text="s"></button>
             </template>
           </div>
-          <button @click="toggleTreeView()"
-                  :class="treeView ? 'btn-primary text-sm' : 'btn-secondary text-sm'">
-            Tree View
-          </button>
+          <div class="flex items-center gap-2">
+            <button x-show="treeView && hasParents"
+                    @click="allCollapsed ? expandAll() : collapseAll()"
+                    class="btn-secondary text-sm"
+                    x-text="allCollapsed ? 'Expand All' : 'Collapse All'"></button>
+            <button @click="toggleTreeView()"
+                    :class="treeView ? 'btn-primary text-sm' : 'btn-secondary text-sm'">
+              Tree View
+            </button>
+          </div>
         </div>
 
         <div x-show="loading && !initialized" class="text-center py-12 text-secondary">Loading sessions...</div>
@@ -233,12 +239,22 @@
                  @click="toggleExpand(session)">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-3">
+                  <!-- Collapse/expand chevron for parent sessions with children -->
+                  <span x-show="treeView && session._children.length > 0"
+                        @click.stop="toggleCollapse(session.session_id)"
+                        class="text-muted hover:text-[#E6EDF3] cursor-pointer select-none w-4 text-center text-xs"
+                        x-text="collapsedSessions[session.session_id] ? '&#x25B6;' : '&#x25BC;'"
+                        :title="collapsedSessions[session.session_id] ? 'Expand children' : 'Collapse children'"></span>
                   <!-- Tree connector for child sessions -->
                   <span x-show="session._depth > 0" class="tree-connector text-muted">&#x2514;</span>
                   <span :class="statusBadgeClass(session.status)" x-text="session.status"></span>
                   <span class="font-mono text-sm text-brand-accent" x-text="session.session_id"></span>
                   <span x-show="session.parent_session_id" class="text-xs text-muted"
                         x-text="session.details?.agent_type ? '(' + session.details.agent_type + ')' : '(child)'"></span>
+                  <!-- Child count indicator when collapsed -->
+                  <span x-show="treeView && session._children.length > 0 && collapsedSessions[session.session_id]"
+                        class="text-xs text-muted"
+                        x-text="'(' + session._children.length + ' sub)'"></span>
                 </div>
                 <div class="flex items-center gap-4 text-sm text-muted">
                   <span x-text="session.total_calls + ' calls'"></span>

@@ -18,7 +18,8 @@ function sessionsTab() {
     sessionAudit: [],
     expandedAuditId: null,
     expandedAuditRecord: null,
-    treeView: false,
+    treeView: true,
+    collapsedSessions: {},
 
     init() {
       window.addEventListener('intaris:tab-changed', (e) => {
@@ -150,13 +151,13 @@ function sessionsTab() {
     /**
      * Get sessions organized as a tree (parent sessions with children nested).
      * Returns flat sessions list when treeView is off.
+     * Collapsed parents hide their children.
      */
     get sessionTree() {
       if (!this.treeView) return this.sessions.map(s => ({ ...s, _depth: 0, _children: [] }));
 
       const byId = {};
       const roots = [];
-      const children = [];
 
       // Index all sessions
       for (const s of this.sessions) {
@@ -174,18 +175,68 @@ function sessionsTab() {
         }
       }
 
-      // Flatten tree: parent followed by its children
+      // Flatten tree: parent followed by its children (unless collapsed)
       const result = [];
       for (const root of roots) {
-        result.push(root);
         // Sort children by created_at
         root._children.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
-        for (const child of root._children) {
-          result.push(child);
+        result.push(root);
+        if (!this.collapsedSessions[root.session_id]) {
+          for (const child of root._children) {
+            result.push(child);
+          }
         }
       }
 
       return result;
+    },
+
+    /**
+     * Get all parent session IDs (sessions that have children).
+     */
+    get _parentIds() {
+      const parents = new Set();
+      for (const s of this.sessions) {
+        if (s.parent_session_id) {
+          parents.add(s.parent_session_id);
+        }
+      }
+      return parents;
+    },
+
+    get allCollapsed() {
+      const parents = this._parentIds;
+      if (parents.size === 0) return false;
+      for (const id of parents) {
+        if (!this.collapsedSessions[id]) return false;
+      }
+      return true;
+    },
+
+    get hasParents() {
+      return this._parentIds.size > 0;
+    },
+
+    toggleCollapse(sessionId) {
+      if (this.collapsedSessions[sessionId]) {
+        delete this.collapsedSessions[sessionId];
+      } else {
+        this.collapsedSessions[sessionId] = true;
+      }
+      // Trigger reactivity by reassigning
+      this.collapsedSessions = { ...this.collapsedSessions };
+    },
+
+    collapseAll() {
+      const collapsed = {};
+      for (const id of this._parentIds) {
+        collapsed[id] = true;
+      }
+      this.collapsedSessions = collapsed;
+    },
+
+    expandAll() {
+      this.collapsedSessions = {};
     },
 
     async toggleExpand(session) {
