@@ -229,7 +229,7 @@ uv run ruff format intaris/ tests/
 
 - API endpoints catch ValueError (→ 4xx) and Exception (→ 500)
 - Internal errors logged with `logger.exception()` for stack traces
-- Evaluator catches LLM failures and treats them as escalation (safe default)
+- Evaluator propagates LLM failures as exceptions (→ 500), letting clients retry
 
 ### Configuration
 

@@ -464,14 +464,12 @@ class Evaluator:
             return apply_decision_matrix(evaluation)
 
         except Exception:
-            # LLM failure → treat as escalate (safe default)
+            # LLM failure → propagate as exception. The API endpoint
+            # catches this and returns 500, letting the client retry
+            # with exponential backoff. Making a safety decision
+            # (approve/deny/escalate) on an infra failure is wrong.
             logger.exception("LLM safety evaluation failed")
-            return Decision(
-                decision="escalate",
-                risk="high",
-                reasoning="LLM evaluation failed — escalating as safe default",
-                path="llm",
-            )
+            raise
 
 
 def _compute_args_hash(args: dict[str, Any]) -> str:

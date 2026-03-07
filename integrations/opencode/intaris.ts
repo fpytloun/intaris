@@ -665,6 +665,15 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       const { tool, sessionID } = input
       if (!sessionID) return
 
+      // Skip evaluation for invalid/unavailable tool calls.
+      // OpenCode fires tool.execute.before even when the model tries to
+      // call a tool that doesn't exist — the args contain an error message.
+      // No point evaluating these; they'll fail on their own.
+      const args = _output.args || {}
+      if (typeof args.error === "string" && args.error.includes("unavailable tool")) {
+        return
+      }
+
       const state = getOrCreateState(sessionID)
 
       // Ensure session exists (lazy creation for resumed sessions)

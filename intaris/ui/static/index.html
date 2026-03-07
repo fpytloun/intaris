@@ -580,13 +580,13 @@
                          x-model="noteText[item.call_id]">
                 </div>
                 <button @click.stop="resolve(item.call_id, 'approve')"
-                        :disabled="resolving[item.call_id]"
+                        :disabled="resolving[item.call_id] === true"
                         class="btn-success text-sm"
-                        x-text="resolving[item.call_id] ? 'Approving...' : 'Approve'"></button>
+                        x-text="resolving[item.call_id] === true ? 'Approving...' : 'Approve'"></button>
                 <button @click.stop="resolve(item.call_id, 'deny')"
-                        :disabled="resolving[item.call_id]"
+                        :disabled="resolving[item.call_id] === true"
                         class="btn-danger text-sm"
-                        x-text="resolving[item.call_id] ? 'Denying...' : 'Deny'"></button>
+                        x-text="resolving[item.call_id] === true ? 'Denying...' : 'Deny'"></button>
               </div>
             </div>
           </template>
