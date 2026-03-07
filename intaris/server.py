@@ -92,6 +92,8 @@ def _get_evaluator():
             llm=LLMClient(cfg.llm),
             session_store=SessionStore(db),
             audit_store=AuditStore(db),
+            db=db,
+            analysis_config=cfg.analysis,
         )
     return _evaluator
 
@@ -100,14 +102,35 @@ def _get_evaluator():
 
 
 async def health_check(request: Request) -> JSONResponse:
-    """Health check endpoint for Kubernetes readiness probes."""
-    return JSONResponse(
-        {
-            "healthy": True,
-            "service": "intaris",
-            "version": __version__,
-        }
-    )
+    """Health check endpoint for Kubernetes readiness probes.
+
+    Includes behavioral analysis pipeline status when analysis is enabled.
+    """
+    response: dict = {
+        "healthy": True,
+        "service": "intaris",
+        "version": __version__,
+    }
+
+    # Include analysis pipeline status if available
+    try:
+        cfg = _get_config()
+        if cfg.analysis.enabled:
+            worker = getattr(request.app.state, "background_worker", None)
+            if worker is not None:
+                stats = worker._task_queue.get_queue_stats()
+            else:
+                from intaris.background import TaskQueue
+
+                stats = TaskQueue(_get_db()).get_queue_stats()
+            response["analysis"] = {
+                "enabled": True,
+                "queue": stats,
+            }
+    except Exception:
+        pass  # Health check should never fail due to analysis
+
+    return JSONResponse(response)
 
 
 # ── API Key Middleware ────────────────────────────────────────────────
@@ -309,6 +332,22 @@ async def lifespan(app):
     app.state.event_bus = EventBus()
     logger.info("EventBus initialized")
 
+    # Initialize background worker for behavioral analysis
+    from intaris.background import BackgroundWorker, TaskQueue
+
+    task_queue = TaskQueue(_get_db())
+    background_worker = BackgroundWorker(
+        db=_get_db(),
+        config=cfg.analysis,
+        task_queue=task_queue,
+    )
+    app.state.background_worker = background_worker
+    if cfg.analysis.enabled:
+        await background_worker.start()
+        logger.info("Background worker started (analysis enabled)")
+    else:
+        logger.info("Background worker not started (analysis disabled)")
+
     # Initialize MCP proxy
     global _mcp_proxy_ref
     mcp_proxy = _init_mcp_proxy(cfg)
@@ -323,6 +362,7 @@ async def lifespan(app):
         api_app.state.webhook = app.state.webhook
         api_app.state.event_bus = app.state.event_bus
         api_app.state.mcp_proxy = mcp_proxy
+        api_app.state.background_worker = background_worker
 
     if mcp_proxy is not None:
         await mcp_proxy.start()
@@ -338,6 +378,7 @@ async def lifespan(app):
 
     # Cleanup
     _mcp_proxy_ref = None
+    await background_worker.stop()
     await app.state.webhook.close()
     db = _get_db()
     db.close()

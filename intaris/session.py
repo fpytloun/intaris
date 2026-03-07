@@ -34,6 +34,7 @@ class SessionStore:
         intention: str,
         details: dict[str, Any] | None = None,
         policy: dict[str, Any] | None = None,
+        parent_session_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a new session.
 
@@ -45,6 +46,7 @@ class SessionStore:
                      (repo, branch, constraints, etc.).
             policy: Optional JSON-serializable session policy
                     (custom classifier rules, risk overrides).
+            parent_session_id: Optional parent session for continuation chains.
 
         Returns:
             The created session as a dict.
@@ -62,8 +64,9 @@ class SessionStore:
                     """
                     INSERT INTO sessions
                         (session_id, user_id, intention, details, policy,
+                         last_activity_at, parent_session_id,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session_id,
@@ -71,6 +74,8 @@ class SessionStore:
                         intention,
                         details_json,
                         policy_json,
+                        now,
+                        parent_session_id,
                         now,
                         now,
                     ),
@@ -118,7 +123,7 @@ class SessionStore:
         Raises:
             ValueError: If session not found or invalid status.
         """
-        valid_statuses = {"active", "completed", "suspended", "terminated"}
+        valid_statuses = {"active", "idle", "completed", "suspended", "terminated"}
         if status not in valid_statuses:
             raise ValueError(
                 f"Invalid status '{status}'. Must be one of: {valid_statuses}"
@@ -178,6 +183,78 @@ class SessionStore:
             )
             if cur.rowcount == 0:
                 raise ValueError(f"Session {session_id} not found")
+
+    def update_activity(self, session_id: str, *, user_id: str) -> None:
+        """Update last_activity_at timestamp for a session.
+
+        Called on every evaluate, reasoning, and checkpoint call to
+        track session activity for idle detection.
+
+        Args:
+            session_id: Session to update.
+            user_id: Tenant identifier (must match session owner).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET last_activity_at = ?, updated_at = ?
+                WHERE session_id = ? AND user_id = ?
+                """,
+                (now, now, session_id, user_id),
+            )
+
+    def sweep_idle_sessions(self, cutoff_time: str) -> list[tuple[str, str]]:
+        """Transition active sessions to idle if inactive past cutoff.
+
+        Uses an atomic conditional UPDATE to prevent TOCTOU races
+        between the sweeper and concurrent evaluate calls.
+
+        Args:
+            cutoff_time: ISO timestamp. Sessions with last_activity_at
+                before this time are transitioned to idle.
+
+        Returns:
+            List of (user_id, session_id) pairs that were transitioned.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET status = 'idle', updated_at = ?
+                WHERE status = 'active'
+                  AND last_activity_at IS NOT NULL
+                  AND last_activity_at < ?
+                RETURNING user_id, session_id
+                """,
+                (now, cutoff_time),
+            )
+            rows = cur.fetchall()
+
+        return [(row[0], row[1]) for row in rows]
+
+    def increment_summary_count(self, session_id: str, *, user_id: str) -> None:
+        """Increment the summary_count for a session.
+
+        Called after a summary is successfully generated for this session.
+
+        Args:
+            session_id: Session to update.
+            user_id: Tenant identifier (must match session owner).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET summary_count = COALESCE(summary_count, 0) + 1,
+                    updated_at = ?
+                WHERE session_id = ? AND user_id = ?
+                """,
+                (now, session_id, user_id),
+            )
 
     def list_sessions(
         self,

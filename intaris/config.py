@@ -178,10 +178,64 @@ class MCPConfig:
 
 
 @dataclass
+class AnalysisConfig:
+    """Behavioral analysis configuration.
+
+    Controls the behavioral guardrails feature: session summaries,
+    cross-session analysis, and behavioral profiling.
+    """
+
+    # Master switch for behavioral analysis.
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("ANALYSIS_ENABLED", default=True)
+    )
+
+    # Minutes of inactivity before a session transitions to idle.
+    session_idle_timeout_min: int = field(
+        default_factory=lambda: _env_int("SESSION_IDLE_TIMEOUT_MINUTES", 30)
+    )
+
+    # Number of evaluate calls per session before triggering a summary.
+    summary_volume_threshold: int = field(
+        default_factory=lambda: _env_int("SUMMARY_VOLUME_THRESHOLD", 50)
+    )
+
+    # Minutes between periodic cross-session analysis runs.
+    analysis_interval_min: int = field(
+        default_factory=lambda: _env_int("ANALYSIS_INTERVAL_MINUTES", 60)
+    )
+
+    # Days of history to include in cross-session analysis.
+    lookback_days: int = field(
+        default_factory=lambda: _env_int("ANALYSIS_LOOKBACK_DAYS", 30)
+    )
+
+
+def _build_analysis_llm_config() -> LLMConfig:
+    """Build LLM config for analysis tasks.
+
+    Reads ANALYSIS_LLM_* env vars with fallback to the evaluate LLM
+    values for base_url and api_key (same provider/key is the common
+    case). Model, reasoning effort, and timeout must be explicitly set
+    or use analysis-specific defaults.
+    """
+    return LLMConfig(
+        model=_env("ANALYSIS_LLM_MODEL", "gpt-5-mini"),
+        base_url=_env("ANALYSIS_LLM_BASE_URL") or _llm_base_url(),
+        api_key=_env("ANALYSIS_LLM_API_KEY") or _llm_api_key(),
+        temperature=0.1,
+        reasoning_effort=_env("ANALYSIS_LLM_REASONING_EFFORT", "low") or None,
+        timeout_ms=_env_int("ANALYSIS_LLM_TIMEOUT_MS", 30000),
+    )
+
+
+@dataclass
 class Config:
     """Root configuration container."""
 
     llm: LLMConfig = field(default_factory=LLMConfig)
+    llm_analysis: LLMConfig = field(default_factory=_build_analysis_llm_config)
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     db: DBConfig = field(default_factory=DBConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
@@ -232,6 +286,19 @@ class Config:
         # Validate config file exists if specified.
         if self.mcp.config_file and not os.path.isfile(self.mcp.config_file):
             raise ValueError(f"MCP_CONFIG_FILE={self.mcp.config_file} does not exist.")
+
+        # Analysis LLM is required when behavioral analysis is enabled.
+        # No fallback from llm_analysis to llm — prevents silent
+        # misconfiguration where a fast/cheap model produces garbage
+        # for analysis tasks that need a more capable model.
+        if self.analysis.enabled and not self.llm_analysis.api_key:
+            raise ValueError(
+                "ANALYSIS_LLM_API_KEY (or LLM_API_KEY as fallback) is required "
+                "when ANALYSIS_ENABLED=true. Analysis requires a separate LLM "
+                "configuration (typically a more capable model with longer "
+                "timeout than the evaluate model). Set ANALYSIS_ENABLED=false "
+                "to disable behavioral analysis."
+            )
 
 
 def load_config() -> Config:

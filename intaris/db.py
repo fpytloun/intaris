@@ -105,6 +105,39 @@ class Database:
             "ON audit_log(user_id, session_id, tool, args_hash, user_decision)"
         )
 
+        # Migration: add last_activity_at to sessions (behavioral guardrails)
+        if not self._column_exists(conn, "sessions", "last_activity_at"):
+            conn.execute("ALTER TABLE sessions ADD COLUMN last_activity_at TEXT")
+            # Backfill existing sessions with updated_at
+            conn.execute(
+                "UPDATE sessions SET last_activity_at = updated_at "
+                "WHERE last_activity_at IS NULL"
+            )
+            logger.info("Migration: added last_activity_at column to sessions")
+
+        # Migration: add parent_session_id to sessions (session continuation)
+        if not self._column_exists(conn, "sessions", "parent_session_id"):
+            conn.execute("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT")
+            logger.info("Migration: added parent_session_id column to sessions")
+
+        # Migration: add summary_count to sessions (volume trigger tracking)
+        if not self._column_exists(conn, "sessions", "summary_count"):
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN summary_count INTEGER DEFAULT 0"
+            )
+            logger.info("Migration: added summary_count column to sessions")
+
+        # Migration: add profile_version to audit_log (profile traceability)
+        if not self._column_exists(conn, "audit_log", "profile_version"):
+            conn.execute("ALTER TABLE audit_log ADD COLUMN profile_version INTEGER")
+            logger.info("Migration: added profile_version column to audit_log")
+
+        # Index for idle session sweep (status + last_activity_at)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
+            "ON sessions(status, last_activity_at)"
+        )
+
     @staticmethod
     def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
         """Check if a column exists in a table."""
@@ -211,4 +244,96 @@ CREATE TABLE IF NOT EXISTS mcp_tool_preferences (
     FOREIGN KEY (user_id, server_name) REFERENCES mcp_servers(user_id, name)
         ON DELETE CASCADE
 );
+
+-- Behavioral guardrails: Intaris-generated session summaries
+CREATE TABLE IF NOT EXISTS session_summaries (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    window_start    TEXT NOT NULL,
+    window_end      TEXT NOT NULL,
+    trigger         TEXT NOT NULL
+        CHECK (trigger IN ('inactivity', 'volume', 'close', 'manual')),
+    summary         TEXT NOT NULL,
+    tools_used      TEXT,
+    intent_alignment TEXT NOT NULL
+        CHECK (intent_alignment IN (
+            'aligned', 'partially_aligned', 'misaligned', 'unclear'
+        )),
+    risk_indicators TEXT,
+    call_count      INTEGER NOT NULL,
+    approved_count  INTEGER NOT NULL DEFAULT 0,
+    denied_count    INTEGER NOT NULL DEFAULT 0,
+    escalated_count INTEGER NOT NULL DEFAULT 0,
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_summaries_user_time
+    ON session_summaries(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_summaries_session
+    ON session_summaries(user_id, session_id);
+
+-- Behavioral guardrails: agent-reported summaries (untrusted, stored separately)
+CREATE TABLE IF NOT EXISTS agent_summaries (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    session_id      TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
+);
+
+-- Behavioral guardrails: cross-session analysis results
+CREATE TABLE IF NOT EXISTS behavioral_analyses (
+    id              TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    analysis_type   TEXT NOT NULL
+        CHECK (analysis_type IN ('session_end', 'periodic', 'on_demand')),
+    sessions_scope  TEXT,
+    risk_level      TEXT NOT NULL
+        CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
+    findings        TEXT NOT NULL,
+    recommendations TEXT,
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_analyses_user_time
+    ON behavioral_analyses(user_id, created_at);
+
+-- Behavioral guardrails: pre-computed behavioral profiles (fast evaluator lookup)
+CREATE TABLE IF NOT EXISTS behavioral_profiles (
+    user_id         TEXT PRIMARY KEY,
+    risk_level      TEXT NOT NULL DEFAULT 'low'
+        CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
+    active_alerts   TEXT,
+    context_summary TEXT,
+    profile_version INTEGER NOT NULL DEFAULT 0,
+    last_analysis_id TEXT,
+    updated_at      TEXT NOT NULL
+);
+
+-- Behavioral guardrails: SQLite-backed task queue for background reliability
+CREATE TABLE IF NOT EXISTS analysis_tasks (
+    id              TEXT PRIMARY KEY,
+    task_type       TEXT NOT NULL
+        CHECK (task_type IN ('summary', 'analysis')),
+    user_id         TEXT NOT NULL,
+    session_id      TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+    priority        INTEGER NOT NULL DEFAULT 0,
+    payload         TEXT,
+    result          TEXT,
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    max_retries     INTEGER NOT NULL DEFAULT 3,
+    next_attempt_at TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_pending
+    ON analysis_tasks(status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_tasks_user
+    ON analysis_tasks(user_id, task_type, status);
 """

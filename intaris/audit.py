@@ -25,7 +25,7 @@ class AuditStore:
     All operations require user_id for tenant isolation.
     """
 
-    VALID_RECORD_TYPES = {"tool_call", "reasoning", "checkpoint"}
+    VALID_RECORD_TYPES = {"tool_call", "reasoning", "checkpoint", "summary"}
 
     def __init__(self, db: Database):
         self._db = db
@@ -48,6 +48,7 @@ class AuditStore:
         record_type: str = "tool_call",
         content: str | None = None,
         args_hash: str | None = None,
+        profile_version: int | None = None,
     ) -> dict[str, Any]:
         """Insert an audit record.
 
@@ -64,9 +65,11 @@ class AuditStore:
             risk: Risk level from LLM evaluation (null for fast path).
             reasoning: LLM reasoning or pattern match explanation.
             latency_ms: Time taken for the evaluation in milliseconds.
-            record_type: Record type: "tool_call", "reasoning", or "checkpoint".
+            record_type: Record type: "tool_call", "reasoning", "checkpoint",
+                or "summary".
             content: Reasoning or checkpoint text (null for tool_call records).
             args_hash: SHA-256 hash of canonical args for escalation retry.
+            profile_version: Behavioral profile version at time of evaluation.
 
         Returns:
             The created audit record as a dict.
@@ -87,8 +90,8 @@ class AuditStore:
                     (id, call_id, record_type, user_id, session_id, agent_id,
                      timestamp, tool, args_redacted, content, classification,
                      evaluation_path, decision, risk, reasoning, latency_ms,
-                     args_hash)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     args_hash, profile_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record_id,
@@ -108,6 +111,7 @@ class AuditStore:
                     reasoning,
                     latency_ms,
                     args_hash,
+                    profile_version,
                 ),
             )
 

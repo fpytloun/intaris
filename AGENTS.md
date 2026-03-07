@@ -30,13 +30,16 @@ intaris/
 ├── config.py              # Configuration from environment variables (dataclasses)
 ├── crypto.py              # Fernet encryption/decryption for secrets at rest
 ├── db.py                  # SQLite connection management, table creation, indexes, migrations
-├── session.py             # Session CRUD + counter updates (paginated list)
+├── session.py             # Session CRUD + counter updates (paginated list, idle sweep)
 ├── audit.py               # Audit log storage + querying (with args_hash for escalation retry)
 ├── classifier.py          # Tool call classification (read/write/critical/escalate)
 ├── redactor.py            # Secret redaction for audit args
 ├── llm.py                 # OpenAI-compatible LLM client with structured output
 ├── prompts.py             # Safety evaluation prompt templates + JSON schema
-├── evaluator.py           # Evaluation pipeline orchestrator (ESCALATE branch, retry, args_hash)
+├── prompts_analysis.py    # L2/L3 analysis prompt templates + JSON schemas
+├── evaluator.py           # Evaluation pipeline orchestrator (ESCALATE branch, retry, behavioral context)
+├── analyzer.py            # Stub: L2 summary generation + L3 behavioral analysis (Phase 2)
+├── background.py          # TaskQueue (SQLite), BackgroundWorker (idle sweep, scheduler), Metrics
 ├── decision.py            # Decision matrix (priority-ordered, escalate fast path)
 ├── ratelimit.py           # In-memory sliding window rate limiter
 ├── webhook.py             # Async webhook client with HMAC-SHA256 signing
@@ -55,6 +58,7 @@ intaris/
 │   ├── audit.py           # GET /api/v1/audit, POST /api/v1/decision (EventBus publish)
 │   ├── info.py            # GET /whoami, /stats, /config (management UI support, MCP stats)
 │   ├── mcp.py             # MCP server CRUD + tool preference endpoints
+│   ├── analysis.py        # Behavioral analysis endpoints (L1/L2/L3 data collection + retrieval)
 │   └── stream.py          # EventBus + WebSocket streaming (first-message auth)
 └── ui/
     ├── __init__.py        # Package marker
@@ -87,18 +91,21 @@ intaris/
 | **REST API** | `api/` | FastAPI endpoints with OpenAPI spec |
 | **Streaming** | `api/stream.py` | EventBus (pub/sub) + WebSocket endpoint with first-message auth |
 | **Info** | `api/info.py` | Identity (/whoami), stats (/stats), config (/config) for management UI |
-| **Orchestration** | `evaluator.py` | Full evaluation pipeline (classify → LLM → decide → audit) |
+| **Orchestration** | `evaluator.py` | Full evaluation pipeline (classify → LLM → decide → audit), behavioral context injection |
 | **Classification** | `classifier.py` | Read-only allowlist, critical patterns, session policy |
 | **Decision** | `decision.py` | Priority-ordered decision matrix |
 | **LLM** | `llm.py` | OpenAI-compatible client with structured output |
 | **Prompts** | `prompts.py` | Safety evaluation prompt templates |
+| **Analysis Prompts** | `prompts_analysis.py` | L2/L3 analysis prompt templates + JSON schemas |
+| **Analyzer** | `analyzer.py` | Stub: L2 summary generation + L3 behavioral analysis (Phase 2) |
+| **Background** | `background.py` | TaskQueue (SQLite-backed), BackgroundWorker (idle sweep, scheduler), Metrics |
 | **Redaction** | `redactor.py` | Secret redaction before audit storage |
 | **Rate Limiting** | `ratelimit.py` | In-memory sliding window rate limiter per (user_id, session_id) |
 | **Webhook** | `webhook.py` | Async webhook client with HMAC-SHA256 signing for escalation callbacks |
-| **Session** | `session.py` | Session CRUD, counter management, paginated listing |
-| **Audit** | `audit.py` | Audit log CRUD and querying |
-| **Database** | `db.py` | SQLite connection management, schema |
-| **Configuration** | `config.py` | Environment variable parsing |
+| **Session** | `session.py` | Session CRUD, counter management, paginated listing, idle sweep |
+| **Audit** | `audit.py` | Audit log CRUD and querying (reasoning, checkpoint, summary record types) |
+| **Database** | `db.py` | SQLite connection management, schema (incl. analysis tables) |
+| **Configuration** | `config.py` | Environment variable parsing (incl. AnalysisConfig, analysis LLM config) |
 
 ### Key design decisions
 
@@ -155,6 +162,16 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `MCP_CONFIG_FILE` | Path to JSON file defining MCP servers (optional, reconciled on startup) |
 | `MCP_ALLOW_STDIO` | Allow stdio transport for MCP servers (default `false`) |
 | `MCP_UPSTREAM_TIMEOUT_MS` | Timeout for upstream MCP server calls in milliseconds (default `30000`) |
+| `ANALYSIS_ENABLED` | Enable behavioral analysis pipeline (default `true`) |
+| `SESSION_IDLE_TIMEOUT_MINUTES` | Minutes of inactivity before session transitions to idle (default `30`) |
+| `SUMMARY_VOLUME_THRESHOLD` | Evaluate calls per session before triggering a summary (default `50`) |
+| `ANALYSIS_INTERVAL_MINUTES` | Minutes between periodic cross-session analysis runs (default `60`) |
+| `ANALYSIS_LOOKBACK_DAYS` | Days of history to include in cross-session analysis (default `30`) |
+| `ANALYSIS_LLM_MODEL` | LLM model for analysis tasks (default `gpt-5-mini`) |
+| `ANALYSIS_LLM_BASE_URL` | LLM base URL for analysis (falls back to `LLM_BASE_URL`) |
+| `ANALYSIS_LLM_API_KEY` | LLM API key for analysis (falls back to `LLM_API_KEY`) |
+| `ANALYSIS_LLM_REASONING_EFFORT` | Reasoning effort for analysis LLM (default `low`) |
+| `ANALYSIS_LLM_TIMEOUT_MS` | Timeout for analysis LLM calls in milliseconds (default `30000`) |
 
 ## Build / Run / Test
 
@@ -236,10 +253,75 @@ The `audit_log` table supports multiple record types via the `record_type` colum
 | Type | Description | Key fields |
 |---|---|---|
 | `tool_call` | Standard tool call evaluation (default) | `tool`, `args_redacted`, `classification` |
-| `reasoning` | Agent reasoning checkpoint (future) | `content` |
-| `checkpoint` | Periodic agent state checkpoint (future) | `content` |
+| `reasoning` | Agent reasoning text | `content` |
+| `checkpoint` | Periodic agent state checkpoint | `content` |
+| `summary` | Session summary record | `content` |
 
-For `tool_call` records, `tool`, `args_redacted`, and `classification` are populated. For `reasoning` and `checkpoint` records, `content` holds the evaluated text and tool-specific fields are null. All record types share `decision`, `risk`, `reasoning`, `evaluation_path`, and `latency_ms`.
+For `tool_call` records, `tool`, `args_redacted`, and `classification` are populated. For `reasoning`, `checkpoint`, and `summary` records, `content` holds the text and tool-specific fields are null. All record types share `decision`, `risk`, `reasoning`, `evaluation_path`, and `latency_ms`. The `profile_version` column records the behavioral profile version at time of evaluation.
+
+## Behavioral Analysis
+
+Three-layer behavioral guardrails system that evolves Intaris from a per-call firewall into a behavioral analysis platform.
+
+### Architecture
+
+```
+L1: Data Collection (per-call)
+  POST /reasoning    — agent reasoning text → audit_log (record_type="reasoning")
+  POST /checkpoint   — agent state snapshot → audit_log (record_type="checkpoint")
+  Evaluator          — auto-updates session last_activity_at, injects behavioral context
+
+L2: Session Analysis (per-session)
+  POST /session/{id}/agent-summary  — agent-reported summary → agent_summaries table
+  POST /session/{id}/summary/trigger — manual trigger → enqueue summary task
+  GET  /session/{id}/summary        — retrieve both Intaris + agent summaries
+  BackgroundWorker                  — idle sweep, volume triggers, periodic scheduling
+
+L3: Cross-Session Analysis (per-user)
+  POST /analysis/trigger — manual trigger → enqueue analysis task
+  GET  /analysis         — list behavioral analyses
+  GET  /profile          — behavioral risk profile (user-bound API key only)
+```
+
+### Key design principles
+
+1. **Agent data isolation**: Agent-reported text (reasoning, checkpoints, summaries) is NEVER included in Intaris analysis prompts. Stored for post-hoc comparison only. Sanitized on ingestion to strip prompt injection patterns.
+
+2. **Separate LLM config**: Analysis uses a dedicated LLM configuration (`ANALYSIS_LLM_*` env vars) — typically a more capable model with longer timeout than the evaluate model. Falls back to the evaluate LLM key/base_url if not explicitly set.
+
+3. **SQLite task queue**: Background tasks (summaries, analyses) use a SQLite-backed task queue (`analysis_tasks` table) with atomic claim/complete/fail operations, retry with exponential backoff, and duplicate detection.
+
+4. **Resilient background loops**: All background worker loops are wrapped in `_resilient_loop()` with exponential backoff (5s → 60s) and automatic restart on failure.
+
+5. **Profile access control**: `GET /profile` requires `user_bound=True` (API key maps to a specific user). This prevents agents from querying their own risk profile.
+
+6. **Behavioral context injection**: The evaluator looks up the pre-computed behavioral profile (~1ms DB read) and injects `behavioral_alert` into the evaluation context for high/critical risk profiles.
+
+### Database tables (analysis)
+
+| Table | Description |
+|---|---|
+| `session_summaries` | Intaris-generated L2 session summaries |
+| `agent_summaries` | Agent-reported session summaries (isolated from analysis) |
+| `behavioral_analyses` | L3 cross-session analysis results |
+| `behavioral_profiles` | Pre-computed per-user risk profiles |
+| `analysis_tasks` | SQLite-backed task queue for background processing |
+
+### Session lifecycle extensions
+
+- **`idle` status**: Sessions transition to `idle` after `SESSION_IDLE_TIMEOUT_MINUTES` of inactivity (background sweep). Idle sessions are auto-resumed on the next evaluate call.
+- **`completed` denial**: Completed, suspended, and terminated sessions deny all evaluations.
+- **`last_activity_at`**: Updated on every evaluate, reasoning, and checkpoint call.
+- **`parent_session_id`**: Optional field for session continuation chains.
+- **`summary_count`**: Tracks number of summaries generated for a session.
+
+### Phase status
+
+- **Phase 1 (Foundation)**: Complete — infrastructure, data collection endpoints, background worker, evaluator integration.
+- **Phase 2 (LLM Analysis)**: Not started — implement `generate_summary()` and `run_analysis()` in `analyzer.py`.
+- **Phase 3 (Profile Updates)**: Not started — profile computation from analysis results.
+- **Phase 4 (UI Integration)**: Not started — management UI tabs for analysis.
+- **Phase 5 (Tuning)**: Not started — threshold tuning, alert rules.
 
 ## Rate Limiting
 

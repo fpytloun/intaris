@@ -42,6 +42,7 @@ async def declare_intention(
             intention=request.intention,
             details=request.details,
             policy=request.policy,
+            parent_session_id=request.parent_session_id,
         )
         return IntentionResponse(ok=True)
     except ValueError as e:

@@ -24,6 +24,8 @@ from typing import Any
 
 from intaris.audit import AuditStore
 from intaris.classifier import Classification, classify
+from intaris.config import AnalysisConfig
+from intaris.db import Database
 from intaris.decision import (
     Decision,
     EvaluationResult,
@@ -58,10 +60,15 @@ class Evaluator:
         llm: LLMClient,
         session_store: SessionStore,
         audit_store: AuditStore,
+        db: Database | None = None,
+        analysis_config: AnalysisConfig | None = None,
     ):
         self._llm = llm
         self._sessions = session_store
         self._audit = audit_store
+        self._db = db
+        self._analysis_config = analysis_config
+        self._analysis_enabled = analysis_config is not None and analysis_config.enabled
 
     def evaluate(
         self,
@@ -111,7 +118,17 @@ class Evaluator:
 
         # Check session status — deny evaluation for inactive sessions
         session_status = session.get("status", "active")
-        if session_status in ("suspended", "terminated"):
+
+        # Auto-resume idle sessions silently (behavioral guardrails)
+        if session_status == "idle":
+            try:
+                self._sessions.update_status(session_id, "active", user_id=user_id)
+                session_status = "active"
+                logger.debug("Auto-resumed idle session %s", session_id)
+            except ValueError:
+                pass
+
+        if session_status in ("completed", "suspended", "terminated"):
             latency_ms = int((time.monotonic() - start_time) * 1000)
             self._audit.insert(
                 call_id=call_id,
@@ -140,6 +157,23 @@ class Evaluator:
                 "latency_ms": latency_ms,
                 "args_redacted": redact(args),
             }
+
+        # Update session activity timestamp (for idle detection)
+        try:
+            self._sessions.update_activity(session_id, user_id=user_id)
+        except Exception:
+            logger.debug("Failed to update session activity", exc_info=True)
+
+        # Lookup behavioral profile for context injection
+        profile_version: int | None = None
+        if self._analysis_enabled and self._db is not None:
+            profile = self._get_behavioral_context(user_id)
+            if profile:
+                profile_version = profile.get("profile_version")
+                # Inject context for high/critical risk profiles
+                if profile.get("risk_level") in ("high", "critical"):
+                    context = dict(context) if context else {}
+                    context["behavioral_alert"] = profile.get("context_summary", "")
 
         # Redact secrets from args
         args_redacted = redact(args)
@@ -197,7 +231,7 @@ class Evaluator:
         # Calculate latency
         latency_ms = int((time.monotonic() - start_time) * 1000)
 
-        # Step 7: Audit (with args_hash for escalation retry)
+        # Step 7: Audit (with args_hash for escalation retry, profile_version)
         self._audit.insert(
             call_id=call_id,
             user_id=user_id,
@@ -212,6 +246,7 @@ class Evaluator:
             reasoning=decision.reasoning,
             latency_ms=latency_ms,
             args_hash=args_hash,
+            profile_version=profile_version,
         )
 
         # Step 8: Update session counters
@@ -231,6 +266,35 @@ class Evaluator:
             "latency_ms": latency_ms,
             "args_redacted": args_redacted,
         }
+
+    def _get_behavioral_context(self, user_id: str) -> dict[str, Any] | None:
+        """Fast DB lookup of pre-computed behavioral profile.
+
+        Returns the profile dict if found, None otherwise.
+        This is a ~1ms read that does not impact the evaluate hot path.
+
+        Args:
+            user_id: Tenant identifier.
+
+        Returns:
+            Profile dict with risk_level, context_summary, profile_version,
+            or None if no profile exists.
+        """
+        if self._db is None:
+            return None
+
+        try:
+            with self._db.cursor() as cur:
+                cur.execute(
+                    "SELECT risk_level, context_summary, profile_version "
+                    "FROM behavioral_profiles WHERE user_id = ?",
+                    (user_id,),
+                )
+                row = cur.fetchone()
+            return dict(row) if row else None
+        except Exception:
+            logger.debug("Failed to lookup behavioral profile", exc_info=True)
+            return None
 
     def _check_escalation_retry(
         self,

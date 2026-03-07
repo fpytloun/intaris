@@ -25,6 +25,7 @@ def create_api_app() -> FastAPI:
         openapi_url="/openapi.json",
     )
 
+    from intaris.api.analysis import router as analysis_router
     from intaris.api.audit import router as audit_router
     from intaris.api.evaluate import router as evaluate_router
     from intaris.api.info import router as info_router
@@ -36,5 +37,6 @@ def create_api_app() -> FastAPI:
     app.include_router(audit_router, tags=["audit"])
     app.include_router(info_router, tags=["info"])
     app.include_router(mcp_router, tags=["mcp"])
+    app.include_router(analysis_router, tags=["analysis"])
 
     return app

@@ -48,6 +48,9 @@ class IntentionRequest(BaseModel):
     policy: dict[str, Any] | None = Field(
         None, description="Session policy (custom rules)"
     )
+    parent_session_id: str | None = Field(
+        None, description="Parent session ID for continuation chains"
+    )
 
 
 class IntentionResponse(BaseModel):
@@ -69,6 +72,9 @@ class SessionResponse(BaseModel):
     denied_count: int = 0
     escalated_count: int = 0
     status: str = "active"
+    last_activity_at: str | None = None
+    parent_session_id: str | None = None
+    summary_count: int = 0
     created_at: str
     updated_at: str
 
@@ -147,7 +153,7 @@ class SessionListResponse(BaseModel):
 class StatusUpdateRequest(BaseModel):
     """Request to update session status."""
 
-    status: Literal["active", "completed", "suspended", "terminated"] = Field(
+    status: Literal["active", "idle", "completed", "suspended", "terminated"] = Field(
         ..., description="New session status"
     )
 
@@ -166,3 +172,129 @@ class ErrorResponse(BaseModel):
 
     error: str
     detail: str | None = None
+
+
+# ── Behavioral Analysis ───────────────────────────────────────────────
+
+
+class ReasoningRequest(BaseModel):
+    """Request to submit agent reasoning."""
+
+    session_id: str = Field(..., description="Session identifier")
+    content: str = Field(..., max_length=65536, description="Agent reasoning text")
+
+
+class ReasoningResponse(BaseModel):
+    """Response from reasoning submission."""
+
+    ok: bool = True
+    call_id: str = Field(..., description="Audit record call_id")
+
+
+class CheckpointRequest(BaseModel):
+    """Request to submit agent checkpoint."""
+
+    session_id: str = Field(..., description="Session identifier")
+    content: str = Field(..., max_length=65536, description="Agent checkpoint text")
+
+
+class CheckpointResponse(BaseModel):
+    """Response from checkpoint submission."""
+
+    ok: bool = True
+    call_id: str = Field(..., description="Audit record call_id")
+
+
+class AgentSummaryRequest(BaseModel):
+    """Request to submit agent-reported summary."""
+
+    summary: str = Field(
+        ..., max_length=65536, description="Agent's summary of the session"
+    )
+
+
+class AgentSummaryResponse(BaseModel):
+    """Response from agent summary submission."""
+
+    ok: bool = True
+
+
+class SummaryTriggerResponse(BaseModel):
+    """Response from manual summary trigger."""
+
+    ok: bool = True
+    task_id: str | None = Field(None, description="Enqueued task ID")
+
+
+class SessionSummaryRecord(BaseModel):
+    """Intaris-generated session summary."""
+
+    id: str
+    session_id: str
+    window_start: str
+    window_end: str
+    trigger: str
+    summary: str
+    tools_used: list[str] | None = None
+    intent_alignment: str
+    risk_indicators: list[dict[str, Any]] | None = None
+    call_count: int
+    approved_count: int = 0
+    denied_count: int = 0
+    escalated_count: int = 0
+    created_at: str
+
+
+class AgentSummaryRecord(BaseModel):
+    """Agent-reported summary."""
+
+    id: str
+    session_id: str
+    summary: str
+    created_at: str
+
+
+class SessionSummariesResponse(BaseModel):
+    """Combined summaries for a session."""
+
+    intaris_summaries: list[SessionSummaryRecord]
+    agent_summaries: list[AgentSummaryRecord]
+
+
+class AnalysisTriggerResponse(BaseModel):
+    """Response from manual analysis trigger."""
+
+    ok: bool = True
+    task_id: str | None = Field(None, description="Enqueued task ID")
+
+
+class AnalysisRecord(BaseModel):
+    """Cross-session behavioral analysis result."""
+
+    id: str
+    analysis_type: str
+    sessions_scope: list[str] | None = None
+    risk_level: str
+    findings: list[dict[str, Any]]
+    recommendations: list[dict[str, Any]] | None = None
+    created_at: str
+
+
+class AnalysisListResponse(BaseModel):
+    """Paginated analysis list response."""
+
+    items: list[AnalysisRecord]
+    total: int
+    page: int
+    pages: int
+
+
+class ProfileResponse(BaseModel):
+    """Behavioral risk profile for a user."""
+
+    user_id: str
+    risk_level: str = "low"
+    active_alerts: list[dict[str, Any]] | None = None
+    context_summary: str | None = None
+    profile_version: int = 0
+    updated_at: str | None = None
