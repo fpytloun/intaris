@@ -226,6 +226,45 @@ Uses **first-message auth** (no secrets in URLs):
 
 The evaluator checks session status **before** any classification or LLM work. Suspended or terminated sessions are immediately denied with an appropriate message. This is enforced in `evaluator.py` at the start of the `evaluate()` method.
 
+## E2E Tests
+
+End-to-end tests (`tests/test_e2e.py`) use real LLM calls to verify the full evaluation pipeline. They require `OPENAI_API_KEY` or `LLM_API_KEY` and are excluded from the default `pytest` run.
+
+### Running
+
+```bash
+pytest -m e2e -v                    # e2e only
+pytest -m e2e -v --timeout=60       # with generous timeout
+pytest -m '' -v                     # all tests (unit + e2e)
+```
+
+### Test categories (30 tests)
+
+| Category | Tests | Description |
+|---|---|---|
+| **Fast paths** | 2 | Read-only auto-approve, critical auto-deny |
+| **Aligned approval** | 5 | Clearly aligned tool calls → approve via LLM |
+| **Misaligned** | 5 | Misaligned tool calls → deny or escalate via LLM |
+| **Dangerous operations** | 4 | Malicious operations → strict deny |
+| **Same tool, different context** | 2 | Same command, different intention → different outcome |
+| **Session lifecycle** | 3 | Status enforcement, counter accuracy |
+| **Audit trail** | 3 | Record creation, secret redaction, filtering |
+| **Escalation workflow** | 2 | Escalation → resolution → audit verification |
+| **Session policy** | 2 | Policy allow/deny overrides classification |
+| **High risk** | 2 | Aligned but risky operations |
+
+### Assertion strategy
+
+- **Strict** (`== "deny"` or `== "approve"`): Used for clear-cut cases where any reasonable LLM should agree (e.g., malicious operations → deny, clearly aligned → approve).
+- **Pragmatic** (`!= "approve"`): Used for borderline cases where the LLM might reasonably choose deny or escalate (e.g., misaligned but not dangerous).
+
+### Default LLM config
+
+- Model: `gpt-5-nano` (fast, cheap, sufficient for safety evaluation)
+- Reasoning effort: `low`
+- Temperature: `0.1`
+- Timeout: `4000ms`
+
 ## Important Notes
 
 - **Evaluation pipeline**: classify → critical check → LLM → decision matrix → audit. Fast path skips LLM for read-only and critical classifications.

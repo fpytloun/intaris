@@ -14,7 +14,7 @@ class TestConfigDefaults:
 
     def test_llm_defaults(self):
         config = LLMConfig()
-        assert config.model == "gpt-4.1-nano"
+        assert config.model == "gpt-5-nano"
         assert config.temperature == 0.1
         assert config.timeout_ms == 4000
 

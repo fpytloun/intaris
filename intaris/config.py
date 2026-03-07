@@ -84,12 +84,12 @@ def _llm_base_url() -> str:
 class LLMConfig:
     """LLM configuration for safety evaluation."""
 
-    model: str = field(default_factory=lambda: _env("LLM_MODEL", "gpt-4.1-nano"))
+    model: str = field(default_factory=lambda: _env("LLM_MODEL", "gpt-5-nano"))
     base_url: str = field(default_factory=_llm_base_url)
     api_key: str = field(default_factory=_llm_api_key)
     temperature: float = 0.1
     reasoning_effort: str | None = field(
-        default_factory=lambda: _env("LLM_REASONING_EFFORT") or None
+        default_factory=lambda: _env("LLM_REASONING_EFFORT", "low") or None
     )
     # Timeout in milliseconds for LLM evaluation calls.
     # Must be well under the 5-second circuit breaker in the Executor Adapter.
