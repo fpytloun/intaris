@@ -161,29 +161,40 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 ### Local development
 
 ```bash
-pip install -e ".[dev]"
+uv pip install -e ".[dev]"
 export LLM_API_KEY=sk-your-key
-intaris
+uv run intaris
+```
+
+Or use the Makefile:
+
+```bash
+make dev          # install with dev deps
+make test         # unit tests
+make lint         # ruff check
+make format       # ruff format
+make css          # rebuild Tailwind CSS
+make css-watch    # Tailwind watch mode
 ```
 
 ### Tests
 
 ```bash
 # Unit tests (fast, no API key needed)
-pytest tests/ -v
+uv run pytest tests/ -v
 
 # E2e tests (require LLM_API_KEY, real LLM calls)
-pytest -m e2e -v
+uv run pytest -m e2e -v
 
 # Both
-pytest -m '' -v
+uv run pytest -m '' -v
 ```
 
 ### Linting
 
 ```bash
-ruff check intaris/ tests/
-ruff format intaris/ tests/
+uv run ruff check intaris/ tests/
+uv run ruff format intaris/ tests/
 ```
 
 ## Code Conventions
