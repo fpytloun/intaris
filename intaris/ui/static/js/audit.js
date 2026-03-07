@@ -51,24 +51,27 @@ function auditTab() {
         if (this.filterRisk && data.risk !== this.filterRisk) return;
         if (this.filterPath && data.path !== this.filterPath) return;
 
-        this.records.unshift({
-          call_id: data.call_id,
-          decision: data.decision,
-          tool: data.tool,
-          risk: data.risk,
-          record_type: data.record_type || 'tool_call',
-          classification: data.classification,
-          evaluation_path: data.path,
-          latency_ms: data.latency_ms,
-          session_id: data.session_id,
-          user_id: data.user_id,
-          agent_id: data.agent_id,
-          timestamp: data.timestamp || new Date().toISOString(),
-        });
-        // Keep list bounded
-        if (this.records.length > 30) {
-          this.records = this.records.slice(0, 30);
-        }
+        // Deduplicate by call_id to prevent Alpine x-for duplicate key crashes
+        // when a WebSocket event arrives for a record already loaded via REST.
+        const callId = data.call_id;
+        if (!callId) return;
+        this.records = [
+          {
+            call_id: callId,
+            decision: data.decision,
+            tool: data.tool,
+            risk: data.risk,
+            record_type: data.record_type || 'tool_call',
+            classification: data.classification,
+            evaluation_path: data.path,
+            latency_ms: data.latency_ms,
+            session_id: data.session_id,
+            user_id: data.user_id,
+            agent_id: data.agent_id,
+            timestamp: data.timestamp || new Date().toISOString(),
+          },
+          ...this.records.filter(r => r.call_id !== callId),
+        ].slice(0, 30);
         this.total++;
       }
 
