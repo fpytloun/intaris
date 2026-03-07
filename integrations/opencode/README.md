@@ -35,8 +35,8 @@ The plugin makes direct HTTP calls to the Intaris REST API. Set these in your sh
 ```bash
 export INTARIS_URL=http://localhost:8060
 export INTARIS_API_KEY=your-api-key
+export INTARIS_USER_ID=your-username       # required for single-key mode (INTARIS_API_KEY)
 export INTARIS_AGENT_ID=opencode           # optional, defaults to "opencode"
-export INTARIS_USER_ID=your-username       # optional if API key maps to user
 export INTARIS_FAIL_OPEN=false             # optional, defaults to false
 export INTARIS_INTENTION=""                # optional, auto-generated from cwd
 export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disabled)
@@ -45,9 +45,9 @@ export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disable
 | Variable | Default | Description |
 |---|---|---|
 | `INTARIS_URL` | `http://localhost:8060` | Intaris server URL |
-| `INTARIS_API_KEY` | (empty) | API key for authentication. **Required** if Intaris has `INTARIS_API_KEYS` set. |
+| `INTARIS_API_KEY` | (empty) | API key for authentication. **Required** if Intaris has `INTARIS_API_KEY` or `INTARIS_API_KEYS` set. |
 | `INTARIS_AGENT_ID` | `opencode` | Agent ID sent to Intaris |
-| `INTARIS_USER_ID` | (empty) | User ID (optional if API key maps to a user) |
+| `INTARIS_USER_ID` | (empty) | User ID. **Required** when using `INTARIS_API_KEY` (single-key mode) — the server needs a user identity to scope sessions and audit records. Optional if `INTARIS_API_KEYS` maps your key to a specific user. |
 | `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed when Intaris is unreachable. Default is `false` (fail-closed) -- tool calls are blocked when Intaris is down. |
 | `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"OpenCode coding session in <cwd>"` |
 | `INTARIS_CHECKPOINT_INTERVAL` | `25` | Number of evaluate calls between periodic checkpoints. Set to `0` to disable checkpoints. Each checkpoint consumes one rate limit slot. |
@@ -156,6 +156,7 @@ When using the **MCP proxy** approach, tools are namespaced as `server_name:tool
 
 ## Troubleshooting
 
+- **"Evaluation failed" or "Evaluation rejected" with no server logs**: The server rejected the request before reaching the evaluation pipeline (HTTP 401). The most common cause is missing user identity: if you use `INTARIS_API_KEY` (single shared key), you **must** also set `INTARIS_USER_ID`. Without it, the server cannot determine which user the request belongs to. Alternatively, switch to `INTARIS_API_KEYS` on the server with a key mapped to your user_id.
 - **Tool calls blocked unexpectedly**: Check that `INTARIS_URL` and `INTARIS_API_KEY` are set correctly. Run OpenCode with `--print-logs` to see evaluation decisions.
 - **"Cannot create session" errors**: Verify Intaris is running and reachable at the configured URL.
 - **All tool calls allowed**: Ensure the plugin is loaded (check for "Plugin initialized" in logs). If using `INTARIS_FAIL_OPEN=true`, Intaris may be unreachable.

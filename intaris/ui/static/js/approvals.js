@@ -1,18 +1,13 @@
 /**
  * Approvals tab — pending escalations awaiting user decision.
  *
- * Uses WebSocket for real-time updates with 10s polling fallback.
- * Connects to /api/v1/stream and listens for "evaluated" (new
- * escalations) and "decided" (resolved items) events.
+ * Uses the shared WebSocket store ($store.ws) for real-time updates
+ * with 10s polling fallback when WebSocket is disconnected.
  */
 
 // ── Configuration constants ──────────────────────────────────
 const WS_LOAD_DEBOUNCE_MS = 300;
 const RECENTLY_RESOLVED_TTL_MS = 10000;
-const WS_RETRY_INTERVAL_MS = 60000;
-const WS_MAX_RECONNECT_DELAY_MS = 30000;
-const WS_INITIAL_RECONNECT_DELAY_MS = 1000;
-const WS_MAX_RECONNECT_ATTEMPTS = 5;
 const POLL_INTERVAL_MS = 10000;
 
 function approvalsTab() {
@@ -24,16 +19,9 @@ function approvalsTab() {
     resolving: {},      // call_id -> true while resolving
     noteText: {},       // call_id -> note text
 
-    // WebSocket state
-    ws: null,
-    wsConnected: false,
-    reconnectTimer: null,
-    reconnectDelay: WS_INITIAL_RECONNECT_DELAY_MS,
-    reconnectAttempts: 0,
-    fallbackPolling: false,
+    // Polling fallback state
     pollTimer: null,
     _loadDebounce: null,
-    _wsRetryTimer: null,
     recentlyResolved: new Map(),  // call_id -> timestamp
     _tabActive: false,
 
@@ -45,78 +33,38 @@ function approvalsTab() {
             this.initialized = true;
           }
           this.load();
-          this.connectWs();
+          // Start polling fallback if WebSocket is not connected
+          if (!Alpine.store('ws').connected) {
+            this.startPolling();
+          }
         } else {
           this._tabActive = false;
-          this.disconnectWs();
           this.stopPolling();
           clearTimeout(this._loadDebounce);
         }
       });
       window.addEventListener('intaris:user-changed', () => {
         if (this.initialized && this._tabActive) {
-          this.disconnectWs();
           this.load();
-          this.connectWs();
         }
       });
       window.addEventListener('intaris:logout', () => {
-        this.disconnectWs();
         this.stopPolling();
         clearTimeout(this._loadDebounce);
       });
-    },
 
-    // ── WebSocket lifecycle ──────────────────────────────────
-
-    connectWs() {
-      // Don't connect if already connected or tab not active
-      if (this.ws || !this._tabActive) return;
-
-      this.ws = IntarisAPI.connectWebSocket({
-        onOpen: () => {
-          this.wsConnected = true;
-          this.reconnectAttempts = 0;
-          this.reconnectDelay = WS_INITIAL_RECONNECT_DELAY_MS;
-          // If we were in fallback polling, stop it
-          if (this.fallbackPolling) {
-            this.fallbackPolling = false;
-            this.stopPolling();
-            clearInterval(this._wsRetryTimer);
-            this._wsRetryTimer = null;
-          }
-        },
-        onMessage: (data) => this._handleWsMessage(data),
-        onClose: () => {
-          this.wsConnected = false;
-          this.ws = null;
-          if (this._tabActive) {
-            this._scheduleReconnect();
-          }
-        },
-        onError: () => {
-          // onclose will also fire after onerror, so reconnect
-          // is handled there. Just mark as disconnected.
-          this.wsConnected = false;
-        },
+      // Subscribe to shared WebSocket events
+      window.addEventListener('intaris:ws-message', (e) => {
+        if (this._tabActive) {
+          this._handleWsMessage(e.detail);
+        }
       });
     },
 
-    disconnectWs() {
-      if (this.ws) {
-        this.ws.onclose = null;  // Prevent reconnect on intentional close
-        this.ws.close();
-        this.ws = null;
-      }
-      this.wsConnected = false;
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-      clearInterval(this._wsRetryTimer);
-      this._wsRetryTimer = null;
-      this.reconnectAttempts = 0;
-      this.reconnectDelay = WS_INITIAL_RECONNECT_DELAY_MS;
-      this.fallbackPolling = false;
-      this.recentlyResolved.clear();
+    // ── WebSocket message handling ───────────────────────────
+
+    get wsConnected() {
+      return Alpine.store('ws').connected;
     },
 
     _handleWsMessage(data) {
@@ -133,40 +81,7 @@ function approvalsTab() {
       }
     },
 
-    _scheduleReconnect() {
-      if (this.fallbackPolling) return;  // Already in fallback mode
-
-      this.reconnectAttempts++;
-      if (this.reconnectAttempts >= WS_MAX_RECONNECT_ATTEMPTS) {
-        this._startFallbackPolling();
-        return;
-      }
-
-      this.reconnectTimer = setTimeout(() => {
-        this.reconnectTimer = null;
-        this.connectWs();
-      }, this.reconnectDelay);
-
-      // Exponential backoff
-      this.reconnectDelay = Math.min(
-        this.reconnectDelay * 2,
-        WS_MAX_RECONNECT_DELAY_MS
-      );
-    },
-
     // ── Fallback polling ─────────────────────────────────────
-
-    _startFallbackPolling() {
-      this.fallbackPolling = true;
-      this.startPolling();
-      // Periodically retry WebSocket connection
-      this._wsRetryTimer = setInterval(() => {
-        if (!this.ws && this._tabActive) {
-          this.reconnectAttempts = 0;  // Reset for the retry attempt
-          this.connectWs();
-        }
-      }, WS_RETRY_INTERVAL_MS);
-    },
 
     startPolling() {
       this.stopPolling();

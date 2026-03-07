@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from intaris.api.deps import SessionContext, get_session_context
 from intaris.api.schemas import (
@@ -12,6 +12,7 @@ from intaris.api.schemas import (
     IntentionResponse,
     SessionListResponse,
     SessionResponse,
+    SessionUpdateRequest,
     StatusUpdateRequest,
     StatusUpdateResponse,
 )
@@ -24,6 +25,7 @@ router = APIRouter()
 @router.post("/intention", response_model=IntentionResponse)
 async def declare_intention(
     request: IntentionRequest,
+    http_request: Request,
     ctx: SessionContext = Depends(get_session_context),
 ) -> IntentionResponse:
     """Declare a session intention.
@@ -44,6 +46,22 @@ async def declare_intention(
             policy=request.policy,
             parent_session_id=request.parent_session_id,
         )
+
+        # Publish session_created event
+        event_bus = getattr(http_request.app.state, "event_bus", None)
+        if event_bus is not None:
+            event_bus.publish(
+                {
+                    "type": "session_created",
+                    "session_id": request.session_id,
+                    "user_id": ctx.user_id,
+                    "intention": request.intention,
+                    "status": "active",
+                    "parent_session_id": request.parent_session_id,
+                    "details": request.details,
+                }
+            )
+
         return IntentionResponse(ok=True)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
@@ -106,10 +124,55 @@ async def list_sessions(
         )
 
 
+@router.patch("/session/{session_id}", response_model=SessionResponse)
+async def update_session(
+    session_id: str,
+    request: SessionUpdateRequest,
+    http_request: Request,
+    ctx: SessionContext = Depends(get_session_context),
+) -> SessionResponse:
+    """Update session intention and/or details."""
+    from intaris.server import _get_db
+    from intaris.session import SessionStore
+
+    try:
+        store = SessionStore(_get_db())
+        session = store.update_session(
+            session_id,
+            user_id=ctx.user_id,
+            intention=request.intention,
+            details=request.details,
+        )
+
+        # Publish session_updated event
+        event_bus = getattr(http_request.app.state, "event_bus", None)
+        if event_bus is not None:
+            event_bus.publish(
+                {
+                    "type": "session_updated",
+                    "session_id": session_id,
+                    "user_id": ctx.user_id,
+                    "intention": session.get("intention"),
+                    "details": session.get("details"),
+                }
+            )
+
+        return SessionResponse(**session)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except Exception:
+        logger.exception("Error in PATCH /session")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error updating session",
+        )
+
+
 @router.patch("/session/{session_id}/status", response_model=StatusUpdateResponse)
 async def update_session_status(
     session_id: str,
     request: StatusUpdateRequest,
+    http_request: Request,
     ctx: SessionContext = Depends(get_session_context),
 ) -> StatusUpdateResponse:
     """Update session status.
@@ -122,6 +185,19 @@ async def update_session_status(
     try:
         store = SessionStore(_get_db())
         store.update_status(session_id, request.status, user_id=ctx.user_id)
+
+        # Publish session_status_changed event
+        event_bus = getattr(http_request.app.state, "event_bus", None)
+        if event_bus is not None:
+            event_bus.publish(
+                {
+                    "type": "session_status_changed",
+                    "session_id": session_id,
+                    "user_id": ctx.user_id,
+                    "status": request.status,
+                }
+            )
+
         return StatusUpdateResponse(ok=True)
     except ValueError as e:
         detail = str(e)

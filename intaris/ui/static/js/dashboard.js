@@ -1,5 +1,7 @@
 /**
  * Dashboard tab — overview stats and recent activity.
+ *
+ * Subscribes to WebSocket events for live counter updates.
  */
 function dashboardTab() {
   return {
@@ -8,15 +10,104 @@ function dashboardTab() {
     stats: null,
     recentActivity: [],
 
+    _refreshTimer: null,
+
     init() {
       window.addEventListener('intaris:tab-changed', (e) => {
-        if (e.detail.tab === 'dashboard') this.load();
+        if (e.detail.tab === 'dashboard') {
+          this.load();
+          this._startPeriodicRefresh();
+        } else {
+          this._stopPeriodicRefresh();
+        }
       });
       window.addEventListener('intaris:user-changed', () => {
         if (this.initialized) this.load();
       });
-      // Auto-load on first render
+      window.addEventListener('intaris:logout', () => {
+        this._stopPeriodicRefresh();
+      });
+
+      // Subscribe to WebSocket events for live updates
+      window.addEventListener('intaris:ws-message', (e) => {
+        this._handleWsEvent(e.detail);
+      });
+
+      // Auto-load on first render + start periodic refresh
       this.load();
+      this._startPeriodicRefresh();
+    },
+
+    _startPeriodicRefresh() {
+      this._stopPeriodicRefresh();
+      this._refreshTimer = setInterval(() => {
+        if (Alpine.store('nav').activeTab === 'dashboard') this.load();
+      }, 60000);
+    },
+
+    _stopPeriodicRefresh() {
+      if (this._refreshTimer) {
+        clearInterval(this._refreshTimer);
+        this._refreshTimer = null;
+      }
+    },
+
+    _handleWsEvent(data) {
+      if (!this.stats) return;
+
+      if (data.type === 'evaluated') {
+        // Increment total evaluations
+        this.stats.total_evaluations = (this.stats.total_evaluations || 0) + 1;
+
+        // Update decision distribution
+        if (!this.stats.decisions) this.stats.decisions = {};
+        const d = data.decision;
+        this.stats.decisions[d] = (this.stats.decisions[d] || 0) + 1;
+
+        // Update pending approvals count
+        if (d === 'escalate') {
+          this.stats.pending_approvals = (this.stats.pending_approvals || 0) + 1;
+        }
+
+        // Recalculate approval rate
+        const total = this.stats.total_evaluations || 1;
+        const approved = this.stats.decisions.approve || 0;
+        this.stats.approval_rate = Math.round((approved / total) * 100);
+
+        // Prepend to recent activity (keep last 10)
+        this.recentActivity.unshift({
+          call_id: data.call_id,
+          decision: data.decision,
+          tool: data.tool,
+          record_type: data.record_type || 'tool_call',
+          risk: data.risk,
+          session_id: data.session_id,
+          timestamp: data.timestamp || new Date().toISOString(),
+          evaluation_path: data.path,
+          latency_ms: data.latency_ms,
+        });
+        if (this.recentActivity.length > 10) {
+          this.recentActivity = this.recentActivity.slice(0, 10);
+        }
+      }
+
+      if (data.type === 'decided') {
+        // Decrement pending approvals
+        if (this.stats.pending_approvals > 0) {
+          this.stats.pending_approvals--;
+        }
+      }
+
+      if (data.type === 'session_created') {
+        this.stats.total_sessions = (this.stats.total_sessions || 0) + 1;
+        if (!this.stats.sessions_by_status) this.stats.sessions_by_status = {};
+        this.stats.sessions_by_status.active = (this.stats.sessions_by_status.active || 0) + 1;
+      }
+
+      if (data.type === 'session_status_changed') {
+        // We don't track previous status, so just do a full reload periodically
+        // For now, just note the change — a full reload is more accurate
+      }
     },
 
     async load() {

@@ -102,12 +102,14 @@ function serversTab() {
     },
 
     async saveServer() {
+      const serverName = this.form.name;
+      const isEnabled = this.form.enabled;
       try {
         const body = {
-          name: this.form.name,
+          name: serverName,
           transport: this.form.transport,
           agent_pattern: this.form.agent_pattern,
-          enabled: this.form.enabled,
+          enabled: isEnabled,
         };
 
         if (this.form.transport === 'stdio') {
@@ -134,7 +136,7 @@ function serversTab() {
           }
         }
 
-        await IntarisAPI.upsertMCPServer(this.form.name, body);
+        await IntarisAPI.upsertMCPServer(serverName, body);
         Alpine.store('notify').success(
           this.editMode ? 'Server updated' : 'Server created'
         );
@@ -142,6 +144,21 @@ function serversTab() {
         await this.load();
       } catch (e) {
         Alpine.store('notify').error('Failed to save server: ' + e.message);
+        return;
+      }
+
+      // Auto-validate connection by refreshing tools (skip for disabled servers).
+      if (!isEnabled) return;
+      try {
+        const data = await IntarisAPI.refreshMCPServerTools(serverName);
+        Alpine.store('notify').success(
+          `Connected — ${data.count} tool${data.count !== 1 ? 's' : ''} available`
+        );
+        await this.load();
+      } catch (refreshErr) {
+        Alpine.store('notify').error(
+          'Connection failed: ' + refreshErr.message
+        );
       }
     },
 

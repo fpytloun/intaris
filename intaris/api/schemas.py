@@ -164,6 +164,13 @@ class StatusUpdateResponse(BaseModel):
     ok: bool = True
 
 
+class SessionUpdateRequest(BaseModel):
+    """Request to update session fields (intention, details)."""
+
+    intention: str | None = Field(None, max_length=500, description="Updated intention")
+    details: dict[str, Any] | None = Field(None, description="Updated session details")
+
+
 # ── Error ─────────────────────────────────────────────────────────────
 
 

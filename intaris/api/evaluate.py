@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime
+from datetime import timezone as tz
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -94,6 +96,9 @@ async def evaluate(
                     "path": result["path"],
                     "latency_ms": result["latency_ms"],
                     "tool": request.tool,
+                    "record_type": "tool_call",
+                    "classification": result.get("classification"),
+                    "timestamp": datetime.now(tz.utc).isoformat(),
                 }
             )
 

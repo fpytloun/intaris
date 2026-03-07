@@ -1,5 +1,7 @@
 /**
  * Audit log tab — filterable, paginated audit record browser.
+ *
+ * Subscribes to WebSocket events for live audit updates.
  */
 function auditTab() {
   return {
@@ -29,6 +31,56 @@ function auditTab() {
       window.addEventListener('intaris:user-changed', () => {
         if (this.initialized) this.load();
       });
+
+      // Subscribe to WebSocket events for live audit updates
+      window.addEventListener('intaris:ws-message', (e) => {
+        this._handleWsEvent(e.detail);
+      });
+    },
+
+    _handleWsEvent(data) {
+      if (!this.initialized) return;
+      if (Alpine.store('nav').activeTab !== 'audit') return;
+
+      if (data.type === 'evaluated') {
+        // Only add if on page 1 and matches current filters
+        if (this.page !== 1) return;
+        if (this.filterSession && data.session_id !== this.filterSession) return;
+        if (this.filterTool && data.tool !== this.filterTool) return;
+        if (this.filterDecision && data.decision !== this.filterDecision) return;
+        if (this.filterRisk && data.risk !== this.filterRisk) return;
+        if (this.filterPath && data.path !== this.filterPath) return;
+
+        this.records.unshift({
+          call_id: data.call_id,
+          decision: data.decision,
+          tool: data.tool,
+          risk: data.risk,
+          record_type: data.record_type || 'tool_call',
+          classification: data.classification,
+          evaluation_path: data.path,
+          latency_ms: data.latency_ms,
+          session_id: data.session_id,
+          user_id: data.user_id,
+          agent_id: data.agent_id,
+          timestamp: data.timestamp || new Date().toISOString(),
+        });
+        // Keep list bounded
+        if (this.records.length > 30) {
+          this.records = this.records.slice(0, 30);
+        }
+        this.total++;
+      }
+
+      if (data.type === 'decided') {
+        // Update the resolved record in-place if visible
+        const record = this.records.find(r => r.call_id === data.call_id);
+        if (record) {
+          record.user_decision = data.decision;
+          record.user_note = data.note;
+          record.resolved_at = new Date().toISOString();
+        }
+      }
     },
 
     async load() {

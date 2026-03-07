@@ -342,6 +342,7 @@ async def lifespan(app):
         task_queue=task_queue,
     )
     app.state.background_worker = background_worker
+    background_worker.set_event_bus(app.state.event_bus)
     if cfg.analysis.enabled:
         await background_worker.start()
         logger.info("Background worker started (analysis enabled)")

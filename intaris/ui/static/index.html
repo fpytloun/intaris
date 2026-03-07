@@ -71,9 +71,13 @@
     <nav class="bg-brand-surface border-b border-brand-border sticky top-0 z-30">
       <div class="max-w-[1600px] mx-auto px-4 sm:px-6">
         <div class="flex items-center justify-between h-14">
-          <!-- Brand -->
+          <!-- Brand + Live indicator -->
           <div class="flex items-center gap-2">
             <span class="text-xl font-bold text-brand-accent">intaris</span>
+            <span x-show="$store.ws.connected"
+                  class="w-2 h-2 rounded-full bg-green-500 shrink-0" title="Live updates active"></span>
+            <span x-show="!$store.ws.connected"
+                  class="w-2 h-2 rounded-full bg-zinc-500 shrink-0" title="No live connection"></span>
           </div>
 
           <!-- Tab Navigation -->
@@ -202,15 +206,21 @@
 
       <!-- Sessions Tab -->
       <div x-show="$store.nav.activeTab === 'sessions'" x-data="sessionsTab()" x-init="init()">
-        <!-- Status Filter -->
-        <div class="flex items-center gap-2 mb-4">
-          <button @click="filterByStatus('')"
-                  :class="statusFilter === '' ? 'btn-primary text-sm' : 'btn-secondary text-sm'">All</button>
-          <template x-for="s in ['active', 'completed', 'suspended', 'terminated']">
-            <button @click="filterByStatus(s)"
-                    :class="statusFilter === s ? 'btn-primary text-sm' : 'btn-secondary text-sm'"
-                    x-text="s"></button>
-          </template>
+        <!-- Status Filter + Tree Toggle -->
+        <div class="flex items-center justify-between mb-4">
+          <div class="flex items-center gap-2">
+            <button @click="filterByStatus('')"
+                    :class="statusFilter === '' ? 'btn-primary text-sm' : 'btn-secondary text-sm'">All</button>
+            <template x-for="s in ['active', 'idle', 'completed', 'suspended', 'terminated']">
+              <button @click="filterByStatus(s)"
+                      :class="statusFilter === s ? 'btn-primary text-sm' : 'btn-secondary text-sm'"
+                      x-text="s"></button>
+            </template>
+          </div>
+          <button @click="toggleTreeView()"
+                  :class="treeView ? 'btn-primary text-sm' : 'btn-secondary text-sm'">
+            Tree View
+          </button>
         </div>
 
         <div x-show="loading && !initialized" class="text-center py-12 text-secondary">Loading sessions...</div>
@@ -218,12 +228,17 @@
 
         <!-- Session List -->
         <div class="space-y-3">
-          <template x-for="session in sessions" :key="session.session_id">
-            <div class="card cursor-pointer" @click="toggleExpand(session)">
+          <template x-for="session in sessionTree" :key="session.session_id">
+            <div :class="session._depth > 0 ? 'card cursor-pointer session-child' : 'card cursor-pointer'"
+                 @click="toggleExpand(session)">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-3">
+                  <!-- Tree connector for child sessions -->
+                  <span x-show="session._depth > 0" class="tree-connector text-muted">&#x2514;</span>
                   <span :class="statusBadgeClass(session.status)" x-text="session.status"></span>
                   <span class="font-mono text-sm text-brand-accent" x-text="session.session_id"></span>
+                  <span x-show="session.parent_session_id" class="text-xs text-muted"
+                        x-text="session.details?.agent_type ? '(' + session.details.agent_type + ')' : '(child)'"></span>
                 </div>
                 <div class="flex items-center gap-4 text-sm text-muted">
                   <span x-text="session.total_calls + ' calls'"></span>
@@ -259,6 +274,14 @@
                   <div class="text-sm" x-text="session.intention"></div>
                 </div>
 
+                <!-- Details (if present) -->
+                <template x-if="session.details">
+                  <div class="mb-3">
+                    <div class="text-xs text-muted mb-1">Details</div>
+                    <pre class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto" x-text="JSON.stringify(session.details, null, 2)"></pre>
+                  </div>
+                </template>
+
                 <!-- Policy (if present) -->
                 <template x-if="session.policy">
                   <div class="mb-3">
@@ -267,12 +290,22 @@
                   </div>
                 </template>
 
+                <!-- Parent Session (if child) -->
+                <template x-if="session.parent_session_id">
+                  <div class="mb-3">
+                    <div class="text-xs text-muted mb-1">Parent Session</div>
+                    <span class="font-mono text-xs text-brand-accent" x-text="session.parent_session_id"></span>
+                  </div>
+                </template>
+
                 <!-- Status Actions -->
                 <div class="flex gap-2 mb-4">
-                  <template x-if="session.status === 'active'">
+                  <template x-if="session.status === 'active' || session.status === 'idle'">
                     <div class="flex gap-2">
                       <button @click.stop="updateStatus(session.session_id, 'suspended')" class="btn-secondary text-sm">Suspend</button>
                       <button @click.stop="updateStatus(session.session_id, 'terminated')" class="btn-danger text-sm">Terminate</button>
+                      <button x-show="session.status === 'idle'"
+                              @click.stop="updateStatus(session.session_id, 'completed')" class="btn-secondary text-sm">Complete</button>
                     </div>
                   </template>
                   <template x-if="session.status === 'suspended'">
@@ -280,18 +313,54 @@
                   </template>
                 </div>
 
-                <!-- Session Audit Feed -->
+                <!-- Session Audit Feed (Expandable) -->
                 <div class="mt-3">
                   <div class="text-xs text-muted mb-2">Recent Evaluations</div>
                   <div x-show="sessionAudit.length === 0" class="text-sm text-muted">No evaluations yet</div>
                   <div class="space-y-1">
                     <template x-for="r in sessionAudit" :key="r.call_id">
-                      <div class="flex items-center justify-between py-1.5 text-sm">
-                        <div class="flex items-center gap-2">
-                          <span :class="decisionBadgeClass(r.decision)" x-text="r.decision"></span>
-                          <span class="font-mono text-xs" x-text="r.tool"></span>
+                      <div>
+                        <div class="flex items-center justify-between py-1.5 text-sm cursor-pointer hover:bg-brand-elevated/50 rounded px-2 -mx-2"
+                             @click.stop="toggleAuditExpand(r)">
+                          <div class="flex items-center gap-2">
+                            <span :class="decisionBadgeClass(r.decision)" x-text="r.decision"></span>
+                            <span class="font-mono text-xs" x-text="r.tool || r.record_type"></span>
+                            <span :class="riskBadgeClass(r.risk)" x-text="r.risk" x-show="r.risk" class="text-xs"></span>
+                          </div>
+                          <div class="flex items-center gap-2">
+                            <span :class="pathBadgeClass(r.evaluation_path)" x-text="r.evaluation_path" x-show="r.evaluation_path" class="text-xs"></span>
+                            <span class="text-xs text-muted" x-text="(r.latency_ms || 0) + 'ms'"></span>
+                            <span class="text-xs text-muted" x-text="formatTime(r.timestamp)"></span>
+                          </div>
                         </div>
-                        <span class="text-xs text-muted" x-text="formatTime(r.timestamp)"></span>
+
+                        <!-- Expanded Audit Detail -->
+                        <div x-show="expandedAuditId === r.call_id" x-cloak
+                             class="ml-4 mt-1 mb-2 p-3 bg-brand-elevated rounded-lg border border-brand-border text-sm">
+                          <!-- Reasoning -->
+                          <template x-if="expandedAuditRecord?.reasoning">
+                            <div class="mb-2">
+                              <div class="text-xs text-muted mb-1">Reasoning</div>
+                              <div class="text-sm" x-text="expandedAuditRecord.reasoning"></div>
+                            </div>
+                          </template>
+
+                          <!-- Redacted Args -->
+                          <template x-if="expandedAuditRecord?.args_redacted">
+                            <div class="mb-2">
+                              <div class="text-xs text-muted mb-1">Arguments (redacted)</div>
+                              <pre class="text-xs bg-brand-bg rounded p-2 overflow-x-auto" x-text="formatArgs(expandedAuditRecord.args_redacted)"></pre>
+                            </div>
+                          </template>
+
+                          <!-- Metadata -->
+                          <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-muted">
+                            <div>Call ID: <span class="font-mono" x-text="expandedAuditRecord?.call_id"></span></div>
+                            <div>Classification: <span x-text="expandedAuditRecord?.classification"></span></div>
+                            <div>Agent: <span x-text="expandedAuditRecord?.agent_id || 'none'"></span></div>
+                            <div>Path: <span x-text="expandedAuditRecord?.evaluation_path"></span></div>
+                          </div>
+                        </div>
                       </div>
                     </template>
                   </div>

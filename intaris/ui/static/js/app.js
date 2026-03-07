@@ -5,6 +5,7 @@
  * - auth: login state, API key, identity, user switching
  * - nav: active tab navigation
  * - notify: toast notification system
+ * - ws: shared WebSocket connection for real-time updates
  */
 
 document.addEventListener('alpine:init', () => {
@@ -162,4 +163,94 @@ document.addEventListener('alpine:init', () => {
     info(msg) { this.add(msg, 'info'); },
     warning(msg) { this.add(msg, 'warning', 5000); },
   });
+
+  // ── WebSocket Store ──────────────────────────────────────────
+  // Shared WebSocket connection for real-time updates across all tabs.
+  // Tabs subscribe via window events dispatched by this store.
+  Alpine.store('ws', {
+    ws: null,
+    connected: false,
+    _reconnectTimer: null,
+    _reconnectDelay: 1000,
+    _reconnectAttempts: 0,
+    _maxReconnectAttempts: 10,
+    _maxReconnectDelay: 30000,
+
+    connect() {
+      if (this.ws) return;
+      if (!Alpine.store('auth').authenticated) return;
+
+      this.ws = IntarisAPI.connectWebSocket({
+        onOpen: () => {
+          this.connected = true;
+          this._reconnectAttempts = 0;
+          this._reconnectDelay = 1000;
+        },
+        onMessage: (data) => {
+          // Dispatch typed events for tabs to listen on
+          window.dispatchEvent(new CustomEvent('intaris:ws-message', {
+            detail: data,
+          }));
+        },
+        onClose: () => {
+          this.connected = false;
+          this.ws = null;
+          this._scheduleReconnect();
+        },
+        onError: () => {
+          this.connected = false;
+        },
+      });
+    },
+
+    disconnect() {
+      if (this.ws) {
+        this.ws.onclose = null;
+        this.ws.close();
+        this.ws = null;
+      }
+      this.connected = false;
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+      this._reconnectAttempts = 0;
+      this._reconnectDelay = 1000;
+    },
+
+    _scheduleReconnect() {
+      if (!Alpine.store('auth').authenticated) return;
+
+      this._reconnectAttempts++;
+      if (this._reconnectAttempts > this._maxReconnectAttempts) return;
+
+      this._reconnectTimer = setTimeout(() => {
+        this._reconnectTimer = null;
+        this.connect();
+      }, this._reconnectDelay);
+
+      this._reconnectDelay = Math.min(
+        this._reconnectDelay * 2,
+        this._maxReconnectDelay,
+      );
+    },
+  });
+
+  // Auto-connect/disconnect WebSocket based on auth state
+  window.addEventListener('intaris:user-changed', () => {
+    Alpine.store('ws').disconnect();
+    Alpine.store('ws').connect();
+  });
+  window.addEventListener('intaris:logout', () => {
+    Alpine.store('ws').disconnect();
+  });
+
+  // Connect after auth verification completes
+  const _checkAuth = setInterval(() => {
+    const auth = Alpine.store('auth');
+    if (!auth.loading && auth.authenticated) {
+      clearInterval(_checkAuth);
+      Alpine.store('ws').connect();
+    } else if (!auth.loading && !auth.authenticated) {
+      clearInterval(_checkAuth);
+    }
+  }, 100);
 });

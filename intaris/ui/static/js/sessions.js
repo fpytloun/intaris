@@ -1,5 +1,8 @@
 /**
  * Sessions tab — list, filter, and manage sessions.
+ *
+ * Supports session tree display (parent/child relationships),
+ * WebSocket live updates, and expandable audit records.
  */
 function sessionsTab() {
   return {
@@ -13,6 +16,9 @@ function sessionsTab() {
     expandedId: null,
     expandedSession: null,
     sessionAudit: [],
+    expandedAuditId: null,
+    expandedAuditRecord: null,
+    treeView: false,
 
     init() {
       window.addEventListener('intaris:tab-changed', (e) => {
@@ -24,6 +30,87 @@ function sessionsTab() {
       window.addEventListener('intaris:user-changed', () => {
         if (this.initialized) this.load();
       });
+
+      // Subscribe to WebSocket events for live session updates
+      window.addEventListener('intaris:ws-message', (e) => {
+        this._handleWsEvent(e.detail);
+      });
+    },
+
+    _handleWsEvent(data) {
+      if (data.type === 'session_created') {
+        // Add new session to list if on page 1 and matching filter
+        if (this.page === 1 && (!this.statusFilter || this.statusFilter === 'active')) {
+          this.sessions.unshift({
+            session_id: data.session_id,
+            user_id: data.user_id,
+            intention: data.intention || '',
+            status: data.status || 'active',
+            total_calls: 0,
+            approved_count: 0,
+            denied_count: 0,
+            escalated_count: 0,
+            parent_session_id: data.parent_session_id || null,
+            details: data.details || null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
+          this.total++;
+        }
+      }
+
+      if (data.type === 'session_status_changed') {
+        const session = this.sessions.find(s => s.session_id === data.session_id);
+        if (session) {
+          session.status = data.status;
+          session.updated_at = new Date().toISOString();
+        }
+      }
+
+      if (data.type === 'session_updated') {
+        const session = this.sessions.find(s => s.session_id === data.session_id);
+        if (session) {
+          if (data.intention) session.intention = data.intention;
+          if (data.details) session.details = data.details;
+          session.updated_at = new Date().toISOString();
+        }
+        // Also update the expanded session if it's the same one
+        if (this.expandedSession && this.expandedSession.session_id === data.session_id) {
+          if (data.intention) this.expandedSession.intention = data.intention;
+          if (data.details) this.expandedSession.details = data.details;
+        }
+      }
+
+      if (data.type === 'evaluated') {
+        // Increment counters for the matching session
+        const session = this.sessions.find(s => s.session_id === data.session_id);
+        if (session) {
+          session.total_calls = (session.total_calls || 0) + 1;
+          if (data.decision === 'approve') session.approved_count = (session.approved_count || 0) + 1;
+          else if (data.decision === 'deny') session.denied_count = (session.denied_count || 0) + 1;
+          else if (data.decision === 'escalate') session.escalated_count = (session.escalated_count || 0) + 1;
+          session.updated_at = new Date().toISOString();
+        }
+
+        // If this session is expanded, add to its audit feed
+        if (this.expandedId === data.session_id) {
+          this.sessionAudit.unshift({
+            call_id: data.call_id,
+            decision: data.decision,
+            tool: data.tool,
+            risk: data.risk,
+            record_type: data.record_type || 'tool_call',
+            classification: data.classification,
+            evaluation_path: data.path,
+            latency_ms: data.latency_ms,
+            session_id: data.session_id,
+            timestamp: data.timestamp || new Date().toISOString(),
+          });
+          if (this.sessionAudit.length > 20) {
+            this.sessionAudit = this.sessionAudit.slice(0, 20);
+          }
+        }
+      }
     },
 
     async load() {
@@ -56,15 +143,64 @@ function sessionsTab() {
       if (this.page < this.pages) { this.page++; this.load(); }
     },
 
+    toggleTreeView() {
+      this.treeView = !this.treeView;
+    },
+
+    /**
+     * Get sessions organized as a tree (parent sessions with children nested).
+     * Returns flat sessions list when treeView is off.
+     */
+    get sessionTree() {
+      if (!this.treeView) return this.sessions.map(s => ({ ...s, _depth: 0, _children: [] }));
+
+      const byId = {};
+      const roots = [];
+      const children = [];
+
+      // Index all sessions
+      for (const s of this.sessions) {
+        byId[s.session_id] = { ...s, _depth: 0, _children: [] };
+      }
+
+      // Separate roots and children
+      for (const s of this.sessions) {
+        const node = byId[s.session_id];
+        if (s.parent_session_id && byId[s.parent_session_id]) {
+          node._depth = 1;
+          byId[s.parent_session_id]._children.push(node);
+        } else {
+          roots.push(node);
+        }
+      }
+
+      // Flatten tree: parent followed by its children
+      const result = [];
+      for (const root of roots) {
+        result.push(root);
+        // Sort children by created_at
+        root._children.sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
+        for (const child of root._children) {
+          result.push(child);
+        }
+      }
+
+      return result;
+    },
+
     async toggleExpand(session) {
       if (this.expandedId === session.session_id) {
         this.expandedId = null;
         this.expandedSession = null;
         this.sessionAudit = [];
+        this.expandedAuditId = null;
+        this.expandedAuditRecord = null;
         return;
       }
       this.expandedId = session.session_id;
       this.expandedSession = session;
+      this.expandedAuditId = null;
+      this.expandedAuditRecord = null;
       try {
         const audit = await IntarisAPI.listAudit({
           session_id: session.session_id,
@@ -73,6 +209,20 @@ function sessionsTab() {
         this.sessionAudit = audit.items || [];
       } catch (e) {
         Alpine.store('notify').error('Failed to load session audit: ' + e.message);
+      }
+    },
+
+    async toggleAuditExpand(record) {
+      if (this.expandedAuditId === record.call_id) {
+        this.expandedAuditId = null;
+        this.expandedAuditRecord = null;
+        return;
+      }
+      this.expandedAuditId = record.call_id;
+      try {
+        this.expandedAuditRecord = await IntarisAPI.getAuditRecord(record.call_id);
+      } catch (e) {
+        this.expandedAuditRecord = record;
       }
     },
 
@@ -94,9 +244,24 @@ function sessionsTab() {
       return 'badge badge-' + (decision || 'low');
     },
 
+    riskBadgeClass(risk) {
+      return 'badge badge-' + (risk || 'low');
+    },
+
+    pathBadgeClass(path) {
+      if (path === 'critical') return 'badge badge-deny';
+      return 'badge badge-' + (path || 'fast');
+    },
+
     formatTime(ts) {
       if (!ts) return '';
       return new Date(ts).toLocaleString();
+    },
+
+    formatArgs(args) {
+      if (!args) return '';
+      if (typeof args === 'string') return args;
+      return JSON.stringify(args, null, 2);
     },
 
     truncate(str, len) {

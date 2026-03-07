@@ -142,6 +142,57 @@ class SessionStore:
             if cur.rowcount == 0:
                 raise ValueError(f"Session {session_id} not found")
 
+    def update_session(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        intention: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Update session intention and/or details.
+
+        Only updates fields that are provided (not None).
+
+        Args:
+            session_id: Session to update.
+            user_id: Tenant identifier (must match session owner).
+            intention: New intention text (optional).
+            details: New details dict (optional, replaces existing).
+
+        Returns:
+            Updated session as a dict.
+
+        Raises:
+            ValueError: If session not found.
+        """
+        if intention is None and details is None:
+            return self.get(session_id, user_id=user_id)
+
+        now = datetime.now(timezone.utc).isoformat()
+        sets = ["updated_at = ?"]
+        params: list[Any] = [now]
+
+        if intention is not None:
+            sets.append("intention = ?")
+            params.append(intention)
+        if details is not None:
+            sets.append("details = ?")
+            params.append(json.dumps(details))
+
+        params.extend([session_id, user_id])
+
+        with self._db.cursor() as cur:
+            cur.execute(
+                f"UPDATE sessions SET {', '.join(sets)} "
+                f"WHERE session_id = ? AND user_id = ?",
+                params,
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"Session {session_id} not found")
+
+        return self.get(session_id, user_id=user_id)
+
     def increment_counter(
         self, session_id: str, decision: str, *, user_id: str
     ) -> None:
@@ -225,6 +276,38 @@ class SessionStore:
                 UPDATE sessions
                 SET status = 'idle', updated_at = ?
                 WHERE status = 'active'
+                  AND last_activity_at IS NOT NULL
+                  AND last_activity_at < ?
+                RETURNING user_id, session_id
+                """,
+                (now, cutoff_time),
+            )
+            rows = cur.fetchall()
+
+        return [(row[0], row[1]) for row in rows]
+
+    def sweep_child_sessions(self, cutoff_time: str) -> list[tuple[str, str]]:
+        """Auto-complete idle child sessions that have been idle past cutoff.
+
+        Child sessions (those with parent_session_id set) are completed
+        faster than parent sessions as a defense-in-depth measure for
+        sub-agent sessions that don't signal completion.
+
+        Args:
+            cutoff_time: ISO timestamp. Idle child sessions with
+                last_activity_at before this time are completed.
+
+        Returns:
+            List of (user_id, session_id) pairs that were completed.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET status = 'completed', updated_at = ?
+                WHERE status = 'idle'
+                  AND parent_session_id IS NOT NULL
                   AND last_activity_at IS NOT NULL
                   AND last_activity_at < ?
                 RETURNING user_id, session_id

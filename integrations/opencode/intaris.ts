@@ -8,12 +8,13 @@
  * Flow:
  * 1. session.created: Creates an Intaris session via POST /api/v1/intention
  *    (including child sessions with parent_session_id)
- * 2. tool.execute.before: Evaluates every tool call via POST /api/v1/evaluate
+ * 2. chat.message: Captures agent name per session for sub-agent identification
+ * 3. tool.execute.before: Evaluates every tool call via POST /api/v1/evaluate
  *    - approve: tool executes normally
  *    - deny: throws error with reasoning (blocks execution)
  *    - escalate: throws error directing user to Intaris UI for approval
  *    - Periodic checkpoints sent every N calls (configurable)
- * 3. session.deleted: Signals session completion to Intaris
+ * 4. session.deleted / session.idle: Signals session completion to Intaris
  *    - PATCH /session/{id}/status to "completed"
  *    - POST /session/{id}/agent-summary with session statistics
  *
@@ -38,6 +39,10 @@ interface SessionState {
   escalatedCount: number
   recentTools: string[]
   parentSessionId: string | null
+  lastError: string | null
+  agentName: string | null
+  sessionTitle: string | null
+  intentionUpdated: boolean
 }
 
 interface EvaluateResponse {
@@ -74,12 +79,18 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
   // -- API Client -----------------------------------------------------------
 
+  interface ApiResult {
+    data: any | null
+    error: string | null
+    status: number | null
+  }
+
   async function callApi(
     method: string,
     path: string,
     payload: object,
     timeoutMs: number = 5000,
-  ): Promise<any | null> {
+  ): Promise<ApiResult> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-Agent-Id": agentId,
@@ -98,21 +109,29 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(timeoutMs),
       })
-      if (resp.ok) return await resp.json()
+      if (resp.ok) return { data: await resp.json(), error: null, status: resp.status }
 
-      // Log non-OK responses
+      // Non-OK response — extract server error detail
       const body = await resp.text().catch(() => "")
+      let detail = `HTTP ${resp.status}`
+      try {
+        const parsed = JSON.parse(body)
+        detail = parsed.detail || parsed.error || detail
+      } catch {
+        if (body) detail = body.slice(0, 200)
+      }
+
       await client.app
         .log({
           body: {
             service: "intaris",
             level: "warn",
-            message: `API ${method} ${path} returned ${resp.status}`,
+            message: `API ${method} ${path} returned ${resp.status}: ${detail}`,
             extra: { status: resp.status, body: body.slice(0, 200) },
           },
         })
         .catch(() => {})
-      return null
+      return { data: null, error: detail, status: resp.status }
     } catch (err) {
       await client.app
         .log({
@@ -123,7 +142,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           },
         })
         .catch(() => {})
-      return null
+      return { data: null, error: String(err), status: null }
     }
   }
 
@@ -141,6 +160,10 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         escalatedCount: 0,
         recentTools: [],
         parentSessionId: null,
+        lastError: null,
+        agentName: null,
+        sessionTitle: null,
+        intentionUpdated: false,
       }
       sessions.set(sessionId, state)
       // Evict oldest entries if over limit
@@ -159,13 +182,70 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
   /**
    * Build the session intention string.
+   * Uses Session.title if available, falls back to working directory.
    */
-  function buildIntention(): string {
+  function buildIntention(state: SessionState): string {
     if (intentionOverride) return intentionOverride
+
+    // For child sessions, include agent type and parent reference
+    if (state.parentSessionId) {
+      const agent = state.agentName || "sub-agent"
+      const title = state.sessionTitle
+      if (title) {
+        return `OpenCode ${agent}: ${title}`
+      }
+      return `OpenCode ${agent} session in ${workingDirectory || "unknown"}`
+    }
+
+    // For main sessions, use title if available
+    if (state.sessionTitle) {
+      return state.sessionTitle
+    }
+
     if (workingDirectory) {
       return `OpenCode coding session in ${workingDirectory}`
     }
     return "OpenCode coding session"
+  }
+
+  /**
+   * Build session details including agent type.
+   */
+  function buildDetails(state: SessionState): Record<string, any> {
+    const details: Record<string, any> = {
+      source: "opencode",
+      working_directory: workingDirectory,
+    }
+    if (state.agentName) {
+      details.agent_type = state.agentName
+    }
+    return details
+  }
+
+  /**
+   * Update the session intention on the server after gathering context.
+   * Called after the first few tool calls to refine the generic intention.
+   */
+  function updateIntention(
+    intarisSessionId: string,
+    state: SessionState,
+  ): void {
+    if (state.intentionUpdated) return
+    if (intentionOverride) return
+    // Only update after enough calls to have context
+    if (state.callCount < 3) return
+
+    state.intentionUpdated = true
+
+    const intention = buildIntention(state)
+    const details = buildDetails(state)
+
+    callApi(
+      "PATCH",
+      `/api/v1/session/${intarisSessionId}`,
+      { intention, details },
+      2000,
+    ).catch(() => {})
   }
 
   /**
@@ -185,8 +265,9 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
    * Build an agent summary string with session statistics.
    */
   function buildAgentSummary(state: SessionState): string {
+    const agent = state.agentName ? ` (${state.agentName})` : ""
     return (
-      `OpenCode session completed. ${state.callCount} tool calls ` +
+      `OpenCode session${agent} completed. ${state.callCount} tool calls ` +
       `(${state.approvedCount} approved, ${state.deniedCount} denied, ` +
       `${state.escalatedCount} escalated). ` +
       `Working directory: ${workingDirectory || "unknown"}`
@@ -209,11 +290,8 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
     const intentionBody: Record<string, any> = {
       session_id: intarisSessionId,
-      intention: buildIntention(),
-      details: {
-        source: "opencode",
-        working_directory: workingDirectory,
-      },
+      intention: buildIntention(state),
+      details: buildDetails(state),
     }
 
     // Include parent_session_id for child sessions (session continuation chains)
@@ -221,14 +299,14 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       intentionBody.parent_session_id = state.parentSessionId
     }
 
-    const result = await callApi(
+    const { data, error, status } = await callApi(
       "POST",
       "/api/v1/intention",
       intentionBody,
       2000, // 2s timeout for session creation (leaves headroom for evaluate)
     )
 
-    if (result) {
+    if (data) {
       state.intarisSessionId = intarisSessionId
       state.sessionCreated = true
       await client.app
@@ -240,8 +318,12 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           },
         })
         .catch(() => {})
+    } else if (status !== null && status >= 400 && status < 500) {
+      // Client error (auth, validation) — propagate detail, don't retry
+      state.lastError = error || `HTTP ${status}`
+      return null
     } else {
-      // Session may already exist (409 conflict) — try using it anyway
+      // Session may already exist (409 conflict) or server error — try using it anyway
       state.intarisSessionId = intarisSessionId
     }
 
@@ -294,6 +376,18 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     ]).catch(() => {})
   }
 
+  /**
+   * Find and complete all child sessions of a given parent.
+   */
+  function completeChildSessions(parentIntarisId: string): void {
+    for (const [childId, childState] of sessions) {
+      if (childState.parentSessionId === parentIntarisId && childState.intarisSessionId) {
+        signalCompletion(childState.intarisSessionId, childState)
+        sessions.delete(childId)
+      }
+    }
+  }
+
   // -- Initialization -------------------------------------------------------
 
   if (!apiKey) {
@@ -336,6 +430,35 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
   // -- Hooks ----------------------------------------------------------------
 
   return {
+    // -- Agent Name Capture -------------------------------------------------
+    "chat.message": async (
+      input: {
+        sessionID: string
+        agent?: string
+        model?: { providerID: string; modelID: string }
+        messageID?: string
+      },
+      _output: any,
+    ) => {
+      if (!input.sessionID || !input.agent) return
+      const state = sessions.get(input.sessionID)
+      if (state && !state.agentName) {
+        state.agentName = input.agent
+        // If session already created, update intention with agent info
+        if (state.intarisSessionId && !state.intentionUpdated) {
+          state.intentionUpdated = true
+          const intention = buildIntention(state)
+          const details = buildDetails(state)
+          callApi(
+            "PATCH",
+            `/api/v1/session/${state.intarisSessionId}`,
+            { intention, details },
+            2000,
+          ).catch(() => {})
+        }
+      }
+    },
+
     // -- Session Lifecycle --------------------------------------------------
     event: async ({ event }: { event: { type: string; properties: any } }) => {
       if (event.type === "session.created") {
@@ -343,6 +466,12 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         if (!sessionId) return
 
         const state = getOrCreateState(sessionId)
+
+        // Capture session title for smarter intention
+        const title: string | undefined = event.properties?.info?.title
+        if (title) {
+          state.sessionTitle = title
+        }
 
         // Track parent session for child sessions (subagent tasks).
         // Child sessions are created with parent_session_id for session
@@ -357,9 +486,6 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       }
 
       // Signal session completion when explicitly deleted.
-      // Note: OpenCode does not fire a session-end event on normal exit.
-      // Sessions that are not explicitly deleted will be transitioned to
-      // "idle" by the server's background sweep after SESSION_IDLE_TIMEOUT_MINUTES.
       if (event.type === "session.deleted") {
         const sessionId: string = event.properties?.info?.id
         if (!sessionId) return
@@ -367,8 +493,28 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         const state = sessions.get(sessionId)
         if (!state?.intarisSessionId) return
 
+        // Complete this session
         signalCompletion(state.intarisSessionId, state)
+        // Also complete any child sessions that are still active
+        completeChildSessions(state.intarisSessionId)
         sessions.delete(sessionId)
+      }
+
+      // Handle session.idle — complete child sessions that go idle.
+      // OpenCode fires this when a session becomes idle (no more activity).
+      // For child sessions (sub-agents), idle means the task is done.
+      if (event.type === "session.idle") {
+        const sessionId: string = event.properties?.sessionID
+        if (!sessionId) return
+
+        const state = sessions.get(sessionId)
+        if (!state?.intarisSessionId) return
+
+        // Only auto-complete child sessions on idle, not parent sessions
+        if (state.parentSessionId) {
+          signalCompletion(state.intarisSessionId, state)
+          sessions.delete(sessionId)
+        }
       }
     },
 
@@ -386,13 +532,14 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       const intarisSessionId = await ensureSession(sessionID, state)
       if (!intarisSessionId) {
         if (failOpen) return
+        const detail = state.lastError || "unknown error"
         throw new Error(
-          "[intaris] Cannot create session — tool call blocked (INTARIS_FAIL_OPEN=false)",
+          `[intaris] Cannot create session: ${detail}`,
         )
       }
 
       // Evaluate the tool call
-      const result: EvaluateResponse | null = await callApi(
+      const { data: result, error: evalError, status: evalStatus } = await callApi(
         "POST",
         "/api/v1/evaluate",
         {
@@ -404,7 +551,13 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       )
 
       if (!result) {
-        // Intaris unreachable
+        // Distinguish config errors (4xx) from transient failures (5xx/network)
+        if (evalStatus !== null && evalStatus >= 400 && evalStatus < 500) {
+          throw new Error(
+            `[intaris] Evaluation rejected for ${tool}: ${evalError}`,
+          )
+        }
+        // Intaris unreachable or server error
         if (failOpen) {
           await client.app
             .log({
@@ -418,7 +571,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           return
         }
         throw new Error(
-          `[intaris] Evaluation failed for ${tool} — tool call blocked (INTARIS_FAIL_OPEN=false)`,
+          `[intaris] Evaluation failed for ${tool}: ${evalError || "server unreachable"} (INTARIS_FAIL_OPEN=false)`,
         )
       }
 
@@ -447,6 +600,9 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
       // Send periodic checkpoint (fire-and-forget, non-blocking)
       sendCheckpoint(intarisSessionId, state)
+
+      // Try to update intention after gathering enough context
+      updateIntention(intarisSessionId, state)
 
       if (result.decision === "deny") {
         const reason = result.reasoning || "Tool call denied by safety evaluation"

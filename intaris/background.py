@@ -384,6 +384,14 @@ class BackgroundWorker:
         # Analyzer readiness flag — False in Phase 1 (stubs),
         # set to True in Phase 3 when real analyzer is available.
         self.analyzer_ready = False
+        self._event_bus = None
+
+    def set_event_bus(self, event_bus) -> None:
+        """Set the EventBus reference for publishing events.
+
+        Called after initialization since EventBus is created separately.
+        """
+        self._event_bus = event_bus
 
     async def start(self) -> None:
         """Launch all background loops.
@@ -483,6 +491,8 @@ class BackgroundWorker:
                 elif task_type == "analysis":
                     result = await self._execute_analysis_task(task)
                     self.metrics.analyses_completed_total += 1
+                elif task_type == "intention_update":
+                    result = await self._execute_intention_update_task(task)
                 else:
                     result = {"error": f"Unknown task type: {task_type}"}
 
@@ -515,12 +525,123 @@ class BackgroundWorker:
 
         return await run_analysis(self._db, None, task)
 
+    async def _execute_intention_update_task(
+        self, task: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Generate a smarter intention from the audit trail.
+
+        Uses the analysis LLM to summarize what the session is about
+        based on the first N tool calls.
+        """
+        from intaris.audit import AuditStore
+
+        user_id = task.get("user_id", "")
+        session_id = task.get("session_id", "")
+        if not user_id or not session_id:
+            return {"error": "Missing user_id or session_id"}
+
+        try:
+            session = self._session_store.get(session_id, user_id=user_id)
+        except ValueError:
+            return {"error": f"Session {session_id} not found"}
+
+        # Get recent audit records for context
+        audit_store = AuditStore(self._db)
+        recent = audit_store.get_recent(session_id, user_id=user_id, limit=15)
+        if not recent:
+            return {"skipped": "No audit records yet"}
+
+        # Build a summary of tool calls for the LLM
+        tool_summary = []
+        for record in recent:
+            tool = record.get("tool", "unknown")
+            decision = record.get("decision", "unknown")
+            args = record.get("args_redacted", {})
+            # Extract key info from args
+            brief = ""
+            if isinstance(args, dict):
+                if "command" in args:
+                    brief = f": {str(args['command'])[:100]}"
+                elif "filePath" in args:
+                    brief = f": {args['filePath']}"
+                elif "path" in args:
+                    brief = f": {args['path']}"
+            tool_summary.append(f"  {tool}{brief} → {decision}")
+
+        tools_text = "\n".join(tool_summary)
+
+        # Use analysis LLM to generate a concise intention
+        from intaris.config import load_config
+        from intaris.llm import LLMClient
+
+        cfg = load_config()
+        analysis_llm = LLMClient(cfg.llm_analysis)
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a concise summarizer. Given a list of tool calls "
+                    "from a coding session, generate a single sentence (max 100 "
+                    "words) describing what the user is working on. Focus on the "
+                    "goal, not the tools. Do not include technical jargon about "
+                    "the tools themselves."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Current intention: {session.get('intention', 'unknown')}\n"
+                    f"Working directory: {session.get('details', {}).get('working_directory', 'unknown')}\n"
+                    f"Recent tool calls:\n{tools_text}\n\n"
+                    f"Generate a concise session description:"
+                ),
+            },
+        ]
+
+        try:
+            raw = analysis_llm.generate(messages, max_tokens=150)
+            intention = raw.strip().strip('"').strip("'")
+            if not intention or len(intention) < 5:
+                return {"skipped": "LLM returned empty intention"}
+
+            # Truncate to 500 chars
+            intention = intention[:500]
+
+            self._session_store.update_session(
+                session_id,
+                user_id=user_id,
+                intention=intention,
+            )
+
+            # Publish event
+            if self._event_bus is not None:
+                self._event_bus.publish(
+                    {
+                        "type": "session_updated",
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "intention": intention,
+                    }
+                )
+
+            return {"intention": intention}
+        except Exception as e:
+            logger.warning("Failed to generate intention: %s", e)
+            return {"error": str(e)}
+
     async def _idle_sweeper(self) -> None:
         """Periodically transition inactive sessions to idle.
+
+        Also auto-completes idle child sessions (sub-agent defense-in-depth)
+        and publishes status change events to the EventBus.
 
         Runs every 5 minutes. Uses atomic conditional UPDATE to prevent
         TOCTOU races with concurrent evaluate calls.
         """
+        # Shorter idle timeout for child sessions (5 minutes)
+        child_idle_timeout_min = 5
+
         while self._running:
             await asyncio.sleep(300)  # 5 minutes
 
@@ -536,6 +657,19 @@ class BackgroundWorker:
                     "Idle sweep: transitioned %d sessions to idle",
                     len(transitioned),
                 )
+
+                # Publish status change events
+                if self._event_bus is not None:
+                    for user_id, session_id in transitioned:
+                        self._event_bus.publish(
+                            {
+                                "type": "session_status_changed",
+                                "session_id": session_id,
+                                "user_id": user_id,
+                                "status": "idle",
+                            }
+                        )
+
                 # Enqueue summary tasks for transitioned sessions
                 # (only if analyzer is ready — Phase 1 stubs skip this)
                 if self.analyzer_ready:
@@ -550,6 +684,31 @@ class BackgroundWorker:
                                 payload={"trigger": "inactivity"},
                                 priority=1,
                             )
+
+            # Auto-complete idle child sessions (sub-agent defense-in-depth).
+            # Child sessions use a shorter idle timeout since sub-agents
+            # typically finish quickly and may not signal completion.
+            child_cutoff = (
+                datetime.now(timezone.utc) - timedelta(minutes=child_idle_timeout_min)
+            ).isoformat()
+
+            completed_children = self._session_store.sweep_child_sessions(child_cutoff)
+
+            if completed_children:
+                logger.info(
+                    "Idle sweep: auto-completed %d idle child sessions",
+                    len(completed_children),
+                )
+                if self._event_bus is not None:
+                    for user_id, session_id in completed_children:
+                        self._event_bus.publish(
+                            {
+                                "type": "session_status_changed",
+                                "session_id": session_id,
+                                "user_id": user_id,
+                                "status": "completed",
+                            }
+                        )
 
     async def _periodic_scheduler(self) -> None:
         """Periodically enqueue analysis for users with new data.

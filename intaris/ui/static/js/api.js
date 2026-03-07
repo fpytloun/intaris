@@ -79,7 +79,14 @@ const IntarisAPI = {
 
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
-      throw new Error(body.detail || body.error || `HTTP ${response.status}`);
+      let msg;
+      if (Array.isArray(body.detail)) {
+        // Pydantic validation errors — extract human-readable messages.
+        msg = body.detail.map(e => e.msg || JSON.stringify(e)).join('; ');
+      } else {
+        msg = body.detail || body.error || `HTTP ${response.status}`;
+      }
+      throw new Error(msg);
     }
 
     return response.json();

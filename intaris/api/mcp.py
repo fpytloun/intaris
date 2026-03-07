@@ -103,6 +103,39 @@ def _get_server_store() -> MCPServerStore:
     return MCPServerStore(_get_db(), cfg.mcp.encryption_key)
 
 
+def _friendly_connection_error(exc: Exception) -> str:
+    """Extract a user-friendly message from MCP connection errors.
+
+    Common MCP SDK / transport errors are mapped to actionable messages.
+    Falls back to ``str(exc)`` for unknown errors.
+    """
+    msg = str(exc)
+
+    # ConnectionError from our _connect() unwrapper already has context.
+    if isinstance(exc, ConnectionError):
+        return msg
+
+    # httpx.HTTPStatusError — wrong transport type or auth failure.
+    if "HTTPStatusError" in type(exc).__name__ or "HTTPStatusError" in msg:
+        if "405" in msg:
+            return f"{msg} — the server may use a different transport type (try SSE instead of HTTP or vice versa)"
+        return msg
+
+    # Common socket-level errors.
+    if isinstance(exc, ConnectionRefusedError):
+        return f"Connection refused — is the server running? ({msg})"
+    if isinstance(exc, TimeoutError):
+        return f"Connection timed out ({msg})"
+    if isinstance(exc, OSError) and "Name or service not known" in msg:
+        return f"DNS resolution failed — check the server URL ({msg})"
+
+    # Truncate overly long exception messages (e.g. full tracebacks).
+    if len(msg) > 300:
+        msg = msg[:300] + "…"
+
+    return msg
+
+
 # ── Endpoints ────────────────────────────────────────────────────────
 
 
@@ -231,7 +264,9 @@ async def refresh_server_tools(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("Failed to refresh tools for server %s", name)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=502, detail=_friendly_connection_error(exc)
+        ) from exc
 
 
 # ── Tool Preferences ─────────────────────────────────────────────────

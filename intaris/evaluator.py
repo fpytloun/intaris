@@ -156,6 +156,7 @@ class Evaluator:
                 "path": "fast",
                 "latency_ms": latency_ms,
                 "args_redacted": redact(args),
+                "classification": "write",
             }
 
         # Update session activity timestamp (for idle detection)
@@ -257,6 +258,29 @@ class Evaluator:
         except ValueError:
             logger.warning("Failed to update session counter for %s", session_id)
 
+        # Enqueue intention update task if intention looks generic
+        # (after enough calls to have context, background task handles LLM)
+        if (
+            session.get("total_calls", 0) == 9  # Trigger once at ~10 calls
+            and session.get("intention", "").startswith("OpenCode ")
+            and self._analysis_enabled
+        ):
+            try:
+                from intaris.background import TaskQueue
+
+                if self._db is not None:
+                    tq = TaskQueue(self._db)
+                    if not tq.cancel_duplicate("intention_update", user_id, session_id):
+                        tq.enqueue(
+                            "intention_update",
+                            user_id,
+                            session_id=session_id,
+                            payload={"trigger": "auto"},
+                            priority=2,
+                        )
+            except Exception:
+                logger.debug("Failed to enqueue intention update", exc_info=True)
+
         return {
             "call_id": call_id,
             "decision": decision.decision,
@@ -265,6 +289,7 @@ class Evaluator:
             "path": decision.path,
             "latency_ms": latency_ms,
             "args_redacted": args_redacted,
+            "classification": classification.value,
         }
 
     def _get_behavioral_context(self, user_id: str) -> dict[str, Any] | None:

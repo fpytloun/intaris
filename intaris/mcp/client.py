@@ -37,6 +37,41 @@ from mcp.types import Implementation
 
 logger = logging.getLogger(__name__)
 
+
+def _unwrap_exception_group(exc: BaseException) -> BaseException:
+    """Extract the most meaningful exception from an ExceptionGroup.
+
+    MCP SDK + anyio often wrap real errors (HTTPStatusError,
+    ConnectionRefusedError) inside BaseExceptionGroup with cleanup
+    noise (RuntimeError about cancel scopes). This walks the group
+    and returns the first non-RuntimeError sub-exception, or the
+    first sub-exception if all are RuntimeErrors.
+    """
+    if not isinstance(exc, BaseExceptionGroup):
+        return exc
+
+    # Flatten all leaf exceptions from potentially nested groups.
+    leaves: list[BaseException] = []
+    stack: list[BaseException] = [exc]
+    while stack:
+        e = stack.pop()
+        if isinstance(e, BaseExceptionGroup):
+            stack.extend(e.exceptions)
+        else:
+            leaves.append(e)
+
+    if not leaves:
+        return exc
+
+    # Prefer non-RuntimeError (the actual connection/HTTP error).
+    for leaf in leaves:
+        if not isinstance(leaf, RuntimeError):
+            return leaf
+
+    # All RuntimeErrors — return the first one.
+    return leaves[0]
+
+
 # Idle timeout: close connections unused for this long.
 _IDLE_TIMEOUT_SECONDS = 30 * 60  # 30 minutes
 
@@ -279,9 +314,16 @@ class MCPConnectionManager:
                 server_instructions=server_instructions,
             )
 
-        except Exception:
+        except BaseException as exc:
             # Clean up the exit stack on any failure.
             await exit_stack.aclose()
+            # Unwrap ExceptionGroups (common with anyio/MCP SDK) to
+            # surface the actual root cause instead of opaque errors.
+            root = _unwrap_exception_group(exc)
+            if root is not exc:
+                raise ConnectionError(
+                    f"Failed to connect to '{server_name}' ({transport}): {root}"
+                ) from root
             raise
 
     async def _connect_stdio(
