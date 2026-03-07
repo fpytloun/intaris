@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.git/
+.github/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+tests/
+plugins/
+AGENTS.md
+LICENSE

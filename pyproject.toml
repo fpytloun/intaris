@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "intaris"
+version = "0.1.0"
+description = "Guardrails service for AI coding agents — safety evaluation, audit, and approval workflows"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [
+    { name = "Filip Pytloun" },
+]
+keywords = ["guardrails", "safety", "ai", "llm", "agents"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.30.0",
+    "starlette>=0.38.0",
+    "openai>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3.0",
+    "ruff>=0.5.0",
+]
+
+[project.scripts]
+intaris = "intaris.server:main"
+
+[project.urls]
+Homepage = "https://github.com/fpytloun/intaris"
+Repository = "https://github.com/fpytloun/intaris"
+Issues = "https://github.com/fpytloun/intaris/issues"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+markers = [
+    "e2e: end-to-end tests requiring LLM API key and real backends (deselected by default)",
+]
+addopts = "-m 'not e2e'"
+
+[tool.hatch.build.targets.wheel]
+packages = ["intaris"]
