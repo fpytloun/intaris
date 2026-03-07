@@ -35,9 +35,27 @@ intaris/
 │   ├── evaluate.py        # POST /api/v1/evaluate (rate limiting, webhook, EventBus)
 │   ├── intention.py       # POST /api/v1/intention, GET /api/v1/session/{id}, GET /sessions, PATCH /session/{id}/status
 │   ├── audit.py           # GET /api/v1/audit, POST /api/v1/decision (EventBus publish)
+│   ├── info.py            # GET /whoami, /stats, /config (management UI support)
 │   └── stream.py          # EventBus + WebSocket streaming (first-message auth)
-└── ui/                    # Built-in UI (Phase 1 Week 3)
+└── ui/
+    ├── __init__.py        # Package marker
+    ├── tailwind.config.js # Tailwind CSS brand theme config
+    ├── src/
+    │   └── input.css      # Tailwind source CSS with component classes
     └── static/
+        ├── index.html     # Single-page app (Alpine.js + Tailwind)
+        ├── css/
+        │   └── app.css    # Pre-built Tailwind output (committed)
+        ├── js/
+        │   ├── api.js     # IntarisAPI client singleton
+        │   ├── app.js     # Alpine.js stores (auth, nav, notify)
+        │   ├── dashboard.js # Dashboard tab component
+        │   ├── sessions.js  # Sessions tab component
+        │   ├── audit.js     # Audit tab component
+        │   ├── approvals.js # Approvals tab component (10s polling)
+        │   └── settings.js  # Settings tab component
+        └── vendor/
+            └── alpine.min.js # Vendored Alpine.js (no CDN)
 ```
 
 ### Layer responsibilities
@@ -48,6 +66,7 @@ intaris/
 | **Identity** | `api/deps.py` | SessionContext dependency (user_id, agent_id from ContextVars) |
 | **REST API** | `api/` | FastAPI endpoints with OpenAPI spec |
 | **Streaming** | `api/stream.py` | EventBus (pub/sub) + WebSocket endpoint with first-message auth |
+| **Info** | `api/info.py` | Identity (/whoami), stats (/stats), config (/config) for management UI |
 | **Orchestration** | `evaluator.py` | Full evaluation pipeline (classify → LLM → decide → audit) |
 | **Classification** | `classifier.py` | Read-only allowlist, critical patterns, session policy |
 | **Decision** | `decision.py` | Priority-ordered decision matrix |
@@ -264,6 +283,52 @@ pytest -m '' -v                     # all tests (unit + e2e)
 - Reasoning effort: `low`
 - Temperature: `0.1`
 - Timeout: `4000ms`
+
+## Built-in Management UI
+
+Single-page web UI served at `/ui` for monitoring and managing Intaris. Built with Alpine.js + Tailwind CSS, following the same pattern as the mnemory project's UI.
+
+### Architecture
+
+- **No build step at runtime**: Alpine.js is vendored (`static/vendor/alpine.min.js`), Tailwind CSS is pre-built and committed (`static/css/app.css`).
+- **Tab-based navigation**: 5 tabs — Dashboard, Sessions, Audit, Approvals, Settings.
+- **Auth**: API key stored in `localStorage`, sent via `X-API-Key` header. User impersonation via `X-User-Id` header when `can_switch_user` is true.
+- **Polling**: Approvals tab polls every 10s for pending escalations (WebSocket deferred to Phase 2).
+
+### Tabs
+
+| Tab | Description | API endpoints used |
+|---|---|---|
+| **Dashboard** | Stat cards, decision distribution, recent activity | `GET /stats`, `GET /audit` |
+| **Sessions** | Filterable session list with expandable detail | `GET /sessions`, `GET /session/{id}`, `GET /audit`, `PATCH /session/{id}/status` |
+| **Audit** | Filterable audit log table with expandable detail | `GET /audit` |
+| **Approvals** | Pending escalations with approve/deny actions | `GET /audit?decision=escalate&resolved=false`, `POST /decision` |
+| **Settings** | Read-only server configuration display | `GET /config` |
+
+### API endpoints for UI
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/v1/whoami` | Identity verification + `can_switch_user` flag |
+| `GET /api/v1/stats` | Aggregated dashboard metrics (sessions, evaluations, decisions, users) |
+| `GET /api/v1/config` | Non-sensitive server config (LLM base URL masked) |
+
+### Rebuilding CSS
+
+After modifying `intaris/ui/src/input.css` or any HTML/JS files in `intaris/ui/static/`, rebuild the Tailwind output:
+
+```bash
+npx tailwindcss -i intaris/ui/src/input.css -o intaris/ui/static/css/app.css --minify
+```
+
+The pre-built `app.css` is committed to the repository so no build step is needed at runtime.
+
+### Static file serving
+
+- `server.py` mounts `StaticFiles` at `/ui` with `html=True` for `index.html` fallback.
+- Graceful degradation: only mounts if `ui/static/` directory exists and is non-empty.
+- Auth middleware skips `/ui` paths (static files don't need auth; API calls use `X-API-Key` from `localStorage`).
+- Redirect from `/ui` → `/ui/` for consistent URL handling.
 
 ## Important Notes
 

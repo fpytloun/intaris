@@ -158,6 +158,7 @@ class AuditStore:
         evaluation_path: str | None = None,
         from_ts: str | None = None,
         to_ts: str | None = None,
+        resolved: bool | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -166,6 +167,10 @@ class AuditStore:
         Args:
             user_id: Tenant identifier (always required).
             record_type: Filter by record type (tool_call, reasoning, checkpoint).
+            resolved: Filter by resolution status. ``True`` returns only
+                records with a user_decision set, ``False`` returns only
+                unresolved records (user_decision IS NULL). ``None`` (default)
+                returns all records regardless of resolution status.
 
         Returns:
             Dict with 'items', 'total', 'page', 'pages'.
@@ -200,6 +205,10 @@ class AuditStore:
         if to_ts:
             conditions.append("timestamp <= ?")
             params.append(to_ts)
+        if resolved is True:
+            conditions.append("user_decision IS NOT NULL")
+        elif resolved is False:
+            conditions.append("user_decision IS NULL")
 
         where = ""
         if conditions:

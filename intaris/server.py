@@ -121,8 +121,16 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         cfg = _get_config()
 
-        # Skip auth for health endpoint
-        if request.url.path == "/health":
+        # Skip auth for health endpoint and static UI files
+        if (
+            request.url.path == "/health"
+            or request.url.path
+            in (
+                "/ui",
+                "/ui/",
+            )
+            or request.url.path.startswith("/ui/")
+        ):
             return await call_next(request)
 
         try:
@@ -259,17 +267,37 @@ async def lifespan(app):
 
 def create_app() -> Starlette:
     """Create the Starlette application."""
+    from pathlib import Path
+
+    from starlette.responses import RedirectResponse
+    from starlette.staticfiles import StaticFiles
+
     middleware = [Middleware(APIKeyMiddleware)]
 
     from intaris.api.stream import stream_websocket
 
     api_app = _create_api_app()
 
-    routes = [
-        Route("/health", health_check),
-        Mount("/api/v1", app=api_app),
-        WebSocketRoute("/api/v1/stream", stream_websocket),
-    ]
+    routes: list[Route | Mount | WebSocketRoute] = []
+
+    # Mount management UI if static directory exists (graceful degradation)
+    ui_static_dir = Path(__file__).parent / "ui" / "static"
+    if ui_static_dir.is_dir() and any(ui_static_dir.iterdir()):
+
+        async def _ui_redirect(request: Request) -> RedirectResponse:
+            return RedirectResponse("/ui/", status_code=301)
+
+        routes.append(Route("/ui", _ui_redirect))
+        routes.append(Mount("/ui", app=StaticFiles(directory=ui_static_dir, html=True)))
+        logger.info("Management UI mounted at /ui")
+
+    routes.extend(
+        [
+            Route("/health", health_check),
+            Mount("/api/v1", app=api_app),
+            WebSocketRoute("/api/v1/stream", stream_websocket),
+        ]
+    )
 
     starlette_app = Starlette(
         routes=routes,

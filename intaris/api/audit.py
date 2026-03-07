@@ -31,6 +31,7 @@ async def list_audit(
     path: str | None = Query(None),
     from_ts: str | None = Query(None, alias="from"),
     to_ts: str | None = Query(None, alias="to"),
+    resolved: bool | None = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
 ) -> AuditListResponse:
@@ -51,6 +52,7 @@ async def list_audit(
             evaluation_path=path,
             from_ts=from_ts,
             to_ts=to_ts,
+            resolved=resolved,
             page=page,
             limit=limit,
         )

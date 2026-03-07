@@ -170,6 +170,11 @@ class TestAuth:
         )
         assert resp.status_code == 200
 
+    def test_ui_path_bypass_exact(self, client_with_auth):
+        """Paths like /uiconfig are NOT bypassed from auth."""
+        resp = client_with_auth.get("/uiconfig")
+        assert resp.status_code == 401
+
 
 # ── Sessions ──────────────────────────────────────────────────────────
 
@@ -637,3 +642,360 @@ class TestConfigValidation:
             config = Config()
             with pytest.raises(ValueError, match="WEBHOOK_SECRET is required"):
                 config.validate()
+
+
+# ── Info Endpoints ────────────────────────────────────────────────────
+
+
+class TestWhoami:
+    """Tests for GET /whoami."""
+
+    def test_whoami_basic(self, client_no_auth):
+        resp = client_no_auth.get(
+            "/api/v1/whoami",
+            headers={"X-User-Id": "user-who"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["user_id"] == "user-who"
+        assert data["can_switch_user"] is True
+
+    def test_whoami_with_agent_id(self, client_no_auth):
+        resp = client_no_auth.get(
+            "/api/v1/whoami",
+            headers={"X-User-Id": "user-who", "X-Agent-Id": "agent-1"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["user_id"] == "user-who"
+        assert data["agent_id"] == "agent-1"
+
+    def test_whoami_requires_user(self, client_no_auth):
+        """Whoami without user identity returns 401."""
+        resp = client_no_auth.get("/api/v1/whoami")
+        assert resp.status_code == 401
+
+    def test_whoami_auth_required(self, client_with_auth):
+        """Whoami requires auth when configured."""
+        resp = client_with_auth.get(
+            "/api/v1/whoami",
+            headers={"X-User-Id": "user-who"},
+        )
+        assert resp.status_code == 401
+
+    def test_whoami_auth_valid(self, client_with_auth):
+        resp = client_with_auth.get(
+            "/api/v1/whoami",
+            headers={**_auth_headers(), "X-User-Id": "user-who"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["user_id"] == "user-who"
+
+    def test_whoami_bound_user(self, tmp_db):
+        """User bound via API key mapping has can_switch_user=False."""
+        env = {
+            "LLM_API_KEY": "test-key",
+            "DB_PATH": tmp_db,
+            "INTARIS_API_KEYS": '{"bound-key": "bound-user"}',
+        }
+        with patch.dict(os.environ, env, clear=False):
+            for key in ("INTARIS_API_KEY", "WEBHOOK_URL", "WEBHOOK_SECRET"):
+                os.environ.pop(key, None)
+
+            import intaris.server as srv
+
+            srv._config = None
+            srv._db = None
+            srv._evaluator = None
+
+            from intaris.server import create_app
+
+            app = create_app()
+            with TestClient(app) as client:
+                resp = client.get(
+                    "/api/v1/whoami",
+                    headers={"Authorization": "Bearer bound-key"},
+                )
+                assert resp.status_code == 200
+                data = resp.json()
+                assert data["user_id"] == "bound-user"
+                assert data["can_switch_user"] is False
+
+
+class TestStats:
+    """Tests for GET /stats."""
+
+    def test_stats_empty(self, client_no_auth):
+        """Stats with no data returns zero counts."""
+        resp = client_no_auth.get(
+            "/api/v1/stats",
+            headers={"X-User-Id": "user-stats-empty"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_sessions"] == 0
+        assert data["total_evaluations"] == 0
+        assert data["pending_approvals"] == 0
+        assert data["approval_rate"] == 0.0
+        assert data["avg_latency_ms"] == 0.0
+        assert isinstance(data["users"], list)
+        assert isinstance(data["sessions_by_status"], dict)
+        assert isinstance(data["decisions"], dict)
+
+    def test_stats_with_data(self, client_no_auth):
+        """Stats reflect sessions and evaluations."""
+        headers = {"X-User-Id": "user-stats"}
+        _create_session(client_no_auth, "sess-stats-1", headers)
+        _create_session(client_no_auth, "sess-stats-2", headers)
+
+        # Create some evaluations
+        client_no_auth.post(
+            "/api/v1/evaluate",
+            json={"session_id": "sess-stats-1", "tool": "read", "args": {}},
+            headers=headers,
+        )
+        client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-stats-2",
+                "tool": "bash",
+                "args": {"command": "rm -rf /"},
+            },
+            headers=headers,
+        )
+
+        resp = client_no_auth.get("/api/v1/stats", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_sessions"] == 2
+        assert data["total_evaluations"] >= 2
+        assert data["sessions_by_status"].get("active", 0) >= 2
+        assert "approve" in data["decisions"] or "deny" in data["decisions"]
+        assert data["avg_latency_ms"] >= 0
+
+    def test_stats_pending_approvals(self, client_no_auth):
+        """Stats counts pending escalations."""
+        from intaris.audit import AuditStore
+        from intaris.server import _get_db
+
+        headers = {"X-User-Id": "user-stats-pend"}
+        _create_session(client_no_auth, "sess-stats-pend", headers)
+
+        # Insert an escalated record directly
+        db = _get_db()
+        store = AuditStore(db)
+        store.insert(
+            call_id="stats-esc-1",
+            user_id="user-stats-pend",
+            session_id="sess-stats-pend",
+            agent_id=None,
+            tool="bash",
+            args_redacted={"command": "dangerous"},
+            classification="write",
+            evaluation_path="llm",
+            decision="escalate",
+            risk="high",
+            reasoning="Needs review",
+            latency_ms=50,
+        )
+
+        resp = client_no_auth.get("/api/v1/stats", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["pending_approvals"] >= 1
+
+    def test_stats_users_list(self, client_no_auth):
+        """Stats returns list of known users when user is unbound."""
+        headers_a = {"X-User-Id": "user-stats-a"}
+        headers_b = {"X-User-Id": "user-stats-b"}
+        _create_session(client_no_auth, "sess-ua", headers_a)
+        _create_session(client_no_auth, "sess-ub", headers_b)
+
+        resp = client_no_auth.get("/api/v1/stats", headers=headers_a)
+        assert resp.status_code == 200
+        users = resp.json()["users"]
+        assert "user-stats-a" in users
+        assert "user-stats-b" in users
+
+    def test_stats_users_list_bound(self, tmp_db):
+        """Bound user only sees their own user_id in users list."""
+        env = {
+            "LLM_API_KEY": "test-key",
+            "DB_PATH": tmp_db,
+            "INTARIS_API_KEYS": '{"bound-key": "bound-user"}',
+        }
+        with patch.dict(os.environ, env, clear=False):
+            for key in ("INTARIS_API_KEY", "WEBHOOK_URL", "WEBHOOK_SECRET"):
+                os.environ.pop(key, None)
+
+            import intaris.server as srv
+
+            srv._config = None
+            srv._db = None
+            srv._evaluator = None
+
+            from intaris.server import create_app
+
+            app = create_app()
+            with TestClient(app) as client:
+                # Create sessions under two different users
+                _create_session(
+                    client,
+                    "sess-bound",
+                    {"Authorization": "Bearer bound-key"},
+                )
+                resp = client.get(
+                    "/api/v1/stats",
+                    headers={"Authorization": "Bearer bound-key"},
+                )
+                assert resp.status_code == 200
+                users = resp.json()["users"]
+                # Bound user should only see their own ID
+                assert users == ["bound-user"]
+
+
+class TestConfig:
+    """Tests for GET /config."""
+
+    def test_config_basic(self, client_no_auth):
+        resp = client_no_auth.get(
+            "/api/v1/config",
+            headers={"X-User-Id": "user-cfg"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "version" in data
+        assert "llm" in data
+        assert "model" in data["llm"]
+        assert "base_url" in data["llm"]
+        assert "temperature" in data["llm"]
+        assert "reasoning_effort" in data["llm"]
+        assert "timeout_ms" in data["llm"]
+        assert "rate_limit" in data
+        assert "webhook_configured" in data
+        assert "auth_configured" in data
+
+    def test_config_masks_base_url(self, client_no_auth):
+        """LLM base URL is masked, never shows internal URLs."""
+        resp = client_no_auth.get(
+            "/api/v1/config",
+            headers={"X-User-Id": "user-cfg"},
+        )
+        assert resp.status_code == 200
+        base_url = resp.json()["llm"]["base_url"]
+        # Must be either "openai" or "custom", never a real URL
+        assert base_url in ("openai", "custom")
+
+    def test_config_no_auth_mode(self, client_no_auth):
+        """Config shows auth_configured=False when no auth set."""
+        resp = client_no_auth.get(
+            "/api/v1/config",
+            headers={"X-User-Id": "user-cfg"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["auth_configured"] is False
+
+    def test_config_auth_mode(self, client_with_auth):
+        """Config shows auth_configured=True when auth is set."""
+        resp = client_with_auth.get(
+            "/api/v1/config",
+            headers={**_auth_headers(), "X-User-Id": "user-cfg"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["auth_configured"] is True
+
+    def test_config_no_webhook(self, client_no_auth):
+        """Config shows webhook_configured=False when no webhook."""
+        resp = client_no_auth.get(
+            "/api/v1/config",
+            headers={"X-User-Id": "user-cfg"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["webhook_configured"] is False
+
+
+# ── Audit Resolved Filter ────────────────────────────────────────────
+
+
+class TestAuditResolvedFilter:
+    """Tests for the resolved filter on GET /audit."""
+
+    def _setup_escalated(self, client, user_id="user-res"):
+        """Create a session with an escalated audit record."""
+        from intaris.audit import AuditStore
+        from intaris.server import _get_db
+
+        headers = {"X-User-Id": user_id}
+        _create_session(client, f"sess-{user_id}", headers)
+
+        db = _get_db()
+        store = AuditStore(db)
+        store.insert(
+            call_id=f"res-call-{user_id}",
+            user_id=user_id,
+            session_id=f"sess-{user_id}",
+            agent_id=None,
+            tool="bash",
+            args_redacted={"command": "test"},
+            classification="write",
+            evaluation_path="llm",
+            decision="escalate",
+            risk="high",
+            reasoning="Needs review",
+            latency_ms=50,
+        )
+        return headers, store
+
+    def test_resolved_false_returns_unresolved(self, client_no_auth):
+        """resolved=false returns only unresolved records."""
+        headers, _ = self._setup_escalated(client_no_auth, "user-res-f")
+        resp = client_no_auth.get(
+            "/api/v1/audit",
+            params={"resolved": "false"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        # The escalated record should appear (it's unresolved)
+        assert data["total"] >= 1
+        for item in data["items"]:
+            assert item.get("user_decision") is None
+
+    def test_resolved_true_returns_resolved(self, client_no_auth):
+        """resolved=true returns only resolved records."""
+        headers, store = self._setup_escalated(client_no_auth, "user-res-t")
+        # Resolve the escalation
+        store.resolve_escalation(
+            "res-call-user-res-t",
+            "deny",
+            user_note="Denied",
+            user_id="user-res-t",
+        )
+        resp = client_no_auth.get(
+            "/api/v1/audit",
+            params={"resolved": "true"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        for item in data["items"]:
+            assert item.get("user_decision") is not None
+
+    def test_resolved_none_returns_all(self, client_no_auth):
+        """No resolved filter returns all records."""
+        headers, store = self._setup_escalated(client_no_auth, "user-res-all")
+        # Also create a normal evaluation
+        client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-user-res-all",
+                "tool": "read",
+                "args": {},
+            },
+            headers=headers,
+        )
+        resp = client_no_auth.get("/api/v1/audit", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        # Should have at least 2 records (escalated + approved)
+        assert data["total"] >= 2
