@@ -28,6 +28,27 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return os.environ.get(key, str(default)).lower() in ("true", "1", "yes")
 
 
+def _parse_api_keys() -> dict[str, str]:
+    """Parse INTARIS_API_KEYS env var into a dict mapping key → user_id.
+
+    Format: JSON object {"api-key-1": "username", "api-key-2": "*"}
+    A value of "*" means the key authenticates but does not bind to a user_id.
+    """
+    import json
+
+    raw = os.environ.get("INTARIS_API_KEYS", "")
+    if not raw:
+        return {}
+    try:
+        keys = json.loads(raw)
+        if not isinstance(keys, dict):
+            raise ValueError("INTARIS_API_KEYS must be a JSON object")
+        return {str(k): str(v) for k, v in keys.items()}
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error("Failed to parse INTARIS_API_KEYS: %s", e)
+        return {}
+
+
 def _data_dir() -> str:
     """Resolve base data directory.
 
@@ -97,7 +118,13 @@ class ServerConfig:
 
     host: str = field(default_factory=lambda: _env("INTARIS_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: _env_int("INTARIS_PORT", 8060))
+
+    # Single shared API key (authenticates but does not bind to user_id).
     api_key: str = field(default_factory=lambda: _env("INTARIS_API_KEY"))
+
+    # Multi-key with user_id mapping: {"key": "username", "key2": "*"}
+    # A value of "*" means auth-only (no user binding).
+    api_keys: dict[str, str] = field(default_factory=_parse_api_keys)
 
     # Max evaluations per session per minute (0 = no limit).
     rate_limit: int = field(default_factory=lambda: _env_int("RATE_LIMIT", 60))
@@ -136,6 +163,15 @@ class Config:
             )
         if self.server.rate_limit < 0:
             raise ValueError(f"RATE_LIMIT={self.server.rate_limit} must be >= 0.")
+
+        # Fail loudly if INTARIS_API_KEYS env var is set but parsed as empty
+        # (indicates malformed JSON that was silently ignored at parse time).
+        raw_keys = os.environ.get("INTARIS_API_KEYS", "")
+        if raw_keys and not self.server.api_keys:
+            raise ValueError(
+                "INTARIS_API_KEYS is set but could not be parsed. "
+                'Must be a JSON object: {"key": "username", ...}'
+            )
 
 
 def load_config() -> Config:

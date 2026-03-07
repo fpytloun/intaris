@@ -28,6 +28,7 @@ intaris/
 ├── decision.py            # Decision matrix (priority-ordered)
 ├── api/
 │   ├── __init__.py        # FastAPI sub-app factory
+│   ├── deps.py            # SessionContext dependency (identity from ContextVars)
 │   ├── schemas.py         # Pydantic request/response models
 │   ├── evaluate.py        # POST /api/v1/evaluate
 │   ├── intention.py       # POST /api/v1/intention, GET /api/v1/session/{id}
@@ -40,7 +41,8 @@ intaris/
 
 | Layer | File | Responsibility |
 |---|---|---|
-| **Transport** | `server.py` | HTTP routing, auth middleware, health endpoint |
+| **Transport** | `server.py` | HTTP routing, auth middleware (ContextVars), health endpoint |
+| **Identity** | `api/deps.py` | SessionContext dependency (user_id, agent_id from ContextVars) |
 | **REST API** | `api/` | FastAPI endpoints with OpenAPI spec |
 | **Orchestration** | `evaluator.py` | Full evaluation pipeline (classify → LLM → decide → audit) |
 | **Classification** | `classifier.py` | Read-only allowlist, critical patterns, session policy |
@@ -68,6 +70,37 @@ intaris/
 6. **Session policy extensibility**: Sessions can define custom allow/deny rules using glob patterns (fnmatch, NOT regex) to avoid ReDoS.
 
 7. **Follows mnemory conventions**: Same build system (hatchling), config pattern (dataclasses + env vars), LLM client (OpenAI wrapper with structured output), error handling, and code style.
+
+8. **Multi-tenancy**: `user_id` is the tenant separator — scopes all sessions and audit records. `agent_id` is metadata only (not a visibility boundary). See [Multi-tenancy](#multi-tenancy) below.
+
+## Multi-tenancy
+
+Intaris uses `user_id` as the tenant separator. Every session and audit record is scoped to a `user_id`, and all database queries include a `WHERE user_id = ?` clause.
+
+### Identity resolution
+
+Identity is resolved by the `APIKeyMiddleware` in `server.py` and propagated via ContextVars:
+
+1. **API key mapping** (`INTARIS_API_KEYS`): JSON dict `{"api-key": "username", "key2": "*"}`. A value of `"*"` means the key authenticates but does not bind to a specific user.
+2. **Single shared key** (`INTARIS_API_KEY`): Authenticates but does not bind to a user.
+3. **Header fallback**: When the API key does not bind a user, `X-User-Id` header is accepted.
+4. **Agent ID**: Always from `X-Agent-Id` header (optional metadata, not a visibility boundary).
+
+### ContextVars → SessionContext
+
+The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, `_session_user_bound`), always reset in a `finally` block. API endpoints use `Depends(get_session_context)` from `api/deps.py` to get a `SessionContext` dataclass with `user_id`, `agent_id`, and `user_bound` fields.
+
+### Key differences from mnemory
+
+- `agent_id` is **metadata only** — the human operator sees all their sessions/audit across all agents. No dual-scope pattern.
+- Simpler identity model: no agent-scoped visibility boundaries.
+
+### Environment variables
+
+| Variable | Description |
+|---|---|
+| `INTARIS_API_KEY` | Single shared API key (auth only, no user binding) |
+| `INTARIS_API_KEYS` | JSON dict mapping API keys to user_ids (`{"key": "user", "key2": "*"}`) |
 
 ## Build / Run / Test
 
@@ -127,7 +160,21 @@ ruff format intaris/ tests/
 - SQLite with WAL mode for concurrent read/write
 - Thread-local connections via `threading.local()`
 - Foreign keys enabled
-- Indexes on `audit_log(session_id, timestamp)` and `audit_log(decision)`
+- Sessions use compound PK `(user_id, session_id)` for tenant isolation
+- Audit log uses compound FK `(user_id, session_id)` referencing sessions
+- Indexes on `audit_log(user_id, session_id, timestamp)`, `audit_log(decision)`, `audit_log(record_type)`
+
+### Audit record types
+
+The `audit_log` table supports multiple record types via the `record_type` column:
+
+| Type | Description | Key fields |
+|---|---|---|
+| `tool_call` | Standard tool call evaluation (default) | `tool`, `args_redacted`, `classification` |
+| `reasoning` | Agent reasoning checkpoint (future) | `content` |
+| `checkpoint` | Periodic agent state checkpoint (future) | `content` |
+
+For `tool_call` records, `tool`, `args_redacted`, and `classification` are populated. For `reasoning` and `checkpoint` records, `content` holds the evaluated text and tool-specific fields are null. All record types share `decision`, `risk`, `reasoning`, `evaluation_path`, and `latency_ms`.
 
 ## Important Notes
 

@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from intaris.config import Config, DBConfig, LLMConfig, ServerConfig
+from intaris.config import Config, DBConfig, LLMConfig, ServerConfig, _parse_api_keys
 
 
 class TestConfigDefaults:
@@ -64,6 +64,13 @@ class TestConfigValidation:
             with pytest.raises(ValueError, match="must be >= 0"):
                 config.validate()
 
+    def test_malformed_api_keys_fails_validation(self, monkeypatch):
+        monkeypatch.setenv("INTARIS_API_KEYS", "not-json")
+        config = Config(llm=LLMConfig())
+        if config.llm.api_key:
+            with pytest.raises(ValueError, match="could not be parsed"):
+                config.validate()
+
 
 class TestConfigEnvVars:
     """Test configuration from environment variables."""
@@ -103,3 +110,42 @@ class TestConfigEnvVars:
         monkeypatch.setenv("LLM_TIMEOUT_MS", "3000")
         config = LLMConfig()
         assert config.timeout_ms == 3000
+
+
+class TestParseApiKeys:
+    """Test _parse_api_keys() helper."""
+
+    def test_empty_env(self, monkeypatch):
+        monkeypatch.delenv("INTARIS_API_KEYS", raising=False)
+        assert _parse_api_keys() == {}
+
+    def test_valid_json(self, monkeypatch):
+        monkeypatch.setenv(
+            "INTARIS_API_KEYS",
+            '{"sk-key1": "alice", "sk-key2": "*"}',
+        )
+        result = _parse_api_keys()
+        assert result == {"sk-key1": "alice", "sk-key2": "*"}
+
+    def test_invalid_json(self, monkeypatch):
+        monkeypatch.setenv("INTARIS_API_KEYS", "not-json")
+        result = _parse_api_keys()
+        assert result == {}
+
+    def test_non_object_json(self, monkeypatch):
+        monkeypatch.setenv("INTARIS_API_KEYS", '["a", "b"]')
+        result = _parse_api_keys()
+        assert result == {}
+
+    def test_values_coerced_to_str(self, monkeypatch):
+        monkeypatch.setenv("INTARIS_API_KEYS", '{"key": 123}')
+        result = _parse_api_keys()
+        assert result == {"key": "123"}
+
+    def test_server_config_loads_api_keys(self, monkeypatch):
+        monkeypatch.setenv(
+            "INTARIS_API_KEYS",
+            '{"sk-test": "testuser"}',
+        )
+        config = ServerConfig()
+        assert config.api_keys == {"sk-test": "testuser"}

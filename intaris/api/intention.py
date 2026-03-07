@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from intaris.api.deps import SessionContext, get_session_context
 from intaris.api.schemas import (
     IntentionRequest,
     IntentionResponse,
@@ -18,7 +19,10 @@ router = APIRouter()
 
 
 @router.post("/intention", response_model=IntentionResponse)
-async def declare_intention(request: IntentionRequest) -> IntentionResponse:
+async def declare_intention(
+    request: IntentionRequest,
+    ctx: SessionContext = Depends(get_session_context),
+) -> IntentionResponse:
     """Declare a session intention.
 
     Creates a new session with the declared intention, optional details,
@@ -30,6 +34,7 @@ async def declare_intention(request: IntentionRequest) -> IntentionResponse:
     try:
         store = SessionStore(_get_db())
         store.create(
+            user_id=ctx.user_id,
             session_id=request.session_id,
             intention=request.intention,
             details=request.details,
@@ -47,14 +52,17 @@ async def declare_intention(request: IntentionRequest) -> IntentionResponse:
 
 
 @router.get("/session/{session_id}", response_model=SessionResponse)
-async def get_session(session_id: str) -> SessionResponse:
+async def get_session(
+    session_id: str,
+    ctx: SessionContext = Depends(get_session_context),
+) -> SessionResponse:
     """Get session details including counters and status."""
     from intaris.server import _get_db
     from intaris.session import SessionStore
 
     try:
         store = SessionStore(_get_db())
-        session = store.get(session_id)
+        session = store.get(session_id, user_id=ctx.user_id)
         return SessionResponse(**session)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e

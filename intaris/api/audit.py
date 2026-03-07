@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from intaris.api.deps import SessionContext, get_session_context
 from intaris.api.schemas import (
     AuditListResponse,
     AuditRecord,
@@ -20,8 +21,10 @@ router = APIRouter()
 
 @router.get("/audit", response_model=AuditListResponse)
 async def list_audit(
+    ctx: SessionContext = Depends(get_session_context),
     session_id: str | None = Query(None),
     agent_id: str | None = Query(None),
+    record_type: str | None = Query(None),
     tool: str | None = Query(None),
     decision: str | None = Query(None),
     risk: str | None = Query(None),
@@ -38,8 +41,10 @@ async def list_audit(
     try:
         store = AuditStore(_get_db())
         result = store.query(
+            user_id=ctx.user_id,
             session_id=session_id,
             agent_id=agent_id,
+            record_type=record_type,
             tool=tool,
             decision=decision,
             risk=risk,
@@ -59,14 +64,17 @@ async def list_audit(
 
 
 @router.get("/audit/{call_id}", response_model=AuditRecord)
-async def get_audit_record(call_id: str) -> AuditRecord:
+async def get_audit_record(
+    call_id: str,
+    ctx: SessionContext = Depends(get_session_context),
+) -> AuditRecord:
     """Get a single audit record by call_id."""
     from intaris.audit import AuditStore
     from intaris.server import _get_db
 
     try:
         store = AuditStore(_get_db())
-        record = store.get_by_call_id(call_id)
+        record = store.get_by_call_id(call_id, user_id=ctx.user_id)
         return AuditRecord(**record)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
@@ -79,7 +87,10 @@ async def get_audit_record(call_id: str) -> AuditRecord:
 
 
 @router.post("/decision", response_model=DecisionResponse)
-async def resolve_decision(request: DecisionRequest) -> DecisionResponse:
+async def resolve_decision(
+    request: DecisionRequest,
+    ctx: SessionContext = Depends(get_session_context),
+) -> DecisionResponse:
     """Resolve an escalated tool call.
 
     Called by Cognis or the Intaris UI when a user approves or denies
@@ -94,6 +105,7 @@ async def resolve_decision(request: DecisionRequest) -> DecisionResponse:
             call_id=request.call_id,
             user_decision=request.decision,
             user_note=request.note,
+            user_id=ctx.user_id,
         )
         return DecisionResponse(ok=True)
     except ValueError as e:

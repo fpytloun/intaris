@@ -60,6 +60,7 @@ class SessionResponse(BaseModel):
     """Session details response."""
 
     session_id: str
+    user_id: str
     intention: str
     details: dict[str, Any] | None = None
     policy: dict[str, Any] | None = None
@@ -93,16 +94,25 @@ class DecisionResponse(BaseModel):
 
 
 class AuditRecord(BaseModel):
-    """Single audit log record."""
+    """Single audit log record.
+
+    Supports multiple record types:
+    - tool_call: Standard tool call evaluation (tool, args_redacted, classification set).
+    - reasoning: Agent reasoning checkpoint (content set, tool/args null).
+    - checkpoint: Periodic agent state checkpoint (content set, tool/args null).
+    """
 
     id: str
     call_id: str
+    record_type: str = "tool_call"
+    user_id: str
     session_id: str
     agent_id: str | None = None
     timestamp: str
-    tool: str
-    args_redacted: dict[str, Any]
-    classification: str
+    tool: str | None = None
+    args_redacted: dict[str, Any] | None = None
+    content: str | None = None
+    classification: str | None = None
     evaluation_path: str
     decision: str
     risk: str | None = None

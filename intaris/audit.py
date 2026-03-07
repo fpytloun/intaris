@@ -2,7 +2,8 @@
 
 Records every tool call evaluation with decision, reasoning, redacted
 args, and timing information. Supports filtered queries for the audit
-log browser and session detail views.
+log browser and session detail views. All operations are scoped by
+user_id for multi-tenant isolation.
 """
 
 from __future__ import annotations
@@ -19,7 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 class AuditStore:
-    """Audit log CRUD backed by SQLite."""
+    """Audit log CRUD backed by SQLite.
+
+    All operations require user_id for tenant isolation.
+    """
+
+    VALID_RECORD_TYPES = {"tool_call", "reasoning", "checkpoint"}
 
     def __init__(self, db: Database):
         self._db = db
@@ -28,35 +34,47 @@ class AuditStore:
         self,
         *,
         call_id: str,
+        user_id: str,
         session_id: str,
         agent_id: str | None,
-        tool: str,
-        args_redacted: dict[str, Any],
-        classification: str,
+        tool: str | None,
+        args_redacted: dict[str, Any] | None,
+        classification: str | None,
         evaluation_path: str,
         decision: str,
         risk: str | None,
         reasoning: str | None,
         latency_ms: int,
+        record_type: str = "tool_call",
+        content: str | None = None,
     ) -> dict[str, Any]:
         """Insert an audit record.
 
         Args:
             call_id: External correlation ID for the tool call.
+            user_id: Tenant identifier.
             session_id: Session this call belongs to.
             agent_id: Agent that made the call (optional).
-            tool: Tool name (e.g., "bash", "edit", "mcp:add_memory").
-            args_redacted: Tool arguments with secrets redacted.
-            classification: "read" or "write".
-            evaluation_path: "fast", "critical", or "llm".
+            tool: Tool name (e.g., "bash", "edit"). Null for reasoning checkpoints.
+            args_redacted: Tool arguments with secrets redacted. Null for reasoning.
+            classification: "read" or "write". Null for reasoning checkpoints.
+            evaluation_path: "fast", "critical", "llm", or "reasoning".
             decision: "approve", "deny", or "escalate".
             risk: Risk level from LLM evaluation (null for fast path).
             reasoning: LLM reasoning or pattern match explanation.
             latency_ms: Time taken for the evaluation in milliseconds.
+            record_type: Record type: "tool_call", "reasoning", or "checkpoint".
+            content: Reasoning or checkpoint text (null for tool_call records).
 
         Returns:
             The created audit record as a dict.
         """
+        if record_type not in self.VALID_RECORD_TYPES:
+            raise ValueError(
+                f"Invalid record_type '{record_type}'. "
+                f"Must be one of: {self.VALID_RECORD_TYPES}"
+            )
+
         record_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
 
@@ -64,19 +82,22 @@ class AuditStore:
             cur.execute(
                 """
                 INSERT INTO audit_log
-                    (id, call_id, session_id, agent_id, timestamp,
-                     tool, args_redacted, classification, evaluation_path,
-                     decision, risk, reasoning, latency_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, call_id, record_type, user_id, session_id, agent_id,
+                     timestamp, tool, args_redacted, content, classification,
+                     evaluation_path, decision, risk, reasoning, latency_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record_id,
                     call_id,
+                    record_type,
+                    user_id,
                     session_id,
                     agent_id,
                     now,
                     tool,
-                    json.dumps(args_redacted),
+                    json.dumps(args_redacted) if args_redacted is not None else None,
+                    content,
                     classification,
                     evaluation_path,
                     decision,
@@ -86,18 +107,18 @@ class AuditStore:
                 ),
             )
 
-        return self.get_by_call_id(call_id)
+        return self.get_by_call_id(call_id, user_id=user_id)
 
-    def get_by_call_id(self, call_id: str) -> dict[str, Any]:
-        """Get an audit record by call_id.
+    def get_by_call_id(self, call_id: str, *, user_id: str) -> dict[str, Any]:
+        """Get an audit record by call_id, scoped to user.
 
         Raises:
             ValueError: If record not found.
         """
         with self._db.cursor() as cur:
             cur.execute(
-                "SELECT * FROM audit_log WHERE call_id = ?",
-                (call_id,),
+                "SELECT * FROM audit_log WHERE call_id = ? AND user_id = ?",
+                (call_id, user_id),
             )
             row = cur.fetchone()
 
@@ -106,16 +127,16 @@ class AuditStore:
 
         return _row_to_dict(row)
 
-    def get_by_id(self, record_id: str) -> dict[str, Any]:
-        """Get an audit record by internal ID.
+    def get_by_id(self, record_id: str, *, user_id: str) -> dict[str, Any]:
+        """Get an audit record by internal ID, scoped to user.
 
         Raises:
             ValueError: If record not found.
         """
         with self._db.cursor() as cur:
             cur.execute(
-                "SELECT * FROM audit_log WHERE id = ?",
-                (record_id,),
+                "SELECT * FROM audit_log WHERE id = ? AND user_id = ?",
+                (record_id, user_id),
             )
             row = cur.fetchone()
 
@@ -127,8 +148,10 @@ class AuditStore:
     def query(
         self,
         *,
+        user_id: str,
         session_id: str | None = None,
         agent_id: str | None = None,
+        record_type: str | None = None,
         tool: str | None = None,
         decision: str | None = None,
         risk: str | None = None,
@@ -140,11 +163,15 @@ class AuditStore:
     ) -> dict[str, Any]:
         """Query audit records with filters and pagination.
 
+        Args:
+            user_id: Tenant identifier (always required).
+            record_type: Filter by record type (tool_call, reasoning, checkpoint).
+
         Returns:
             Dict with 'items', 'total', 'page', 'pages'.
         """
-        conditions: list[str] = []
-        params: list[Any] = []
+        conditions: list[str] = ["user_id = ?"]
+        params: list[Any] = [user_id]
 
         if session_id:
             conditions.append("session_id = ?")
@@ -152,6 +179,9 @@ class AuditStore:
         if agent_id:
             conditions.append("agent_id = ?")
             params.append(agent_id)
+        if record_type:
+            conditions.append("record_type = ?")
+            params.append(record_type)
         if tool:
             conditions.append("tool = ?")
             params.append(tool)
@@ -204,11 +234,18 @@ class AuditStore:
     def get_recent(
         self,
         session_id: str,
+        *,
+        user_id: str,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Get recent audit records for a session.
 
         Used to assemble context for LLM safety evaluation.
+
+        Args:
+            session_id: Session to query.
+            user_id: Tenant identifier.
+            limit: Max records to return.
 
         Returns:
             List of audit record dicts, most recent first.
@@ -217,11 +254,11 @@ class AuditStore:
             cur.execute(
                 """
                 SELECT * FROM audit_log
-                WHERE session_id = ?
+                WHERE session_id = ? AND user_id = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
                 """,
-                (session_id, limit),
+                (session_id, user_id, limit),
             )
             rows = cur.fetchall()
 
@@ -232,6 +269,8 @@ class AuditStore:
         call_id: str,
         user_decision: str,
         user_note: str | None = None,
+        *,
+        user_id: str,
     ) -> dict[str, Any]:
         """Record a user's decision on an escalated tool call.
 
@@ -239,6 +278,7 @@ class AuditStore:
             call_id: The escalated call to resolve.
             user_decision: "approve" or "deny".
             user_note: Optional note from the user.
+            user_id: Tenant identifier.
 
         Returns:
             Updated audit record.
@@ -260,15 +300,15 @@ class AuditStore:
                 """
                 UPDATE audit_log
                 SET user_decision = ?, user_note = ?, resolved_at = ?
-                WHERE call_id = ?
+                WHERE call_id = ? AND user_id = ?
                   AND decision = 'escalate'
                   AND user_decision IS NULL
                 """,
-                (user_decision, user_note, now, call_id),
+                (user_decision, user_note, now, call_id, user_id),
             )
             if cur.rowcount == 0:
                 # Determine why the update failed for a clear error message
-                record = self.get_by_call_id(call_id)
+                record = self.get_by_call_id(call_id, user_id=user_id)
                 if record["decision"] != "escalate":
                     raise ValueError(
                         f"Call {call_id} is not escalated "
@@ -282,7 +322,7 @@ class AuditStore:
                 # Shouldn't reach here, but raise generic error
                 raise ValueError(f"Failed to resolve escalation for {call_id}")
 
-        return self.get_by_call_id(call_id)
+        return self.get_by_call_id(call_id, user_id=user_id)
 
 
 def _row_to_dict(row: Any) -> dict[str, Any]:

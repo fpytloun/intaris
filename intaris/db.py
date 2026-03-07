@@ -93,7 +93,8 @@ class Database:
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
     intention TEXT NOT NULL,
     details TEXT,
     policy TEXT,
@@ -103,18 +104,22 @@ CREATE TABLE IF NOT EXISTS sessions (
     escalated_count INTEGER DEFAULT 0,
     status TEXT DEFAULT 'active',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, session_id)
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
     id TEXT PRIMARY KEY,
     call_id TEXT UNIQUE NOT NULL,
+    record_type TEXT NOT NULL DEFAULT 'tool_call',
+    user_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     agent_id TEXT,
     timestamp TEXT NOT NULL,
-    tool TEXT NOT NULL,
-    args_redacted TEXT NOT NULL,
-    classification TEXT NOT NULL,
+    tool TEXT,
+    args_redacted TEXT,
+    content TEXT,
+    classification TEXT,
     evaluation_path TEXT NOT NULL,
     decision TEXT NOT NULL,
     risk TEXT,
@@ -123,12 +128,18 @@ CREATE TABLE IF NOT EXISTS audit_log (
     user_decision TEXT,
     user_note TEXT,
     resolved_at TEXT,
-    FOREIGN KEY (session_id) REFERENCES sessions(session_id)
+    FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_audit_user_id
+    ON audit_log(user_id);
+
 CREATE INDEX IF NOT EXISTS idx_audit_session
-    ON audit_log(session_id, timestamp);
+    ON audit_log(user_id, session_id, timestamp);
 
 CREATE INDEX IF NOT EXISTS idx_audit_decision
     ON audit_log(decision);
+
+CREATE INDEX IF NOT EXISTS idx_audit_record_type
+    ON audit_log(record_type);
 """

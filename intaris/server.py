@@ -1,12 +1,14 @@
 """HTTP server for intaris.
 
 FastAPI application with health endpoint, API key authentication
-middleware, and REST API sub-app for safety evaluation endpoints.
+middleware with multi-tenant user_id resolution, and REST API sub-app
+for safety evaluation endpoints.
 """
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hmac
 import logging
 import os
@@ -29,6 +31,22 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 logger = logging.getLogger("intaris")
+
+# ── Session Identity Context ──────────────────────────────────────────
+# Set by APIKeyMiddleware per-request, read by api/deps.py.
+
+_session_user_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "session_user_id", default=None
+)
+_session_agent_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "session_agent_id", default=None
+)
+_session_user_bound: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "session_user_bound", default=False
+)
+# user_bound is True when the API key maps to a specific user_id.
+# When True, the UI should prevent user impersonation (X-User-Id override).
+# Enforcement is deferred to the UI layer — the middleware always sets it.
 
 # ── Lazy Initialization ──────────────────────────────────────────────
 
@@ -89,9 +107,15 @@ async def health_check(request: Request) -> JSONResponse:
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
-    """Authenticate requests using API key in Authorization header.
+    """Authenticate requests and resolve user identity.
 
-    If INTARIS_API_KEY is not set, authentication is disabled (dev mode).
+    Identity resolution priority:
+    1. API key mapping (INTARIS_API_KEYS): key → user_id binding
+    2. Single API key (INTARIS_API_KEY): auth only, no user binding
+    3. X-User-Id header: fallback when key doesn't bind a user
+    4. No auth mode: if no keys configured, read identity from headers
+
+    Agent identity is always read from X-Agent-Id header.
     """
 
     async def dispatch(self, request: Request, call_next) -> Response:
@@ -101,24 +125,83 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/health":
             return await call_next(request)
 
-        # If no API key configured, skip auth (dev mode)
-        if not cfg.server.api_key:
+        try:
+            has_auth = bool(cfg.server.api_keys or cfg.server.api_key)
+
+            if has_auth:
+                # Extract token from Authorization header
+                token = _extract_token(request)
+                if not token:
+                    return JSONResponse(
+                        {"error": "Missing API key"},
+                        status_code=401,
+                    )
+
+                # Try multi-key mapping first
+                mapped_user_id = _match_api_key(token, cfg.server.api_keys)
+                if mapped_user_id is not None:
+                    # Key found in api_keys
+                    if mapped_user_id != "*":
+                        _session_user_id.set(mapped_user_id)
+                        _session_user_bound.set(True)
+                    else:
+                        # Wildcard key — auth OK but no user binding
+                        _set_user_from_header(request)
+                elif cfg.server.api_key and hmac.compare_digest(
+                    token, cfg.server.api_key
+                ):
+                    # Matched single api_key — auth OK, no user binding
+                    _set_user_from_header(request)
+                else:
+                    return JSONResponse(
+                        {"error": "Invalid API key"},
+                        status_code=401,
+                    )
+            else:
+                # No auth configured (dev mode) — read identity from headers
+                _set_user_from_header(request)
+
+            # Always read agent_id from header
+            agent_id = request.headers.get("x-agent-id", "").strip() or None
+            _session_agent_id.set(agent_id)
+
             return await call_next(request)
+        finally:
+            # Always reset ContextVars to prevent identity leakage
+            _session_user_id.set(None)
+            _session_agent_id.set(None)
+            _session_user_bound.set(False)
 
-        # Check Authorization header
-        auth = request.headers.get("authorization", "")
-        if auth.startswith("Bearer "):
-            token = auth[7:]
-        else:
-            token = auth
 
-        if not token or not hmac.compare_digest(token, cfg.server.api_key):
-            return JSONResponse(
-                {"error": "Invalid or missing API key"},
-                status_code=401,
-            )
+def _extract_token(request: Request) -> str:
+    """Extract API token from request headers."""
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    # Fallback to X-API-Key header
+    return request.headers.get("x-api-key", "").strip() or auth.strip()
 
-        return await call_next(request)
+
+def _match_api_key(token: str, api_keys: dict[str, str]) -> str | None:
+    """Match a token against the api_keys mapping.
+
+    Iterates ALL keys to prevent timing side-channels that could reveal
+    key count or ordering. Uses constant-time comparison for each key.
+
+    Returns:
+        The mapped user_id (or "*" for wildcard), or None if no match.
+    """
+    matched_user: str | None = None
+    for key, user_id in api_keys.items():
+        if hmac.compare_digest(token, key):
+            matched_user = user_id
+    return matched_user
+
+
+def _set_user_from_header(request: Request) -> None:
+    """Set user_id from request headers (fallback when key doesn't bind)."""
+    user_id = request.headers.get("x-user-id", "").strip() or None
+    _session_user_id.set(user_id)
 
 
 # ── Application Factory ──────────────────────────────────────────────

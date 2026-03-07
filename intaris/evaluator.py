@@ -55,6 +55,7 @@ class Evaluator:
     def evaluate(
         self,
         *,
+        user_id: str,
         session_id: str,
         agent_id: str | None,
         tool: str,
@@ -73,6 +74,7 @@ class Evaluator:
         7. Update session counters
 
         Args:
+            user_id: Tenant identifier.
             session_id: Session this call belongs to.
             agent_id: Agent making the call (optional).
             tool: Tool name (e.g., "bash", "edit", "mcp:add_memory").
@@ -88,8 +90,8 @@ class Evaluator:
         start_time = time.monotonic()
         call_id = str(uuid.uuid4())
 
-        # Get session for intention and policy
-        session = self._sessions.get(session_id)
+        # Get session for intention and policy (verifies ownership)
+        session = self._sessions.get(session_id, user_id=user_id)
 
         # Redact secrets from args
         args_redacted = redact(args)
@@ -127,6 +129,7 @@ class Evaluator:
         # Step 6: Audit
         self._audit.insert(
             call_id=call_id,
+            user_id=user_id,
             session_id=session_id,
             agent_id=agent_id,
             tool=tool,
@@ -141,7 +144,9 @@ class Evaluator:
 
         # Step 7: Update session counters
         try:
-            self._sessions.increment_counter(session_id, decision.decision)
+            self._sessions.increment_counter(
+                session_id, decision.decision, user_id=user_id
+            )
         except ValueError:
             logger.warning("Failed to update session counter for %s", session_id)
 
@@ -177,7 +182,8 @@ class Evaluator:
         """
         # Assemble context
         session_id = session["session_id"]
-        recent_history = self._audit.get_recent(session_id, limit=10)
+        user_id = session["user_id"]
+        recent_history = self._audit.get_recent(session_id, user_id=user_id, limit=10)
 
         user_prompt = build_evaluation_user_prompt(
             intention=session["intention"],
