@@ -71,7 +71,7 @@ intaris/
         │   ├── dashboard.js # Dashboard tab component
         │   ├── sessions.js  # Sessions tab component
         │   ├── audit.js     # Audit tab component
-        │   ├── approvals.js # Approvals tab component (10s polling)
+        │   ├── approvals.js # Approvals tab component (WebSocket + polling fallback)
         │   ├── servers.js   # Servers tab component (MCP server management)
         │   └── settings.js  # Settings tab component
         └── vendor/
@@ -261,7 +261,7 @@ Uses **first-message auth** (no secrets in URLs):
 2. Client sends: `{"type": "auth", "token": "Bearer ...", "user_id": "...", "session_id": "..."}`
 3. Server validates token and subscribes to EventBus
 4. Server streams events as JSON messages
-5. Server sends ping every 30s; client must respond with pong within 10s
+5. Server sends `{"type": "ping"}` every 30s as keepalive (client may ignore; pong is not enforced)
 6. Per-user connection limit: 10 concurrent WebSocket connections
 7. Auth failure closes with code 4001
 
@@ -317,7 +317,7 @@ Single-page web UI served at `/ui` for monitoring and managing Intaris. Built wi
 - **No build step at runtime**: Alpine.js is vendored (`static/vendor/alpine.min.js`), Tailwind CSS is pre-built and committed (`static/css/app.css`).
 - **Tab-based navigation**: 6 tabs — Dashboard, Sessions, Audit, Approvals, Servers, Settings.
 - **Auth**: API key stored in `localStorage`, sent via `X-API-Key` header. User impersonation via `X-User-Id` header when `can_switch_user` is true.
-- **Polling**: Approvals tab polls every 10s for pending escalations (WebSocket deferred to Phase 2).
+- **Real-time updates**: Approvals tab uses WebSocket (`/api/v1/stream`) for real-time updates with 10s polling fallback.
 
 ### Tabs
 

@@ -124,6 +124,7 @@ document.addEventListener('alpine:init', () => {
       this.users = [];
       this.selectedUser = '';
       this.error = '';
+      window.dispatchEvent(new CustomEvent('intaris:logout'));
     },
   });
 

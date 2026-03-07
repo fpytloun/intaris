@@ -202,4 +202,46 @@ const IntarisAPI = {
       `/mcp/servers/${encodeURIComponent(serverName)}/preferences/${encodeURIComponent(toolName)}`
     );
   },
+
+  // ── WebSocket ───────────────────────────────────────────────
+
+  /**
+   * Open a WebSocket connection to /api/v1/stream with first-message auth.
+   *
+   * The caller owns the returned WebSocket and is responsible for
+   * calling ws.close() when done. The connection uses the same API key
+   * and user identity as REST calls.
+   *
+   * @param {Object} options
+   * @param {string|null} options.sessionId - Optional session filter (null = all sessions)
+   * @param {Function} options.onMessage - Called with parsed event data (pings are filtered)
+   * @param {Function} options.onOpen - Called after auth message is sent
+   * @param {Function} options.onClose - Called on connection close
+   * @param {Function} options.onError - Called on connection error
+   * @returns {WebSocket} The WebSocket instance
+   */
+  connectWebSocket({ sessionId = null, onMessage, onOpen, onClose, onError } = {}) {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/api/v1/stream`);
+
+    ws.onopen = () => {
+      const authMsg = { type: 'auth', token: `Bearer ${this.getKey()}` };
+      const userId = this.getSelectedUser();
+      if (userId) authMsg.user_id = userId;
+      if (sessionId) authMsg.session_id = sessionId;
+      ws.send(JSON.stringify(authMsg));
+      if (onOpen) onOpen();
+    };
+
+    ws.onmessage = (e) => {
+      let data;
+      try { data = JSON.parse(e.data); } catch { return; }
+      if (data.type === 'ping') return;
+      if (onMessage) onMessage(data);
+    };
+
+    ws.onclose = onClose || null;
+    ws.onerror = onError || null;
+    return ws;
+  },
 };

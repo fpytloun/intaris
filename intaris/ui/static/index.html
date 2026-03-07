@@ -417,7 +417,11 @@
       <!-- Approvals Tab -->
       <div x-show="$store.nav.activeTab === 'approvals'" x-data="approvalsTab()" x-init="init()">
         <div class="flex items-center justify-between mb-4">
-          <h2 class="text-lg font-medium">Pending Approvals</h2>
+          <div class="flex items-center gap-2">
+            <h2 class="text-lg font-medium">Pending Approvals</h2>
+            <span x-show="wsConnected" class="w-2 h-2 rounded-full bg-green-500 shrink-0" title="Live updates active"></span>
+            <span x-show="!wsConnected" class="w-2 h-2 rounded-full bg-gray-500 shrink-0" title="Polling (no live connection)"></span>
+          </div>
           <span class="badge badge-escalate" x-text="total + ' pending'" x-show="total > 0"></span>
         </div>
 
