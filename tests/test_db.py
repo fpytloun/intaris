@@ -1,10 +1,11 @@
-"""Tests for database operations (SessionStore and AuditStore)."""
+"""Tests for database operations (SessionStore, AuditStore, TaskQueue)."""
 
 from __future__ import annotations
 
 import pytest
 
 from intaris.audit import AuditStore
+from intaris.background import TaskQueue
 from intaris.config import DBConfig
 from intaris.db import Database
 from intaris.session import SessionStore
@@ -29,6 +30,11 @@ def session_store(db):
 @pytest.fixture
 def audit_store(db):
     return AuditStore(db)
+
+
+@pytest.fixture
+def task_queue(db):
+    return TaskQueue(db)
 
 
 class TestSessionStore:
@@ -626,3 +632,245 @@ class TestAuditRecordType:
                 latency_ms=1,
                 record_type="invalid_type",
             )
+
+
+class TestAuditIntention:
+    """Test intention column in audit records."""
+
+    def _create_session(self, session_store, session_id="sess_int", user_id=TEST_USER):
+        try:
+            session_store.create(
+                user_id=user_id, session_id=session_id, intention="Build feature X"
+            )
+        except ValueError:
+            pass
+
+    def test_intention_stored_and_retrieved(self, audit_store, session_store):
+        """Intention is stored in audit record and returned on retrieval."""
+        self._create_session(session_store)
+        record = audit_store.insert(
+            call_id="call_int_1",
+            user_id=TEST_USER,
+            session_id="sess_int",
+            agent_id=None,
+            tool="bash",
+            args_redacted={"command": "ls"},
+            classification="read",
+            evaluation_path="fast",
+            decision="approve",
+            risk=None,
+            reasoning="Read-only",
+            latency_ms=5,
+            intention="Build feature X",
+        )
+        assert record["intention"] == "Build feature X"
+
+        # Verify via get_by_call_id
+        fetched = audit_store.get_by_call_id("call_int_1", user_id=TEST_USER)
+        assert fetched["intention"] == "Build feature X"
+
+    def test_intention_null_by_default(self, audit_store, session_store):
+        """Intention defaults to None when not provided."""
+        self._create_session(session_store)
+        record = audit_store.insert(
+            call_id="call_int_2",
+            user_id=TEST_USER,
+            session_id="sess_int",
+            agent_id=None,
+            tool="edit",
+            args_redacted={"file": "test.py"},
+            classification="write",
+            evaluation_path="llm",
+            decision="approve",
+            risk="low",
+            reasoning="Aligned",
+            latency_ms=150,
+        )
+        assert record["intention"] is None
+
+    def test_intention_in_query_results(self, audit_store, session_store):
+        """Intention appears in query results."""
+        self._create_session(session_store)
+        audit_store.insert(
+            call_id="call_int_3",
+            user_id=TEST_USER,
+            session_id="sess_int",
+            agent_id=None,
+            tool="bash",
+            args_redacted={},
+            classification="read",
+            evaluation_path="fast",
+            decision="approve",
+            risk=None,
+            reasoning="test",
+            latency_ms=1,
+            intention="Refactor module Y",
+        )
+        result = audit_store.query(user_id=TEST_USER, session_id="sess_int")
+        assert result["total"] >= 1
+        matching = [r for r in result["items"] if r["call_id"] == "call_int_3"]
+        assert len(matching) == 1
+        assert matching[0]["intention"] == "Refactor module Y"
+
+
+class TestAuditGetRecentRecordType:
+    """Test get_recent() with record_type filter."""
+
+    def _create_session(self, session_store, session_id="sess_grt", user_id=TEST_USER):
+        try:
+            session_store.create(
+                user_id=user_id, session_id=session_id, intention="Test"
+            )
+        except ValueError:
+            pass
+
+    def test_get_recent_filter_tool_call(self, audit_store, session_store):
+        """get_recent with record_type='tool_call' returns only tool_call records."""
+        self._create_session(session_store)
+
+        # Insert a tool_call record
+        audit_store.insert(
+            call_id="call_grt_tc",
+            user_id=TEST_USER,
+            session_id="sess_grt",
+            agent_id=None,
+            tool="bash",
+            args_redacted={"command": "ls"},
+            classification="read",
+            evaluation_path="fast",
+            decision="approve",
+            risk=None,
+            reasoning="test",
+            latency_ms=1,
+        )
+        # Insert a reasoning record
+        audit_store.insert(
+            call_id="call_grt_rs",
+            user_id=TEST_USER,
+            session_id="sess_grt",
+            agent_id=None,
+            tool=None,
+            args_redacted=None,
+            content="User message: fix the bug",
+            classification=None,
+            evaluation_path="reasoning",
+            decision="approve",
+            risk="low",
+            reasoning="Stored",
+            latency_ms=1,
+            record_type="reasoning",
+        )
+
+        # Filter tool_call only
+        tc_records = audit_store.get_recent(
+            "sess_grt", user_id=TEST_USER, record_type="tool_call"
+        )
+        assert len(tc_records) == 1
+        assert tc_records[0]["record_type"] == "tool_call"
+
+        # Filter reasoning only
+        rs_records = audit_store.get_recent(
+            "sess_grt", user_id=TEST_USER, record_type="reasoning"
+        )
+        assert len(rs_records) == 1
+        assert rs_records[0]["record_type"] == "reasoning"
+
+        # No filter returns all
+        all_records = audit_store.get_recent("sess_grt", user_id=TEST_USER)
+        assert len(all_records) == 2
+
+    def test_get_recent_respects_limit_with_filter(self, audit_store, session_store):
+        """get_recent with record_type filter respects the limit parameter."""
+        self._create_session(session_store)
+
+        for i in range(5):
+            audit_store.insert(
+                call_id=f"call_grt_lim_{i}",
+                user_id=TEST_USER,
+                session_id="sess_grt",
+                agent_id=None,
+                tool="bash",
+                args_redacted={},
+                classification="read",
+                evaluation_path="fast",
+                decision="approve",
+                risk=None,
+                reasoning="test",
+                latency_ms=1,
+            )
+
+        records = audit_store.get_recent(
+            "sess_grt", user_id=TEST_USER, limit=3, record_type="tool_call"
+        )
+        assert len(records) == 3
+
+
+class TestTaskQueueRecentlyCompleted:
+    """Test TaskQueue.recently_completed() cooldown method."""
+
+    def test_no_completed_tasks(self, task_queue):
+        """Returns False when no tasks have completed."""
+        result = task_queue.recently_completed(
+            "intention_update", TEST_USER, session_id="sess_rc"
+        )
+        assert result is False
+
+    def test_recently_completed_task(self, task_queue):
+        """Returns True when a task completed within the cooldown window."""
+        task_id = task_queue.enqueue(
+            "intention_update", TEST_USER, session_id="sess_rc"
+        )
+        task_queue.complete(task_id)
+
+        result = task_queue.recently_completed(
+            "intention_update", TEST_USER, session_id="sess_rc"
+        )
+        assert result is True
+
+    def test_different_session_not_matched(self, task_queue):
+        """Completed task for a different session is not matched."""
+        task_id = task_queue.enqueue(
+            "intention_update", TEST_USER, session_id="sess_rc_a"
+        )
+        task_queue.complete(task_id)
+
+        result = task_queue.recently_completed(
+            "intention_update", TEST_USER, session_id="sess_rc_b"
+        )
+        assert result is False
+
+    def test_different_user_not_matched(self, task_queue):
+        """Completed task for a different user is not matched."""
+        task_id = task_queue.enqueue(
+            "intention_update", TEST_USER, session_id="sess_rc"
+        )
+        task_queue.complete(task_id)
+
+        result = task_queue.recently_completed(
+            "intention_update", OTHER_USER, session_id="sess_rc"
+        )
+        assert result is False
+
+    def test_pending_task_not_matched(self, task_queue):
+        """Pending (not completed) tasks are not matched."""
+        task_queue.enqueue("intention_update", TEST_USER, session_id="sess_rc")
+
+        result = task_queue.recently_completed(
+            "intention_update", TEST_USER, session_id="sess_rc"
+        )
+        assert result is False
+
+    def test_short_cooldown_matches_recent(self, task_queue):
+        """With a short cooldown, a just-completed task matches."""
+        task_id = task_queue.enqueue(
+            "intention_update", TEST_USER, session_id="sess_rc"
+        )
+        task_queue.complete(task_id)
+
+        result = task_queue.recently_completed(
+            "intention_update",
+            TEST_USER,
+            session_id="sess_rc",
+            cooldown_seconds=10,
+        )
+        assert result is True

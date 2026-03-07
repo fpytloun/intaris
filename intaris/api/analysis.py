@@ -92,8 +92,9 @@ async def submit_reasoning(
 
     Stores the reasoning text as a record_type="reasoning" entry in
     the audit log. Text is sanitized to strip injection patterns.
-    The reasoning is available for human review but is NEVER included
-    in Intaris analysis prompts (agent data isolation).
+    Not included in safety evaluation prompts. User messages (prefixed
+    with "User message:") may be included in intention refinement
+    prompts as they represent the user's own words, not agent text.
     """
     from intaris.server import _get_db
 
@@ -140,6 +141,33 @@ async def submit_reasoning(
 
         # Update session activity
         session_store.update_activity(request.session_id, user_id=ctx.user_id)
+
+        # Trigger intention update from user message (most important
+        # signal for intent). Only triggers for user messages, not agent
+        # reasoning. Uses cooldown to prevent flooding: skip if an
+        # intention_update completed within the last 60 seconds.
+        if sanitized.startswith("User message:"):
+            try:
+                from intaris.background import TaskQueue
+
+                tq = TaskQueue(db)
+                if not tq.recently_completed(
+                    "intention_update", ctx.user_id, request.session_id, 60
+                ) and not tq.cancel_duplicate(
+                    "intention_update", ctx.user_id, request.session_id
+                ):
+                    tq.enqueue(
+                        "intention_update",
+                        ctx.user_id,
+                        session_id=request.session_id,
+                        payload={"trigger": "user_message"},
+                        priority=2,
+                    )
+            except Exception:
+                logger.debug(
+                    "Failed to enqueue intention update from reasoning",
+                    exc_info=True,
+                )
 
         return ReasoningResponse(ok=True, call_id=call_id)
     except ValueError as e:

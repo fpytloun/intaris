@@ -255,10 +255,16 @@
                         class="text-xs text-muted"
                         x-text="'(' + session._children.length + ' sub)'"></span>
                 </div>
-                <div class="flex items-center gap-4 text-sm text-muted">
-                  <span x-show="session.details?.agent_type" class="font-mono text-xs"
-                        x-text="session.details?.agent_type"></span>
+                <div class="flex items-center gap-1.5 text-sm text-muted">
+                  <template x-if="session.details?.source">
+                    <span class="font-mono text-xs"
+                          x-text="session._depth > 0 && session.details?.agent_type
+                                  ? session.details.source + ':' + session.details.agent_type
+                                  : session.details.source"></span>
+                  </template>
+                  <span x-show="session.details?.source" class="text-muted/50">&middot;</span>
                   <span x-text="session.total_calls + ' calls'"></span>
+                  <span class="text-muted/50">&middot;</span>
                   <span x-text="formatTime(session.last_activity_at || session.created_at)"
                         :title="'Created: ' + formatTime(session.created_at)"></span>
                 </div>
@@ -287,11 +293,15 @@
                 </div>
 
                 <!-- Session Metadata -->
-                <div class="flex flex-wrap gap-x-6 gap-y-1 text-xs text-muted mb-4">
-                  <div>Created: <span x-text="formatTime(session.created_at)"></span></div>
-                  <div>Last Active: <span x-text="formatTime(session.last_activity_at || session.created_at)"></span></div>
-                  <div x-show="session.details?.agent_type">Agent: <span class="font-mono" x-text="session.details?.agent_type"></span></div>
-                  <div>User: <span class="font-mono" x-text="session.user_id"></span></div>
+                <div class="flex flex-wrap gap-x-1.5 gap-y-1 text-xs text-muted mb-4">
+                  <span>Created: <span x-text="formatTime(session.created_at)"></span></span>
+                  <span class="text-muted/50">&middot;</span>
+                  <span>Last Active: <span x-text="formatTime(session.last_activity_at || session.created_at)"></span></span>
+                  <template x-if="session.details?.source">
+                    <span><span class="text-muted/50">&middot;</span> Agent: <span class="font-mono" x-text="session.details?.agent_type ? session.details.source + ':' + session.details.agent_type : session.details.source"></span></span>
+                  </template>
+                  <span class="text-muted/50">&middot;</span>
+                  <span>User: <span class="font-mono" x-text="session.user_id"></span></span>
                 </div>
 
                 <!-- Intention -->

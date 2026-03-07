@@ -311,6 +311,44 @@ class TaskQueue:
                 )
             return cur.fetchone()[0] > 0
 
+    def recently_completed(
+        self,
+        task_type: str,
+        user_id: str,
+        session_id: str | None = None,
+        cooldown_seconds: int = 60,
+    ) -> bool:
+        """Check if a task of this type completed recently (cooldown).
+
+        Returns True if a matching task completed within the cooldown
+        window, meaning a new enqueue should be skipped.
+        """
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=cooldown_seconds)
+        ).isoformat()
+
+        with self._db.cursor() as cur:
+            if session_id:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM analysis_tasks
+                    WHERE task_type = ? AND user_id = ? AND session_id = ?
+                      AND status = 'completed' AND completed_at >= ?
+                    """,
+                    (task_type, user_id, session_id, cutoff),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM analysis_tasks
+                    WHERE task_type = ? AND user_id = ?
+                      AND session_id IS NULL
+                      AND status = 'completed' AND completed_at >= ?
+                    """,
+                    (task_type, user_id, cutoff),
+                )
+            return cur.fetchone()[0] > 0
+
     def get_queue_stats(self) -> dict[str, int]:
         """Get task counts by status for health check.
 
@@ -531,7 +569,9 @@ class BackgroundWorker:
         """Generate a smarter intention from the audit trail.
 
         Uses the analysis LLM to summarize what the session is about
-        based on the first N tool calls.
+        based on tool calls and user messages. User messages are the
+        primary signal for intent — they are the user's own words
+        (not agent-generated text) and are sanitized on ingestion.
         """
         from intaris.audit import AuditStore
 
@@ -545,19 +585,25 @@ class BackgroundWorker:
         except ValueError:
             return {"error": f"Session {session_id} not found"}
 
-        # Get recent audit records for context
+        # Fetch tool calls and user messages separately to ensure
+        # balanced context regardless of record type distribution
         audit_store = AuditStore(self._db)
-        recent = audit_store.get_recent(session_id, user_id=user_id, limit=15)
-        if not recent:
+        recent_tools = audit_store.get_recent(
+            session_id, user_id=user_id, limit=10, record_type="tool_call"
+        )
+        recent_messages = audit_store.get_recent(
+            session_id, user_id=user_id, limit=5, record_type="reasoning"
+        )
+
+        if not recent_tools and not recent_messages:
             return {"skipped": "No audit records yet"}
 
-        # Build a summary of tool calls for the LLM
+        # Build tool call summary
         tool_summary = []
-        for record in recent:
+        for record in recent_tools:
             tool = record.get("tool", "unknown")
             decision = record.get("decision", "unknown")
             args = record.get("args_redacted", {})
-            # Extract key info from args
             brief = ""
             if isinstance(args, dict):
                 if "command" in args:
@@ -568,34 +614,54 @@ class BackgroundWorker:
                     brief = f": {args['path']}"
             tool_summary.append(f"  {tool}{brief} → {decision}")
 
-        tools_text = "\n".join(tool_summary)
+        # Extract user messages (chronological order — oldest first)
+        user_messages: list[str] = []
+        for record in reversed(recent_messages):
+            content = record.get("content", "")
+            if content:
+                if content.startswith("User message: "):
+                    content = content[len("User message: ") :]
+                user_messages.append(content[:200])
 
-        # Use analysis LLM to generate a concise intention
+        # Build prompt with user messages as primary signal
         from intaris.config import load_config
         from intaris.llm import LLMClient
 
         cfg = load_config()
         analysis_llm = LLMClient(cfg.llm_analysis)
 
+        details = session.get("details") or {}
+        wd = details.get("working_directory", "unknown")
+
+        prompt_parts = [
+            f"Current intention: {session.get('intention', 'unknown')}",
+            f"Working directory: {wd}",
+        ]
+        if user_messages:
+            msgs_text = "\n".join(f"  - {m}" for m in user_messages)
+            prompt_parts.append(
+                f"User messages (primary signal — the user's own words):\n{msgs_text}"
+            )
+        if tool_summary:
+            tools_text = "\n".join(tool_summary)
+            prompt_parts.append(f"Recent tool calls:\n{tools_text}")
+        prompt_parts.append("Generate a concise session description:")
+
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are a concise summarizer. Given a list of tool calls "
-                    "from a coding session, generate a single sentence (max 100 "
-                    "words) describing what the user is working on. Focus on the "
-                    "goal, not the tools. Do not include technical jargon about "
-                    "the tools themselves."
+                    "You are a concise summarizer. Given context from a coding "
+                    "session (user messages and tool calls), generate a single "
+                    "sentence (max 100 words) describing what the user is working "
+                    "on. User messages are the most important signal — they "
+                    "capture the user's actual intent. Focus on the goal, not "
+                    "the tools."
                 ),
             },
             {
                 "role": "user",
-                "content": (
-                    f"Current intention: {session.get('intention', 'unknown')}\n"
-                    f"Working directory: {session.get('details', {}).get('working_directory', 'unknown')}\n"
-                    f"Recent tool calls:\n{tools_text}\n\n"
-                    f"Generate a concise session description:"
-                ),
+                "content": "\n".join(prompt_parts),
             },
         ]
 

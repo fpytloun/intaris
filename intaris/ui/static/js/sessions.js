@@ -180,10 +180,13 @@ function sessionsTab() {
         }
       }
 
+      // Sort roots by created_at DESC (newest first)
+      roots.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+
       // Flatten tree: parent followed by its children (unless collapsed)
       const result = [];
       for (const root of roots) {
-        // Sort children by created_at
+        // Sort children by created_at DESC (newest first)
         root._children.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
         result.push(root);
         if (!this.collapsedSessions[root.session_id]) {

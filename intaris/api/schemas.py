@@ -124,6 +124,7 @@ class AuditRecord(BaseModel):
     risk: str | None = None
     reasoning: str | None = None
     latency_ms: int
+    intention: str | None = None
     user_decision: str | None = None
     user_note: str | None = None
     resolved_at: str | None = None

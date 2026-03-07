@@ -49,6 +49,7 @@ class AuditStore:
         content: str | None = None,
         args_hash: str | None = None,
         profile_version: int | None = None,
+        intention: str | None = None,
     ) -> dict[str, Any]:
         """Insert an audit record.
 
@@ -70,6 +71,7 @@ class AuditStore:
             content: Reasoning or checkpoint text (null for tool_call records).
             args_hash: SHA-256 hash of canonical args for escalation retry.
             profile_version: Behavioral profile version at time of evaluation.
+            intention: Session intention at time of evaluation (for tracking).
 
         Returns:
             The created audit record as a dict.
@@ -90,8 +92,8 @@ class AuditStore:
                     (id, call_id, record_type, user_id, session_id, agent_id,
                      timestamp, tool, args_redacted, content, classification,
                      evaluation_path, decision, risk, reasoning, latency_ms,
-                     args_hash, profile_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     args_hash, profile_version, intention)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record_id,
@@ -112,6 +114,7 @@ class AuditStore:
                     latency_ms,
                     args_hash,
                     profile_version,
+                    intention,
                 ),
             )
 
@@ -254,6 +257,7 @@ class AuditStore:
         *,
         user_id: str,
         limit: int = 10,
+        record_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """Get recent audit records for a session.
 
@@ -263,20 +267,35 @@ class AuditStore:
             session_id: Session to query.
             user_id: Tenant identifier.
             limit: Max records to return.
+            record_type: Filter by record type (e.g., "tool_call", "reasoning").
 
         Returns:
             List of audit record dicts, most recent first.
         """
-        with self._db.cursor() as cur:
-            cur.execute(
-                """
+        if record_type:
+            if record_type not in self.VALID_RECORD_TYPES:
+                raise ValueError(
+                    f"Invalid record_type '{record_type}'. "
+                    f"Must be one of: {self.VALID_RECORD_TYPES}"
+                )
+            sql = """
+                SELECT * FROM audit_log
+                WHERE session_id = ? AND user_id = ? AND record_type = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """
+            params: tuple[Any, ...] = (session_id, user_id, record_type, limit)
+        else:
+            sql = """
                 SELECT * FROM audit_log
                 WHERE session_id = ? AND user_id = ?
                 ORDER BY timestamp DESC
                 LIMIT ?
-                """,
-                (session_id, user_id, limit),
-            )
+            """
+            params = (session_id, user_id, limit)
+
+        with self._db.cursor() as cur:
+            cur.execute(sql, params)
             rows = cur.fetchall()
 
         return [_row_to_dict(row) for row in rows]

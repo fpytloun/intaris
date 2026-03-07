@@ -132,6 +132,17 @@ class Database:
             conn.execute("ALTER TABLE audit_log ADD COLUMN profile_version INTEGER")
             logger.info("Migration: added profile_version column to audit_log")
 
+        # Migration: add intention to audit_log (intention tracking per tool call)
+        if not self._column_exists(conn, "audit_log", "intention"):
+            conn.execute("ALTER TABLE audit_log ADD COLUMN intention TEXT")
+            logger.info("Migration: added intention column to audit_log")
+
+        # Migration: update analysis_tasks CHECK constraint to include
+        # 'intention_update'. SQLite doesn't support ALTER CHECK, so we
+        # recreate the table. Task queue data is transient — completed
+        # tasks are cleaned up periodically, so this is safe.
+        self._migrate_analysis_tasks_check(conn)
+
         # Index for idle session sweep (status + last_activity_at)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
@@ -144,6 +155,68 @@ class Database:
         cursor = conn.execute(f"PRAGMA table_info({table})")
         columns = {row[1] for row in cursor.fetchall()}
         return column in columns
+
+    @staticmethod
+    def _migrate_analysis_tasks_check(conn: sqlite3.Connection) -> None:
+        """Recreate analysis_tasks table if CHECK constraint is outdated.
+
+        The original schema only allowed ('summary', 'analysis'). We need
+        to include 'intention_update'. SQLite doesn't support ALTER CHECK,
+        so we recreate the table with data migration.
+        """
+        # Check if the table exists
+        cursor = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='analysis_tasks'"
+        )
+        row = cursor.fetchone()
+        if not row:
+            return  # Table doesn't exist yet, CREATE TABLE will handle it
+
+        create_sql = row[0]
+        if "intention_update" in create_sql:
+            return  # Already migrated
+
+        logger.info(
+            "Migration: recreating analysis_tasks table to update CHECK constraint"
+        )
+        conn.execute(
+            """
+            CREATE TABLE analysis_tasks_new (
+                id              TEXT PRIMARY KEY,
+                task_type       TEXT NOT NULL
+                    CHECK (task_type IN ('summary', 'analysis', 'intention_update')),
+                user_id         TEXT NOT NULL,
+                session_id      TEXT,
+                status          TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+                priority        INTEGER NOT NULL DEFAULT 0,
+                payload         TEXT,
+                result          TEXT,
+                retry_count     INTEGER NOT NULL DEFAULT 0,
+                max_retries     INTEGER NOT NULL DEFAULT 3,
+                next_attempt_at TEXT NOT NULL,
+                created_at      TEXT NOT NULL,
+                completed_at    TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO analysis_tasks_new
+            SELECT * FROM analysis_tasks
+            """
+        )
+        conn.execute("DROP TABLE analysis_tasks")
+        conn.execute("ALTER TABLE analysis_tasks_new RENAME TO analysis_tasks")
+        # Recreate indexes (dropped with the old table)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_pending "
+            "ON analysis_tasks(status, next_attempt_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_user "
+            "ON analysis_tasks(user_id, task_type, status)"
+        )
 
     def close(self) -> None:
         """Close the thread-local connection if open."""
@@ -317,7 +390,7 @@ CREATE TABLE IF NOT EXISTS behavioral_profiles (
 CREATE TABLE IF NOT EXISTS analysis_tasks (
     id              TEXT PRIMARY KEY,
     task_type       TEXT NOT NULL
-        CHECK (task_type IN ('summary', 'analysis')),
+        CHECK (task_type IN ('summary', 'analysis', 'intention_update')),
     user_id         TEXT NOT NULL,
     session_id      TEXT,
     status          TEXT NOT NULL DEFAULT 'pending'

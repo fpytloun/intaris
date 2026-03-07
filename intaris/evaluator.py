@@ -248,6 +248,7 @@ class Evaluator:
             latency_ms=latency_ms,
             args_hash=args_hash,
             profile_version=profile_version,
+            intention=session.get("intention"),
         )
 
         # Step 8: Update session counters
@@ -258,19 +259,22 @@ class Evaluator:
         except ValueError:
             logger.warning("Failed to update session counter for %s", session_id)
 
-        # Enqueue intention update task if intention looks generic
-        # (after enough calls to have context, background task handles LLM)
-        if (
-            session.get("total_calls", 0) == 9  # Trigger once at ~10 calls
-            and session.get("intention", "").startswith("OpenCode ")
-            and self._analysis_enabled
-        ):
+        # Enqueue periodic intention update task
+        # Triggers every 20 calls starting at call 10 to refine intention
+        # as the session evolves. User messages also trigger updates
+        # via POST /reasoning (see api/analysis.py).
+        total = session.get("total_calls", 0)
+        if total >= 9 and total % 20 == 9 and self._analysis_enabled:
             try:
                 from intaris.background import TaskQueue
 
                 if self._db is not None:
                     tq = TaskQueue(self._db)
-                    if not tq.cancel_duplicate("intention_update", user_id, session_id):
+                    if not tq.recently_completed(
+                        "intention_update", user_id, session_id, 60
+                    ) and not tq.cancel_duplicate(
+                        "intention_update", user_id, session_id
+                    ):
                         tq.enqueue(
                             "intention_update",
                             user_id,
