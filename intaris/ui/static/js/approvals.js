@@ -18,6 +18,7 @@ function approvalsTab() {
     total: 0,
     resolving: {},      // call_id -> true while resolving
     noteText: {},       // call_id -> note text
+    expandedArgs: null, // call_id of item with expanded args
 
     // Polling fallback state
     pollTimer: null,
@@ -143,8 +144,10 @@ function approvalsTab() {
     // ── User actions ─────────────────────────────────────────
 
     async resolve(callId, decision) {
+      if (!callId || !decision) return;
       if (this.resolving[callId]) return;
-      this.resolving[callId] = true;
+      // Use spread to ensure Alpine reactivity when adding new keys
+      this.resolving = { ...this.resolving, [callId]: true };
       try {
         const note = this.noteText[callId] || null;
         await IntarisAPI.resolveDecision(callId, decision, note);
@@ -157,10 +160,23 @@ function approvalsTab() {
         this.total = this.pending.length;
         delete this.noteText[callId];
       } catch (e) {
-        Alpine.store('notify').error('Failed to resolve: ' + e.message);
+        console.error('[intaris] resolve failed:', e);
+        Alpine.store('notify').error('Failed to resolve: ' + (e.message || String(e)));
       } finally {
-        delete this.resolving[callId];
+        const { [callId]: _, ...rest } = this.resolving;
+        this.resolving = rest;
       }
+    },
+
+    // ── Navigation ────────────────────────────────────────────
+
+    goToSession(sessionId) {
+      // Navigate to Sessions tab and expand the given session
+      Alpine.store('nav').setTab('sessions');
+      // Dispatch event so sessions tab can auto-expand this session
+      window.dispatchEvent(new CustomEvent('intaris:navigate-session', {
+        detail: { sessionId },
+      }));
     },
 
     // ── Helpers ──────────────────────────────────────────────
@@ -177,6 +193,15 @@ function approvalsTab() {
     formatArgs(args) {
       if (!args) return '';
       if (typeof args === 'string') return args;
+      return JSON.stringify(args, null, 2);
+    },
+
+    truncateArgs(args) {
+      if (!args) return '';
+      if (typeof args === 'string') {
+        return args.length > 200 ? args.substring(0, 200) + '...' : args;
+      }
+      // Use compact JSON for preview so more data fits in the truncation window
       const str = JSON.stringify(args);
       return str.length > 200 ? str.substring(0, 200) + '...' : str;
     },

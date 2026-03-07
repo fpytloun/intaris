@@ -637,6 +637,27 @@ class BackgroundWorker:
             f"Current intention: {session.get('intention', 'unknown')}",
             f"Working directory: {wd}",
         ]
+
+        # For sub-sessions, include parent intention to keep the
+        # generated intention within the parent's scope
+        parent_session_id = session.get("parent_session_id")
+        if parent_session_id:
+            try:
+                parent_session = self._session_store.get(
+                    parent_session_id, user_id=user_id
+                )
+                parent_intention = parent_session.get("intention", "")
+                if parent_intention:
+                    prompt_parts.append(
+                        f"Parent session intention (this is a sub-session — "
+                        f"stay within scope): {parent_intention}"
+                    )
+            except ValueError:
+                logger.debug(
+                    "Parent session %s not found for intention update",
+                    parent_session_id,
+                )
+
         if user_messages:
             msgs_text = "\n".join(f"  - {m}" for m in user_messages)
             prompt_parts.append(

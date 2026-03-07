@@ -185,6 +185,24 @@ class Evaluator:
         # Get session policy for classifier
         session_policy = session.get("policy")
 
+        # Resolve parent intention for sub-sessions (intention chain).
+        # Sub-agent tool calls must be aligned with BOTH the parent
+        # session's intention and their own. This prevents sub-agents
+        # from escaping the parent's guardrails by declaring a narrow
+        # intention that doesn't cover what they're actually doing.
+        parent_intention: str | None = None
+        parent_session_id = session.get("parent_session_id")
+        if parent_session_id:
+            try:
+                parent_session = self._sessions.get(parent_session_id, user_id=user_id)
+                parent_intention = parent_session.get("intention")
+            except ValueError:
+                logger.debug(
+                    "Parent session %s not found for sub-session %s",
+                    parent_session_id,
+                    session_id,
+                )
+
         # Step 1-2: Classify (with tool preferences for MCP proxy)
         classification = classify(
             tool,
@@ -227,6 +245,7 @@ class Evaluator:
                 args_redacted=args_redacted,
                 agent_id=agent_id,
                 context=context,
+                parent_intention=parent_intention,
             )
 
         # Calculate latency
@@ -385,6 +404,7 @@ class Evaluator:
         args_redacted: dict[str, Any],
         agent_id: str | None,
         context: dict[str, Any] | None = None,
+        parent_intention: str | None = None,
     ) -> Decision:
         """Run LLM safety evaluation and apply decision matrix.
 
@@ -394,6 +414,7 @@ class Evaluator:
             args_redacted: Redacted tool arguments.
             agent_id: Agent identity.
             context: Optional additional context for evaluation.
+            parent_intention: Parent session intention for sub-sessions.
 
         Returns:
             Decision from the decision matrix.
@@ -417,6 +438,7 @@ class Evaluator:
             args=args_redacted,
             agent_id=agent_id,
             context=context,
+            parent_intention=parent_intention,
         )
 
         messages = [

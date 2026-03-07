@@ -27,6 +27,7 @@
  *   INTARIS_FAIL_OPEN            - Allow tool calls if Intaris is unreachable (default: false)
  *   INTARIS_INTENTION            - Session intention override (default: auto-generated)
  *   INTARIS_CHECKPOINT_INTERVAL  - Evaluate calls between checkpoints (default: 25, 0=disabled)
+ *   INTARIS_ESCALATION_TIMEOUT   - Max seconds to wait for escalation approval (default: 0=no timeout)
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
@@ -70,6 +71,13 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     10,
   )
   const checkpointInterval = isNaN(rawInterval) ? 25 : rawInterval
+  const rawEscalationTimeout = parseInt(
+    process.env.INTARIS_ESCALATION_TIMEOUT || "0",
+    10,
+  )
+  const escalationTimeoutMs = isNaN(rawEscalationTimeout)
+    ? 0
+    : Math.max(0, rawEscalationTimeout * 1000)
 
   // -- State ----------------------------------------------------------------
   // Track Intaris session per OpenCode session.
@@ -89,12 +97,14 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
   async function callApi(
     method: string,
     path: string,
-    payload: object,
+    payload: object | null,
     timeoutMs: number = 5000,
   ): Promise<ApiResult> {
     const headers: Record<string, string> = {
-      "Content-Type": "application/json",
       "X-Agent-Id": agentId,
+    }
+    if (payload !== null) {
+      headers["Content-Type"] = "application/json"
     }
     if (apiKey) {
       headers["Authorization"] = `Bearer ${apiKey}`
@@ -104,12 +114,15 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     }
 
     try {
-      const resp = await fetch(`${baseUrl}${path}`, {
+      const fetchOptions: RequestInit = {
         method,
         headers,
-        body: JSON.stringify(payload),
         signal: AbortSignal.timeout(timeoutMs),
-      })
+      }
+      if (payload !== null) {
+        fetchOptions.body = JSON.stringify(payload)
+      }
+      const resp = await fetch(`${baseUrl}${path}`, fetchOptions)
       if (resp.ok) return { data: await resp.json(), error: null, status: resp.status }
 
       // Non-OK response — extract server error detail
@@ -145,6 +158,50 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         .catch(() => {})
       return { data: null, error: String(err), status: null }
     }
+  }
+
+  /**
+   * Call API with retries and exponential backoff.
+   * Retries on network errors and 5xx responses. Does NOT retry 4xx.
+   */
+  async function callApiWithRetry(
+    method: string,
+    path: string,
+    payload: object | null,
+    timeoutMs: number = 30000,
+    maxRetries: number = 3,
+  ): Promise<ApiResult> {
+    const backoffMs = [1000, 2000, 4000]
+    let lastResult: ApiResult = { data: null, error: "no attempts", status: null }
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      lastResult = await callApi(method, path, payload, timeoutMs)
+
+      // Success — return immediately
+      if (lastResult.data !== null) return lastResult
+
+      // 4xx client errors — do not retry (auth, validation, not found)
+      if (lastResult.status !== null && lastResult.status >= 400 && lastResult.status < 500) {
+        return lastResult
+      }
+
+      // 5xx or network error — retry with backoff (unless last attempt)
+      if (attempt < maxRetries) {
+        const delay = backoffMs[Math.min(attempt, backoffMs.length - 1)]
+        await client.app
+          .log({
+            body: {
+              service: "intaris",
+              level: "warn",
+              message: `API ${method} ${path} failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms`,
+            },
+          })
+          .catch(() => {})
+        await new Promise((resolve) => setTimeout(resolve, delay))
+      }
+    }
+
+    return lastResult
   }
 
   // -- Helpers --------------------------------------------------------------
@@ -300,11 +357,12 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       intentionBody.parent_session_id = state.parentSessionId
     }
 
-    const { data, error, status } = await callApi(
+    const { data, error, status } = await callApiWithRetry(
       "POST",
       "/api/v1/intention",
       intentionBody,
-      2000, // 2s timeout for session creation (leaves headroom for evaluate)
+      5000, // 5s timeout for session creation
+      2,    // 2 retries
     )
 
     if (data) {
@@ -469,7 +527,13 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       output: { message?: any; parts?: any[] },
     ) => {
       if (!input.sessionID) return
-      const state = sessions.get(input.sessionID) || getOrCreateState(input.sessionID)
+      // Do NOT use getOrCreateState() here — creating state before
+      // session.created fires causes a race condition where the session
+      // is created on the server without parent_session_id (the parent
+      // link is only set in session.created). If no state exists yet,
+      // skip this event; the session will be created properly later.
+      const state = sessions.get(input.sessionID)
+      if (!state) return
 
       // Capture agent name on first message
       if (input.agent && !state.agentName) {
@@ -613,8 +677,8 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         )
       }
 
-      // Evaluate the tool call
-      const { data: result, error: evalError, status: evalStatus } = await callApi(
+      // Evaluate the tool call (30s timeout, retries with backoff)
+      const { data: result, error: evalError, status: evalStatus } = await callApiWithRetry(
         "POST",
         "/api/v1/evaluate",
         {
@@ -622,7 +686,8 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           tool,
           args: _output.args || {},
         },
-        5000, // 5s timeout for evaluation
+        30000, // 30s timeout for evaluation (large tool calls can be slow)
+        2,     // 2 retries (3 total attempts, worst case ~90s)
       )
 
       if (!result) {
@@ -690,13 +755,91 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         const reason =
           result.reasoning ||
           "Tool call requires human approval"
-        throw new Error(
-          `[intaris] ESCALATED (${result.call_id}): ${reason}\n` +
-            `Approve or deny this call in the Intaris UI, then retry.`,
-        )
+
+        // Log escalation and wait for user approval via polling
+        await client.app
+          .log({
+            body: {
+              service: "intaris",
+              level: "warn",
+              message: `ESCALATED ${tool} (${result.call_id}): ${reason}. Waiting for approval in Intaris UI...`,
+            },
+          })
+          .catch(() => {})
+
+        // Poll for user decision with exponential backoff
+        const pollBackoffMs = [2000, 4000, 8000, 16000, 30000]
+        const startTime = Date.now()
+        let pollAttempt = 0
+        let lastReminderAt = startTime
+
+        while (true) {
+          // Check timeout (0 = no timeout)
+          if (escalationTimeoutMs > 0 && Date.now() - startTime > escalationTimeoutMs) {
+            throw new Error(
+              `[intaris] ESCALATION TIMEOUT (${result.call_id}): ${reason}\n` +
+                `No response within ${rawEscalationTimeout}s. Approve or deny in the Intaris UI.`,
+            )
+          }
+
+          // Periodic reminder every 60s so operators know the agent is waiting
+          const now = Date.now()
+          if (now - lastReminderAt >= 60000) {
+            const waitSec = Math.round((now - startTime) / 1000)
+            await client.app
+              .log({
+                body: {
+                  service: "intaris",
+                  level: "warn",
+                  message: `Still waiting for escalation approval for ${tool} (${result.call_id})... ${waitSec}s elapsed`,
+                },
+              })
+              .catch(() => {})
+            lastReminderAt = now
+          }
+
+          // Wait with exponential backoff (capped at 30s)
+          const delay = pollBackoffMs[Math.min(pollAttempt, pollBackoffMs.length - 1)]
+          await new Promise((resolve) => setTimeout(resolve, delay))
+          pollAttempt++
+
+          // Check if the escalation has been resolved
+          const { data: auditRecord } = await callApi(
+            "GET",
+            `/api/v1/audit/${encodeURIComponent(result.call_id)}`,
+            null,
+            5000,
+          )
+
+          if (!auditRecord) continue // Server unreachable — keep polling
+
+          if (auditRecord.user_decision === "approve") {
+            await client.app
+              .log({
+                body: {
+                  service: "intaris",
+                  level: "info",
+                  message: `Escalation approved: ${tool} (${result.call_id})`,
+                },
+              })
+              .catch(() => {})
+            break // Approved — let the tool call proceed
+          }
+
+          if (auditRecord.user_decision === "deny") {
+            const denyNote = auditRecord.user_note
+              ? ` — ${auditRecord.user_note}`
+              : ""
+            throw new Error(
+              `[intaris] DENIED by user (${result.call_id}): ${reason}${denyNote}`,
+            )
+          }
+
+          // No decision yet — continue polling
+        }
       }
 
-      // decision === "approve" — tool call proceeds normally
+      // decision === "approve" (or escalation approved) — tool call proceeds normally
     },
   }
 }

@@ -123,6 +123,7 @@ def build_evaluation_user_prompt(
     args: dict[str, Any],
     agent_id: str | None,
     context: dict[str, Any] | None = None,
+    parent_intention: str | None = None,
 ) -> str:
     """Build the user prompt for safety evaluation.
 
@@ -137,11 +138,25 @@ def build_evaluation_user_prompt(
         args: Tool arguments (already redacted).
         agent_id: Agent identity (optional).
         context: Optional additional context from the caller.
+        parent_intention: Parent session intention for sub-sessions.
+            When present, the tool call must be aligned with BOTH
+            the parent and child intentions.
 
     Returns:
         Formatted user prompt string.
     """
     sections = []
+
+    # Parent session intention (for sub-sessions — must be checked first)
+    if parent_intention:
+        sections.append(
+            f"## Parent Session Intention\n{parent_intention}\n\n"
+            f"**This is a sub-session.** The tool call must be aligned "
+            f"with BOTH the parent intention above AND the sub-session "
+            f"intention below. If the tool call violates the parent "
+            f"intention, it should be denied or escalated even if it "
+            f"aligns with the sub-session intention."
+        )
 
     # Session intention
     sections.append(f"## Session Intention\n{intention}")

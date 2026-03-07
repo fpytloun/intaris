@@ -544,7 +544,9 @@
                   <span :class="riskBadgeClass(item.risk)" x-text="item.risk" x-show="item.risk"></span>
                 </div>
                 <div class="text-xs text-muted">
-                  <span x-text="item.session_id"></span> &middot;
+                  <span class="text-brand-accent hover:underline cursor-pointer"
+                        @click.stop="goToSession(item.session_id)"
+                        x-text="item.session_id"></span> &middot;
                   <span x-text="formatTime(item.timestamp)"></span>
                 </div>
               </div>
@@ -552,10 +554,21 @@
               <!-- Reasoning -->
               <div class="text-sm bg-brand-elevated rounded p-3 mb-3" x-text="item.reasoning" x-show="item.reasoning"></div>
 
-              <!-- Args Summary -->
+              <!-- Args (expandable) -->
               <div x-show="item.args_redacted" class="mb-3">
-                <div class="text-xs text-muted mb-1">Arguments</div>
-                <pre class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto" x-text="formatArgs(item.args_redacted)"></pre>
+                <div class="flex items-center gap-2 mb-1">
+                  <div class="text-xs text-muted">Arguments</div>
+                  <button @click.stop="expandedArgs === item.call_id ? (expandedArgs = null) : (expandedArgs = item.call_id)"
+                          class="text-xs text-brand-accent hover:underline cursor-pointer"
+                          x-text="expandedArgs === item.call_id ? 'Collapse' : 'Expand'"></button>
+                </div>
+                <pre x-show="expandedArgs !== item.call_id"
+                     class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto cursor-pointer"
+                     @click.stop="expandedArgs = item.call_id"
+                     x-text="truncateArgs(item.args_redacted)"></pre>
+                <pre x-show="expandedArgs === item.call_id" x-cloak
+                     class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap break-words max-h-96 overflow-y-auto"
+                     x-text="formatArgs(item.args_redacted)"></pre>
               </div>
 
               <!-- Note + Actions -->
@@ -563,14 +576,17 @@
                 <div class="flex-1">
                   <input type="text" :placeholder="'Optional note...'"
                          class="input text-sm"
+                         @click.stop
                          x-model="noteText[item.call_id]">
                 </div>
-                <button @click="resolve(item.call_id, 'approve')"
+                <button @click.stop="resolve(item.call_id, 'approve')"
                         :disabled="resolving[item.call_id]"
-                        class="btn-success text-sm">Approve</button>
-                <button @click="resolve(item.call_id, 'deny')"
+                        class="btn-success text-sm"
+                        x-text="resolving[item.call_id] ? 'Approving...' : 'Approve'"></button>
+                <button @click.stop="resolve(item.call_id, 'deny')"
                         :disabled="resolving[item.call_id]"
-                        class="btn-danger text-sm">Deny</button>
+                        class="btn-danger text-sm"
+                        x-text="resolving[item.call_id] ? 'Denying...' : 'Deny'"></button>
               </div>
             </div>
           </template>

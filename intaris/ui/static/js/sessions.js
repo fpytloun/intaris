@@ -36,6 +36,29 @@ function sessionsTab() {
       window.addEventListener('intaris:ws-message', (e) => {
         this._handleWsEvent(e.detail);
       });
+
+      // Handle navigation from other tabs (e.g., approvals → session)
+      window.addEventListener('intaris:navigate-session', async (e) => {
+        const sessionId = e.detail?.sessionId;
+        if (!sessionId) return;
+        if (!this.initialized) {
+          this.initialized = true;
+          await this.load();
+        }
+        // Find session in current page, or fetch directly from API
+        let session = this.sessions.find(s => s.session_id === sessionId);
+        if (!session) {
+          try {
+            session = await IntarisAPI.getSession(sessionId);
+          } catch (err) {
+            Alpine.store('notify').error('Session not found: ' + sessionId);
+            return;
+          }
+        }
+        if (session) {
+          this.toggleExpand(session);
+        }
+      });
     },
 
     _handleWsEvent(data) {

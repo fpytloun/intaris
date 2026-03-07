@@ -874,3 +874,157 @@ class TestTaskQueueRecentlyCompleted:
             cooldown_seconds=10,
         )
         assert result is True
+
+
+class TestParentIntentionPrompt:
+    """Tests for parent intention chain in evaluation prompts."""
+
+    def test_prompt_without_parent(self):
+        """Prompt without parent_intention has no parent section."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        prompt = build_evaluation_user_prompt(
+            intention="Fix login bug",
+            policy=None,
+            recent_history=[],
+            session_stats={"total_calls": 0},
+            tool="edit",
+            args={"filePath": "src/auth.py"},
+            agent_id="opencode",
+        )
+        assert "Parent Session Intention" not in prompt
+        assert "Fix login bug" in prompt
+
+    def test_prompt_with_parent(self):
+        """Prompt with parent_intention includes parent section."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        prompt = build_evaluation_user_prompt(
+            intention="Explore codebase for auth module",
+            policy=None,
+            recent_history=[],
+            session_stats={"total_calls": 0},
+            tool="read",
+            args={"filePath": "src/auth.py"},
+            agent_id="opencode",
+            parent_intention="Implement user authentication feature",
+        )
+        assert "Parent Session Intention" in prompt
+        assert "Implement user authentication feature" in prompt
+        assert "Explore codebase for auth module" in prompt
+        assert "sub-session" in prompt.lower()
+        assert "BOTH" in prompt
+
+    def test_prompt_parent_appears_before_child(self):
+        """Parent intention appears before child intention in prompt."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        prompt = build_evaluation_user_prompt(
+            intention="Child intention",
+            policy=None,
+            recent_history=[],
+            session_stats={"total_calls": 0},
+            tool="edit",
+            args={},
+            agent_id=None,
+            parent_intention="Parent intention",
+        )
+        parent_pos = prompt.index("Parent intention")
+        child_pos = prompt.index("Child intention")
+        assert parent_pos < child_pos
+
+    def test_evaluator_resolves_parent_intention(self, db, session_store, audit_store):
+        """Evaluator fetches parent intention for sub-sessions."""
+        from unittest.mock import MagicMock, patch
+
+        from intaris.evaluator import Evaluator
+
+        # Create parent and child sessions
+        session_store.create(
+            user_id=TEST_USER,
+            session_id="parent-sess",
+            intention="Build user dashboard",
+        )
+        session_store.create(
+            user_id=TEST_USER,
+            session_id="child-sess",
+            intention="Explore components",
+            parent_session_id="parent-sess",
+        )
+
+        # Mock LLM to capture the prompt
+        mock_llm = MagicMock()
+        mock_llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "test", "decision": "approve"}'
+        )
+
+        evaluator = Evaluator(
+            llm=mock_llm,
+            session_store=session_store,
+            audit_store=audit_store,
+            db=db,
+        )
+
+        with patch("intaris.evaluator.classify") as mock_classify:
+            from intaris.classifier import Classification
+
+            mock_classify.return_value = Classification.WRITE
+
+            evaluator.evaluate(
+                user_id=TEST_USER,
+                session_id="child-sess",
+                agent_id="opencode",
+                tool="edit",
+                args={"filePath": "src/dashboard.tsx"},
+            )
+
+        # Verify the LLM was called with a prompt containing parent intention
+        call_args = mock_llm.generate.call_args
+        messages = call_args[0][0]
+        user_prompt = messages[1]["content"]
+        assert "Build user dashboard" in user_prompt
+        assert "Parent Session Intention" in user_prompt
+
+    def test_evaluator_no_parent_for_root_session(self, db, session_store, audit_store):
+        """Evaluator does not add parent intention for root sessions."""
+        from unittest.mock import MagicMock, patch
+
+        from intaris.evaluator import Evaluator
+
+        session_store.create(
+            user_id=TEST_USER,
+            session_id="root-sess",
+            intention="Root session intention",
+        )
+
+        mock_llm = MagicMock()
+        mock_llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "test", "decision": "approve"}'
+        )
+
+        evaluator = Evaluator(
+            llm=mock_llm,
+            session_store=session_store,
+            audit_store=audit_store,
+            db=db,
+        )
+
+        with patch("intaris.evaluator.classify") as mock_classify:
+            from intaris.classifier import Classification
+
+            mock_classify.return_value = Classification.WRITE
+
+            evaluator.evaluate(
+                user_id=TEST_USER,
+                session_id="root-sess",
+                agent_id="opencode",
+                tool="edit",
+                args={"filePath": "src/app.py"},
+            )
+
+        call_args = mock_llm.generate.call_args
+        messages = call_args[0][0]
+        user_prompt = messages[1]["content"]
+        assert "Parent Session Intention" not in user_prompt
