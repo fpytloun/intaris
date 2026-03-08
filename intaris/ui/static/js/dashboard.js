@@ -581,10 +581,7 @@ function dashboardTab() {
     // ── Navigation ────────────────────────────────────────────────
 
     goToSession(sessionId) {
-      Alpine.store('nav').setTab('sessions');
-      window.dispatchEvent(new CustomEvent('intaris:navigate-session', {
-        detail: { sessionId },
-      }));
+      Alpine.store('nav').openSessionModal(sessionId);
     },
   };
 }

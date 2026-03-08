@@ -22,6 +22,9 @@ function approvalsTab() {
     expandedArgs: null, // call_id of item with expanded args
 
     // Resolved section state
+    expandedResolvedId: null,   // call_id of expanded resolved item
+    expandedResolvedRecord: null,
+    expandedResolvedArgs: null, // call_id of resolved item with expanded args
     resolved: [],
     resolvedTotal: 0,
     resolvedPage: 1,
@@ -80,10 +83,6 @@ function approvalsTab() {
 
     // ── WebSocket message handling ───────────────────────────
 
-    get wsConnected() {
-      return Alpine.store('ws').connected;
-    },
-
     _handleWsMessage(data) {
       if (data.type === 'evaluated' && data.decision === 'escalate') {
         this._scheduleLoad();
@@ -138,6 +137,8 @@ function approvalsTab() {
         const result = await IntarisAPI.listAudit(params);
         this.pending = this._filterResolved(result.items || []);
         this.total = this.pending.length;
+        // Sync with global nav store for badge
+        Alpine.store('nav').pendingApprovals = result.total || this.total;
       } catch (e) {
         Alpine.store('notify').error('Failed to load approvals: ' + e.message);
       } finally {
@@ -230,12 +231,25 @@ function approvalsTab() {
     // ── Navigation ────────────────────────────────────────────
 
     goToSession(sessionId) {
-      // Navigate to Sessions tab and expand the given session
-      Alpine.store('nav').setTab('sessions');
-      // Dispatch event so sessions tab can auto-expand this session
-      window.dispatchEvent(new CustomEvent('intaris:navigate-session', {
-        detail: { sessionId },
-      }));
+      Alpine.store('nav').openSessionModal(sessionId);
+    },
+
+    // ── Resolved item expand ─────────────────────────────────
+
+    async toggleResolvedExpand(item) {
+      if (this.expandedResolvedId === item.call_id) {
+        this.expandedResolvedId = null;
+        this.expandedResolvedRecord = null;
+        this.expandedResolvedArgs = null;
+        return;
+      }
+      this.expandedResolvedId = item.call_id;
+      this.expandedResolvedArgs = null;
+      try {
+        this.expandedResolvedRecord = await IntarisAPI.getAuditRecord(item.call_id);
+      } catch (e) {
+        this.expandedResolvedRecord = item;
+      }
     },
 
     // ── Helpers ──────────────────────────────────────────────

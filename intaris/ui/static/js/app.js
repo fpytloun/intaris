@@ -137,6 +137,14 @@ document.addEventListener('alpine:init', () => {
     activeTab: 'dashboard',
     selectedAgent: '',
     agents: [],
+    pendingApprovals: 0,
+
+    // Session modal state
+    sessionModal: null,
+    sessionModalAudit: [],
+    sessionModalLoading: false,
+    sessionModalAuditExpandedId: null,
+    sessionModalAuditRecord: null,
 
     setTab(tab) {
       this.activeTab = tab;
@@ -150,6 +158,62 @@ document.addEventListener('alpine:init', () => {
       window.dispatchEvent(new CustomEvent('intaris:agent-changed', {
         detail: { agentId }
       }));
+    },
+
+    // ── Session modal ───────────────────────────────────────
+
+    async openSessionModal(sessionId) {
+      if (!sessionId) return;
+      this.sessionModalLoading = true;
+      this.sessionModal = null;
+      this.sessionModalAudit = [];
+      this.sessionModalAuditExpandedId = null;
+      this.sessionModalAuditRecord = null;
+      try {
+        const session = await IntarisAPI.getSession(sessionId);
+        this.sessionModal = session;
+        const audit = await IntarisAPI.listAudit({ session_id: sessionId, limit: 20 });
+        this.sessionModalAudit = audit.items || [];
+      } catch (e) {
+        Alpine.store('notify').error('Session not found: ' + sessionId);
+        this.sessionModalLoading = false;
+        return;
+      }
+      this.sessionModalLoading = false;
+    },
+
+    closeSessionModal() {
+      this.sessionModal = null;
+      this.sessionModalAudit = [];
+      this.sessionModalLoading = false;
+      this.sessionModalAuditExpandedId = null;
+      this.sessionModalAuditRecord = null;
+    },
+
+    async toggleModalAuditExpand(record) {
+      if (this.sessionModalAuditExpandedId === record.call_id) {
+        this.sessionModalAuditExpandedId = null;
+        this.sessionModalAuditRecord = null;
+        return;
+      }
+      this.sessionModalAuditExpandedId = record.call_id;
+      try {
+        this.sessionModalAuditRecord = await IntarisAPI.getAuditRecord(record.call_id);
+      } catch (e) {
+        this.sessionModalAuditRecord = record;
+      }
+    },
+
+    async updateSessionStatus(sessionId, newStatus) {
+      try {
+        await IntarisAPI.updateStatus(sessionId, newStatus);
+        Alpine.store('notify').success(`Session ${newStatus}`);
+        if (this.sessionModal && this.sessionModal.session_id === sessionId) {
+          this.sessionModal.status = newStatus;
+        }
+      } catch (e) {
+        Alpine.store('notify').error('Failed to update status: ' + e.message);
+      }
     },
   });
 
@@ -188,6 +252,10 @@ document.addEventListener('alpine:init', () => {
     _maxReconnectAttempts: 10,
     _maxReconnectDelay: 30000,
 
+    // Browser notifications
+    notificationsEnabled: localStorage.getItem('intaris_notifications') === 'true',
+    notificationPermission: typeof Notification !== 'undefined' ? Notification.permission : 'denied',
+
     connect() {
       if (this.ws) return;
       if (!Alpine.store('auth').authenticated) return;
@@ -199,6 +267,15 @@ document.addEventListener('alpine:init', () => {
           this._reconnectDelay = 1000;
         },
         onMessage: (data) => {
+          // Track pending approvals count globally
+          const nav = Alpine.store('nav');
+          if (data.type === 'evaluated' && data.decision === 'escalate') {
+            nav.pendingApprovals = Math.max(0, (nav.pendingApprovals || 0) + 1);
+            this._showBrowserNotification(data);
+          } else if (data.type === 'decided') {
+            nav.pendingApprovals = Math.max(0, (nav.pendingApprovals || 0) - 1);
+          }
+
           // Dispatch typed events for tabs to listen on
           window.dispatchEvent(new CustomEvent('intaris:ws-message', {
             detail: data,
@@ -244,6 +321,56 @@ document.addEventListener('alpine:init', () => {
         this._maxReconnectDelay,
       );
     },
+
+    // ── Browser notifications ─────────────────────────────────
+
+    async requestNotificationPermission() {
+      if (typeof Notification === 'undefined') return;
+      const result = await Notification.requestPermission();
+      this.notificationPermission = result;
+      if (result === 'granted') {
+        this.notificationsEnabled = true;
+        localStorage.setItem('intaris_notifications', 'true');
+      }
+    },
+
+    toggleNotifications(enabled) {
+      this.notificationsEnabled = enabled;
+      localStorage.setItem('intaris_notifications', enabled ? 'true' : 'false');
+      if (enabled && this.notificationPermission !== 'granted') {
+        this.requestNotificationPermission();
+      }
+    },
+
+    _showBrowserNotification(data) {
+      if (!this.notificationsEnabled) return;
+      if (typeof Notification === 'undefined') return;
+      if (Notification.permission !== 'granted') return;
+      // Don't notify if the tab is focused
+      if (document.hasFocus()) return;
+
+      const risk = data.risk ? ` [${data.risk}]` : '';
+      const title = `Approval needed${risk}`;
+      const body = `Tool: ${data.tool || 'unknown'}\nSession: ${data.session_id || ''}`;
+
+      try {
+        const n = new Notification(title, {
+          body,
+          icon: '/ui/favicon.ico',
+          tag: 'intaris-escalation-' + data.call_id,
+          requireInteraction: true,
+        });
+        n.onclick = () => {
+          window.focus();
+          Alpine.store('nav').setTab('approvals');
+          n.close();
+        };
+        // Auto-close after 30s
+        setTimeout(() => n.close(), 30000);
+      } catch (e) {
+        // Notification API may throw in some contexts
+      }
+    },
   });
 
   // Auto-connect/disconnect WebSocket based on auth state
@@ -261,6 +388,12 @@ document.addEventListener('alpine:init', () => {
     if (!auth.loading && auth.authenticated) {
       clearInterval(_checkAuth);
       Alpine.store('ws').connect();
+      // Fetch initial pending approvals count
+      IntarisAPI.listAudit({ decision: 'escalate', resolved: false, limit: 1 })
+        .then(result => {
+          Alpine.store('nav').pendingApprovals = result.total || 0;
+        })
+        .catch(() => {});
     } else if (!auth.loading && !auth.authenticated) {
       clearInterval(_checkAuth);
     }

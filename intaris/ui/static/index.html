@@ -93,7 +93,13 @@
             ]">
               <button @click="$store.nav.setTab(tab.id)"
                       :class="$store.nav.activeTab === tab.id ? 'tab-btn tab-btn-active' : 'tab-btn'"
-                      x-text="tab.label"></button>
+                      class="relative">
+                <span x-text="tab.label"></span>
+                <span x-show="tab.id === 'approvals' && $store.nav.pendingApprovals > 0"
+                      x-text="$store.nav.pendingApprovals"
+                      class="absolute -top-1 -right-1 min-w-[18px] h-[18px] flex items-center justify-center
+                             rounded-full bg-red-500 text-white text-[10px] font-bold leading-none px-1"></span>
+              </button>
             </template>
           </div>
 
@@ -633,11 +639,7 @@
       <!-- Approvals Tab -->
       <div x-show="$store.nav.activeTab === 'approvals'" x-data="approvalsTab()" x-init="init()">
         <div class="flex items-center justify-between mb-4">
-          <div class="flex items-center gap-2">
-            <h2 class="text-lg font-medium">Pending Approvals</h2>
-            <span x-show="wsConnected" class="w-2 h-2 rounded-full bg-green-500 shrink-0" title="Live updates active"></span>
-            <span x-show="!wsConnected" class="w-2 h-2 rounded-full bg-gray-500 shrink-0" title="Polling (no live connection)"></span>
-          </div>
+          <h2 class="text-lg font-medium">Pending Approvals</h2>
           <span class="badge badge-escalate" x-text="total + ' pending'" x-show="total > 0"></span>
         </div>
 
@@ -714,7 +716,7 @@
 
           <div class="space-y-2">
             <template x-for="item in resolved" :key="item.call_id">
-              <div class="card opacity-80">
+              <div class="card opacity-80 cursor-pointer" @click="toggleResolvedExpand(item)">
                 <div class="flex items-center justify-between">
                   <div class="flex items-center gap-3">
                     <span class="badge badge-escalate">escalate</span>
@@ -729,9 +731,65 @@
                     <span x-text="formatTime(item.resolved_at || item.timestamp)"></span>
                   </div>
                 </div>
-                <div x-show="item.reasoning" class="mt-2 text-sm text-secondary truncate" x-text="truncate(item.reasoning, 150)"></div>
-                <div x-show="item.user_note" class="mt-1 text-xs text-muted">
+                <div x-show="item.reasoning && expandedResolvedId !== item.call_id" class="mt-2 text-sm text-secondary truncate" x-text="truncate(item.reasoning, 150)"></div>
+                <div x-show="item.user_note && expandedResolvedId !== item.call_id" class="mt-1 text-xs text-muted">
                   Note: <span x-text="item.user_note"></span>
+                </div>
+
+                <!-- Expanded Detail -->
+                <div x-show="expandedResolvedId === item.call_id" x-cloak @click.stop class="mt-4 pt-4 border-t border-brand-border">
+                  <!-- Reasoning -->
+                  <template x-if="expandedResolvedRecord?.reasoning">
+                    <div class="mb-3">
+                      <div class="text-xs text-muted mb-1">Reasoning</div>
+                      <div class="text-sm bg-brand-elevated rounded p-3" x-text="expandedResolvedRecord.reasoning"></div>
+                    </div>
+                  </template>
+
+                  <!-- Args (expandable) -->
+                  <div x-show="expandedResolvedRecord?.args_redacted" class="mb-3">
+                    <div class="flex items-center gap-2 mb-1">
+                      <div class="text-xs text-muted">Arguments</div>
+                      <button @click.stop="expandedResolvedArgs === item.call_id ? (expandedResolvedArgs = null) : (expandedResolvedArgs = item.call_id)"
+                              class="text-xs text-brand-accent hover:underline cursor-pointer"
+                              x-text="expandedResolvedArgs === item.call_id ? 'Collapse' : 'Expand'"></button>
+                    </div>
+                    <pre x-show="expandedResolvedArgs !== item.call_id"
+                         class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto cursor-pointer"
+                         @click.stop="expandedResolvedArgs = item.call_id"
+                         x-text="truncateArgs(expandedResolvedRecord?.args_redacted)"></pre>
+                    <pre x-show="expandedResolvedArgs === item.call_id" x-cloak
+                         class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap break-words max-h-96 overflow-y-auto"
+                         x-text="formatArgs(expandedResolvedRecord?.args_redacted)"></pre>
+                  </div>
+
+                  <!-- Resolution -->
+                  <template x-if="expandedResolvedRecord?.user_decision">
+                    <div class="mb-3">
+                      <div class="text-xs text-muted mb-1">Resolution</div>
+                      <div class="flex items-center gap-2">
+                        <span :class="decisionBadgeClass(expandedResolvedRecord.user_decision)" x-text="expandedResolvedRecord.user_decision"></span>
+                        <span class="text-sm" x-text="expandedResolvedRecord.user_note" x-show="expandedResolvedRecord.user_note"></span>
+                        <span class="text-xs text-muted" x-text="formatTime(expandedResolvedRecord.resolved_at)"></span>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- Intention -->
+                  <template x-if="expandedResolvedRecord?.intention">
+                    <div class="mb-3">
+                      <div class="text-xs text-muted mb-1">Intention</div>
+                      <div class="text-sm bg-brand-elevated rounded p-3" x-text="expandedResolvedRecord.intention"></div>
+                    </div>
+                  </template>
+
+                  <!-- Metadata -->
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-muted">
+                    <div>Call ID: <span class="font-mono" x-text="expandedResolvedRecord?.call_id"></span></div>
+                    <div>Classification: <span x-text="expandedResolvedRecord?.classification"></span></div>
+                    <div>Agent: <span x-text="expandedResolvedRecord?.agent_id || 'none'"></span></div>
+                    <div>Path: <span x-text="expandedResolvedRecord?.evaluation_path"></span></div>
+                  </div>
                 </div>
               </div>
             </template>
@@ -1017,6 +1075,27 @@
           </div>
         </template>
 
+        <!-- Browser Notifications -->
+        <div class="card mt-6">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-medium text-secondary">Browser Notifications</h3>
+              <p class="text-xs text-muted mt-1">Receive browser notifications when a tool call needs approval (only when tab is not focused).</p>
+            </div>
+            <div class="flex items-center gap-3">
+              <span x-show="$store.ws.notificationPermission === 'denied'" class="text-xs text-red-400">Blocked by browser</span>
+              <span x-show="$store.ws.notificationPermission === 'default' && $store.ws.notificationsEnabled" class="text-xs text-amber-400">Permission needed</span>
+              <button @click="$store.ws.toggleNotifications(!$store.ws.notificationsEnabled)"
+                      :class="$store.ws.notificationsEnabled ? 'bg-green-600' : 'bg-gray-600'"
+                      class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full transition-colors"
+                      :disabled="$store.ws.notificationPermission === 'denied'">
+                <span :class="$store.ws.notificationsEnabled ? 'translate-x-4' : 'translate-x-0'"
+                      class="inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform"></span>
+              </button>
+            </div>
+          </div>
+        </div>
+
         <!-- Notification Channels -->
         <div class="mt-6">
           <div class="flex items-center justify-between mb-3">
@@ -1107,6 +1186,176 @@
       </div>
 
     </main>
+  </div>
+
+  <!-- ── Session Detail Modal ───────────────────────────────── -->
+  <div x-data x-show="$store.nav.sessionModal || $store.nav.sessionModalLoading" x-cloak
+       class="modal-overlay" @click.self="$store.nav.closeSessionModal()" @keydown.escape.window="$store.nav.closeSessionModal()">
+    <div class="modal-content max-w-3xl" @click.stop>
+      <!-- Loading state -->
+      <div x-show="$store.nav.sessionModalLoading && !$store.nav.sessionModal" class="text-center py-8 text-secondary">
+        Loading session...
+      </div>
+
+      <!-- Session detail -->
+      <template x-if="$store.nav.sessionModal">
+        <div>
+          <!-- Header -->
+          <div class="flex items-center justify-between mb-4">
+            <div class="flex items-center gap-3">
+              <span :class="'badge badge-' + ($store.nav.sessionModal.status || 'active')" x-text="$store.nav.sessionModal.status"></span>
+              <span class="font-mono text-sm text-brand-accent" x-text="$store.nav.sessionModal.session_id"></span>
+            </div>
+            <button @click="$store.nav.closeSessionModal()" class="text-muted hover:text-[#E6EDF3] text-lg leading-none px-1">&times;</button>
+          </div>
+
+          <!-- Stats Grid -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+            <div class="text-center">
+              <div class="text-lg font-bold text-emerald-400" x-text="$store.nav.sessionModal.approved_count"></div>
+              <div class="text-xs text-muted">Approved</div>
+            </div>
+            <div class="text-center">
+              <div class="text-lg font-bold text-red-400" x-text="$store.nav.sessionModal.denied_count"></div>
+              <div class="text-xs text-muted">Denied</div>
+            </div>
+            <div class="text-center">
+              <div class="text-lg font-bold text-amber-400" x-text="$store.nav.sessionModal.escalated_count"></div>
+              <div class="text-xs text-muted">Escalated</div>
+            </div>
+            <div class="text-center">
+              <div class="text-lg font-bold" x-text="$store.nav.sessionModal.total_calls"></div>
+              <div class="text-xs text-muted">Total</div>
+            </div>
+          </div>
+
+          <!-- Metadata -->
+          <div class="flex flex-wrap gap-x-1.5 gap-y-1 text-xs text-muted mb-4">
+            <span>Created: <span x-text="new Date($store.nav.sessionModal.created_at).toLocaleString()"></span></span>
+            <span class="text-muted/50">&middot;</span>
+            <span>Last Active: <span x-text="new Date($store.nav.sessionModal.last_activity_at || $store.nav.sessionModal.created_at).toLocaleString()"></span></span>
+            <template x-if="$store.nav.sessionModal.details?.source">
+              <span><span class="text-muted/50">&middot;</span> Agent: <span class="font-mono" x-text="$store.nav.sessionModal.details?.agent_type ? $store.nav.sessionModal.details.source + ':' + $store.nav.sessionModal.details.agent_type : $store.nav.sessionModal.details.source"></span></span>
+            </template>
+            <span class="text-muted/50">&middot;</span>
+            <span>User: <span class="font-mono" x-text="$store.nav.sessionModal.user_id"></span></span>
+          </div>
+
+          <!-- Intention -->
+          <div class="mb-3">
+            <div class="text-xs text-muted mb-1">Intention</div>
+            <div class="text-sm" x-text="$store.nav.sessionModal.intention"></div>
+          </div>
+
+          <!-- Details -->
+          <template x-if="$store.nav.sessionModal.details">
+            <div class="mb-3">
+              <div class="text-xs text-muted mb-1">Details</div>
+              <pre class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto" x-text="JSON.stringify($store.nav.sessionModal.details, null, 2)"></pre>
+            </div>
+          </template>
+
+          <!-- Policy -->
+          <template x-if="$store.nav.sessionModal.policy">
+            <div class="mb-3">
+              <div class="text-xs text-muted mb-1">Policy</div>
+              <pre class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto" x-text="JSON.stringify($store.nav.sessionModal.policy, null, 2)"></pre>
+            </div>
+          </template>
+
+          <!-- Parent Session -->
+          <template x-if="$store.nav.sessionModal.parent_session_id">
+            <div class="mb-3">
+              <div class="text-xs text-muted mb-1">Parent Session</div>
+              <span class="font-mono text-xs text-brand-accent cursor-pointer hover:underline"
+                    @click="$store.nav.openSessionModal($store.nav.sessionModal.parent_session_id)"
+                    x-text="$store.nav.sessionModal.parent_session_id"></span>
+            </div>
+          </template>
+
+          <!-- Status Actions -->
+          <div class="flex gap-2 mb-4">
+            <template x-if="$store.nav.sessionModal.status === 'active' || $store.nav.sessionModal.status === 'idle'">
+              <div class="flex gap-2">
+                <button @click="$store.nav.updateSessionStatus($store.nav.sessionModal.session_id, 'suspended')" class="btn-secondary text-sm">Suspend</button>
+                <button @click="$store.nav.updateSessionStatus($store.nav.sessionModal.session_id, 'terminated')" class="btn-danger text-sm">Terminate</button>
+                <button x-show="$store.nav.sessionModal.status === 'idle'"
+                        @click="$store.nav.updateSessionStatus($store.nav.sessionModal.session_id, 'completed')" class="btn-secondary text-sm">Complete</button>
+              </div>
+            </template>
+            <template x-if="$store.nav.sessionModal.status === 'suspended'">
+              <button @click="$store.nav.updateSessionStatus($store.nav.sessionModal.session_id, 'active')" class="btn-success text-sm">Reactivate</button>
+            </template>
+          </div>
+
+          <!-- Audit Feed -->
+          <div class="mt-3 border-t border-brand-border pt-3">
+            <div class="text-xs text-muted mb-2">Recent Evaluations</div>
+            <div x-show="$store.nav.sessionModalAudit.length === 0" class="text-sm text-muted">No evaluations yet</div>
+            <div class="space-y-1">
+              <template x-for="r in $store.nav.sessionModalAudit" :key="r.call_id">
+                <div>
+                  <div class="flex items-center justify-between py-1.5 text-sm cursor-pointer hover:bg-brand-elevated/50 rounded px-2 -mx-2"
+                       @click.stop="$store.nav.toggleModalAuditExpand(r)">
+                    <div class="flex items-center gap-2">
+                      <span :class="'badge badge-' + (r.decision || 'low')" x-text="r.decision"></span>
+                      <span x-show="r.decision === 'escalate' && r.user_decision"
+                            :class="'badge badge-' + (r.user_decision || 'low')" x-text="r.user_decision"></span>
+                      <span class="font-mono text-xs" x-text="r.tool || r.record_type"></span>
+                      <span :class="'badge badge-' + (r.risk || 'low')" x-text="r.risk" x-show="r.risk" class="text-xs"></span>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span x-show="r.evaluation_path" class="text-xs badge" :class="r.evaluation_path === 'critical' ? 'badge-deny' : 'badge-' + (r.evaluation_path || 'fast')" x-text="r.evaluation_path"></span>
+                      <span class="text-xs text-muted" x-text="(r.latency_ms || 0) + 'ms'"></span>
+                      <span class="text-xs text-muted" x-text="new Date(r.timestamp).toLocaleString()"></span>
+                    </div>
+                  </div>
+
+                  <!-- Expanded Audit Detail -->
+                  <div x-show="$store.nav.sessionModalAuditExpandedId === r.call_id" x-cloak
+                       class="ml-4 mt-1 mb-2 p-3 bg-brand-elevated rounded-lg border border-brand-border text-sm">
+                    <template x-if="$store.nav.sessionModalAuditRecord?.reasoning">
+                      <div class="mb-2">
+                        <div class="text-xs text-muted mb-1">Reasoning</div>
+                        <div class="text-sm" x-text="$store.nav.sessionModalAuditRecord.reasoning"></div>
+                      </div>
+                    </template>
+                    <template x-if="$store.nav.sessionModalAuditRecord?.intention">
+                      <div class="mb-2">
+                        <div class="text-xs text-muted mb-1">Intention</div>
+                        <div class="text-sm" x-text="$store.nav.sessionModalAuditRecord.intention"></div>
+                      </div>
+                    </template>
+                    <template x-if="$store.nav.sessionModalAuditRecord?.args_redacted">
+                      <div class="mb-2">
+                        <div class="text-xs text-muted mb-1">Arguments (redacted)</div>
+                        <pre class="text-xs bg-brand-bg rounded p-2 overflow-x-auto" x-text="typeof $store.nav.sessionModalAuditRecord.args_redacted === 'string' ? $store.nav.sessionModalAuditRecord.args_redacted : JSON.stringify($store.nav.sessionModalAuditRecord.args_redacted, null, 2)"></pre>
+                      </div>
+                    </template>
+                    <template x-if="$store.nav.sessionModalAuditRecord?.user_decision">
+                      <div class="mb-2">
+                        <div class="text-xs text-muted mb-1">Resolution</div>
+                        <div class="flex items-center gap-2">
+                          <span :class="'badge badge-' + ($store.nav.sessionModalAuditRecord.user_decision || 'low')" x-text="$store.nav.sessionModalAuditRecord.user_decision"></span>
+                          <span class="text-sm" x-text="$store.nav.sessionModalAuditRecord.user_note" x-show="$store.nav.sessionModalAuditRecord.user_note"></span>
+                          <span class="text-xs text-muted" x-text="new Date($store.nav.sessionModalAuditRecord.resolved_at).toLocaleString()"></span>
+                        </div>
+                      </div>
+                    </template>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-muted">
+                      <div>Call ID: <span class="font-mono" x-text="$store.nav.sessionModalAuditRecord?.call_id"></span></div>
+                      <div>Classification: <span x-text="$store.nav.sessionModalAuditRecord?.classification"></span></div>
+                      <div>Agent: <span x-text="$store.nav.sessionModalAuditRecord?.agent_id || 'none'"></span></div>
+                      <div>Path: <span x-text="$store.nav.sessionModalAuditRecord?.evaluation_path"></span></div>
+                    </div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
   </div>
 
   <!-- ── Toast Notifications ─────────────────────────────────── -->
