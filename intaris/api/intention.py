@@ -45,6 +45,7 @@ async def declare_intention(
             details=request.details,
             policy=request.policy,
             parent_session_id=request.parent_session_id,
+            agent_id=ctx.agent_id,
         )
 
         # Publish session_created event
@@ -55,6 +56,7 @@ async def declare_intention(
                     "type": "session_created",
                     "session_id": request.session_id,
                     "user_id": ctx.user_id,
+                    "agent_id": ctx.agent_id,
                     "intention": request.intention,
                     "status": "active",
                     "parent_session_id": request.parent_session_id,
@@ -100,6 +102,7 @@ async def get_session(
 async def list_sessions(
     ctx: SessionContext = Depends(get_session_context),
     status: str | None = Query(None),
+    agent_id: str | None = Query(None, description="Filter by agent_id"),
     q: str | None = Query(None, description="Search session_id and intention"),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
@@ -113,6 +116,7 @@ async def list_sessions(
         result = store.list_sessions(
             user_id=ctx.user_id,
             status=status,
+            agent_id=agent_id,
             search=q,
             page=page,
             limit=limit,

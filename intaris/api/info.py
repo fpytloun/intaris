@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from intaris.api.deps import SessionContext, get_session_context
 
@@ -38,23 +38,38 @@ async def whoami() -> dict:
 async def stats(
     request: Request,
     ctx: SessionContext = Depends(get_session_context),
+    agent_id: str | None = Query(None, description="Filter by agent_id"),
 ) -> dict:
     """Return aggregated statistics for the dashboard.
 
     Computes session counts, evaluation totals, decision distribution,
-    pending approvals, and the list of known users (for impersonation).
+    pending approvals, and the list of known users/agents.
+
+    When agent_id is provided, all audit_log and session queries are
+    filtered to that agent.
     """
     from intaris.server import _get_db
 
     try:
         db = _get_db()
 
+        # Build reusable WHERE fragments for agent_id filtering
+        audit_agent_cond = ""
+        audit_agent_params: tuple[str, ...] = ()
+        session_agent_cond = ""
+        session_agent_params: tuple[str, ...] = ()
+        if agent_id:
+            audit_agent_cond = " AND agent_id = ?"
+            audit_agent_params = (agent_id,)
+            session_agent_cond = " AND agent_id = ?"
+            session_agent_params = (agent_id,)
+
         # Session counts by status
         with db.cursor() as cur:
             cur.execute(
                 "SELECT status, COUNT(*) FROM sessions "
-                "WHERE user_id = ? GROUP BY status",
-                (ctx.user_id,),
+                f"WHERE user_id = ?{session_agent_cond} GROUP BY status",
+                (ctx.user_id, *session_agent_params),
             )
             status_counts = dict(cur.fetchall())
 
@@ -64,8 +79,8 @@ async def stats(
         with db.cursor() as cur:
             cur.execute(
                 "SELECT decision, COUNT(*) FROM audit_log "
-                "WHERE user_id = ? GROUP BY decision",
-                (ctx.user_id,),
+                f"WHERE user_id = ?{audit_agent_cond} GROUP BY decision",
+                (ctx.user_id, *audit_agent_params),
             )
             decision_counts = dict(cur.fetchall())
 
@@ -82,24 +97,22 @@ async def stats(
             cur.execute(
                 "SELECT COUNT(*) FROM audit_log "
                 "WHERE user_id = ? AND decision = 'escalate' "
-                "AND user_decision IS NULL",
-                (ctx.user_id,),
+                f"AND user_decision IS NULL{audit_agent_cond}",
+                (ctx.user_id, *audit_agent_params),
             )
             pending_approvals = cur.fetchone()[0]
 
         # Average latency
         with db.cursor() as cur:
             cur.execute(
-                "SELECT AVG(latency_ms) FROM audit_log WHERE user_id = ?",
-                (ctx.user_id,),
+                f"SELECT AVG(latency_ms) FROM audit_log "
+                f"WHERE user_id = ?{audit_agent_cond}",
+                (ctx.user_id, *audit_agent_params),
             )
             avg_latency = cur.fetchone()[0]
             avg_latency_ms = round(avg_latency, 1) if avg_latency else 0.0
 
         # Known users (for impersonation dropdown).
-        # Only return the full list when user switching is allowed
-        # (unbound API key). Bound users only see their own ID to
-        # prevent cross-tenant user enumeration.
         if not ctx.user_bound:
             with db.cursor() as cur:
                 cur.execute("SELECT DISTINCT user_id FROM sessions ORDER BY user_id")
@@ -107,13 +120,23 @@ async def stats(
         else:
             users = [ctx.user_id]
 
+        # Known agents (for agent filter dropdown)
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT agent_id FROM audit_log "
+                "WHERE user_id = ? AND agent_id IS NOT NULL "
+                "ORDER BY agent_id",
+                (ctx.user_id,),
+            )
+            agents = [row[0] for row in cur.fetchall()]
+
         # Risk distribution (for pie chart)
         with db.cursor() as cur:
             cur.execute(
                 "SELECT risk, COUNT(*) FROM audit_log "
-                "WHERE user_id = ? AND risk IS NOT NULL "
+                f"WHERE user_id = ? AND risk IS NOT NULL{audit_agent_cond} "
                 "GROUP BY risk",
-                (ctx.user_id,),
+                (ctx.user_id, *audit_agent_params),
             )
             risk_distribution = dict(cur.fetchall())
 
@@ -121,8 +144,8 @@ async def stats(
         with db.cursor() as cur:
             cur.execute(
                 "SELECT evaluation_path, COUNT(*) FROM audit_log "
-                "WHERE user_id = ? GROUP BY evaluation_path",
-                (ctx.user_id,),
+                f"WHERE user_id = ?{audit_agent_cond} GROUP BY evaluation_path",
+                (ctx.user_id, *audit_agent_params),
             )
             path_distribution = dict(cur.fetchall())
 
@@ -130,9 +153,10 @@ async def stats(
         with db.cursor() as cur:
             cur.execute(
                 "SELECT classification, COUNT(*) FROM audit_log "
-                "WHERE user_id = ? AND classification IS NOT NULL "
+                f"WHERE user_id = ? AND classification IS NOT NULL"
+                f"{audit_agent_cond} "
                 "GROUP BY classification",
-                (ctx.user_id,),
+                (ctx.user_id, *audit_agent_params),
             )
             classification_distribution = dict(cur.fetchall())
 
@@ -140,9 +164,9 @@ async def stats(
         with db.cursor() as cur:
             cur.execute(
                 "SELECT tool, COUNT(*) as cnt FROM audit_log "
-                "WHERE user_id = ? AND tool IS NOT NULL "
+                f"WHERE user_id = ? AND tool IS NOT NULL{audit_agent_cond} "
                 "GROUP BY tool ORDER BY cnt DESC LIMIT 10",
-                (ctx.user_id,),
+                (ctx.user_id, *audit_agent_params),
             )
             top_tools = [{"tool": row[0], "count": row[1]} for row in cur.fetchall()]
 
@@ -152,9 +176,9 @@ async def stats(
             cur.execute(
                 "SELECT strftime('%Y-%m-%dT%H:00', timestamp) as hour, "
                 "COUNT(*) as cnt FROM audit_log "
-                "WHERE user_id = ? AND timestamp >= ? "
+                f"WHERE user_id = ? AND timestamp >= ?{audit_agent_cond} "
                 "GROUP BY hour ORDER BY hour",
-                (ctx.user_id, cutoff),
+                (ctx.user_id, cutoff, *audit_agent_params),
             )
             activity_timeline = [
                 {"hour": row[0], "count": row[1]} for row in cur.fetchall()
@@ -204,6 +228,7 @@ async def stats(
             "top_tools": top_tools,
             "activity_timeline": activity_timeline,
             "users": users,
+            "agents": agents,
             "mcp": mcp_stats,
         }
     except Exception:

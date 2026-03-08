@@ -59,6 +59,12 @@ function approvalsTab() {
           this.loadResolved();
         }
       });
+      window.addEventListener('intaris:agent-changed', () => {
+        if (this.initialized && this._tabActive) {
+          this.load();
+          this.loadResolved();
+        }
+      });
       window.addEventListener('intaris:logout', () => {
         this.stopPolling();
         clearTimeout(this._loadDebounce);
@@ -122,11 +128,14 @@ function approvalsTab() {
     async load() {
       this.loading = !this.initialized;
       try {
-        const result = await IntarisAPI.listAudit({
+        const params = {
           decision: 'escalate',
           resolved: false,
           limit: 50,
-        });
+        };
+        const agentFilter = Alpine.store('nav').selectedAgent;
+        if (agentFilter) params.agent_id = agentFilter;
+        const result = await IntarisAPI.listAudit(params);
         this.pending = this._filterResolved(result.items || []);
         this.total = this.pending.length;
       } catch (e) {
@@ -139,12 +148,15 @@ function approvalsTab() {
     async loadResolved() {
       this.resolvedLoading = true;
       try {
-        const result = await IntarisAPI.listAudit({
+        const params = {
           decision: 'escalate',
           resolved: true,
           page: this.resolvedPage,
           limit: 20,
-        });
+        };
+        const agentFilter = Alpine.store('nav').selectedAgent;
+        if (agentFilter) params.agent_id = agentFilter;
+        const result = await IntarisAPI.listAudit(params);
         this.resolved = result.items || [];
         this.resolvedTotal = result.total;
         this.resolvedPages = result.pages;

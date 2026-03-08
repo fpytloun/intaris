@@ -35,6 +35,7 @@ class SessionStore:
         details: dict[str, Any] | None = None,
         policy: dict[str, Any] | None = None,
         parent_session_id: str | None = None,
+        agent_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a new session.
 
@@ -47,6 +48,7 @@ class SessionStore:
             policy: Optional JSON-serializable session policy
                     (custom classifier rules, risk overrides).
             parent_session_id: Optional parent session for continuation chains.
+            agent_id: Optional agent identifier (from X-Agent-Id header).
 
         Returns:
             The created session as a dict.
@@ -64,9 +66,9 @@ class SessionStore:
                     """
                     INSERT INTO sessions
                         (session_id, user_id, intention, details, policy,
-                         last_activity_at, parent_session_id,
+                         last_activity_at, parent_session_id, agent_id,
                          created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session_id,
@@ -76,6 +78,7 @@ class SessionStore:
                         policy_json,
                         now,
                         parent_session_id,
+                        agent_id,
                         now,
                         now,
                     ),
@@ -352,6 +355,7 @@ class SessionStore:
         user_id: str,
         status: str | None = None,
         search: str | None = None,
+        agent_id: str | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -361,6 +365,7 @@ class SessionStore:
             user_id: Tenant identifier.
             status: Optional status filter (exact match).
             search: Optional text search on session_id and intention.
+            agent_id: Optional agent_id filter (exact match).
             page: Page number (1-indexed).
             limit: Max results per page.
 
@@ -376,6 +381,10 @@ class SessionStore:
         if status:
             conditions.append("status = ?")
             params.append(status)
+
+        if agent_id:
+            conditions.append("agent_id = ?")
+            params.append(agent_id)
 
         if search:
             conditions.append("(session_id LIKE ? OR intention LIKE ?)")

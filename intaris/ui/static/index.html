@@ -97,7 +97,7 @@
             </template>
           </div>
 
-          <!-- User & Logout -->
+          <!-- User & Agent & Logout -->
           <div class="flex items-center gap-3">
             <!-- User Switcher (only for wildcard keys) -->
             <template x-if="$store.auth.identity?.can_switch_user && $store.auth.users.length > 1">
@@ -106,6 +106,18 @@
                       @change="$store.auth.switchUser($event.target.value)">
                 <template x-for="u in $store.auth.users" :key="u">
                   <option :value="u" x-text="u" :selected="u === $store.auth.selectedUser"></option>
+                </template>
+              </select>
+            </template>
+
+            <!-- Agent Filter -->
+            <template x-if="$store.nav.agents.length > 0">
+              <select class="select text-sm py-1.5"
+                      :value="$store.nav.selectedAgent"
+                      @change="$store.nav.setAgent($event.target.value)">
+                <option value="">All Agents</option>
+                <template x-for="a in $store.nav.agents" :key="a">
+                  <option :value="a" x-text="a" :selected="a === $store.nav.selectedAgent"></option>
                 </template>
               </select>
             </template>

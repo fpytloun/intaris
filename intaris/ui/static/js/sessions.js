@@ -32,6 +32,9 @@ function sessionsTab() {
       window.addEventListener('intaris:user-changed', () => {
         if (this.initialized) this.load();
       });
+      window.addEventListener('intaris:agent-changed', () => {
+        if (this.initialized) this.load();
+      });
 
       // Subscribe to WebSocket events for live session updates
       window.addEventListener('intaris:ws-message', (e) => {
@@ -156,6 +159,8 @@ function sessionsTab() {
         const params = { page: this.page, limit: 20 };
         if (this.statusFilter) params.status = this.statusFilter;
         if (this.searchQuery) params.q = this.searchQuery;
+        const agentFilter = Alpine.store('nav').selectedAgent;
+        if (agentFilter) params.agent_id = agentFilter;
         const result = await IntarisAPI.listSessions(params);
         this._mergeSessions(result.items || []);
         this.total = result.total;

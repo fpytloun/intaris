@@ -100,6 +100,7 @@ document.addEventListener('alpine:init', () => {
       try {
         const stats = await IntarisAPI.stats();
         this.users = stats.users || [];
+        Alpine.store('nav').agents = stats.agents || [];
       } catch {
         this.users = [];
       }
@@ -125,6 +126,8 @@ document.addEventListener('alpine:init', () => {
       this.users = [];
       this.selectedUser = '';
       this.error = '';
+      Alpine.store('nav').selectedAgent = '';
+      Alpine.store('nav').agents = [];
       window.dispatchEvent(new CustomEvent('intaris:logout'));
     },
   });
@@ -132,11 +135,20 @@ document.addEventListener('alpine:init', () => {
   // ── Nav Store ────────────────────────────────────────────────
   Alpine.store('nav', {
     activeTab: 'dashboard',
+    selectedAgent: '',
+    agents: [],
 
     setTab(tab) {
       this.activeTab = tab;
       window.dispatchEvent(new CustomEvent('intaris:tab-changed', {
         detail: { tab }
+      }));
+    },
+
+    setAgent(agentId) {
+      this.selectedAgent = agentId;
+      window.dispatchEvent(new CustomEvent('intaris:agent-changed', {
+        detail: { agentId }
       }));
     },
   });

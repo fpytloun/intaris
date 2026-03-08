@@ -64,6 +64,7 @@ class SessionResponse(BaseModel):
 
     session_id: str
     user_id: str
+    agent_id: str | None = None
     intention: str
     details: dict[str, Any] | None = None
     policy: dict[str, Any] | None = None

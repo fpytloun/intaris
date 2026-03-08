@@ -126,8 +126,8 @@ const IntarisAPI = {
     return this.get('/whoami');
   },
 
-  stats() {
-    return this.get('/stats');
+  stats(params = {}) {
+    return this.get('/stats', params);
   },
 
   config() {

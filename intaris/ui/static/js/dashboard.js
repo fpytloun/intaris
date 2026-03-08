@@ -140,6 +140,9 @@ function dashboardTab() {
       window.addEventListener('intaris:user-changed', () => {
         if (this.initialized) this.load();
       });
+      window.addEventListener('intaris:agent-changed', () => {
+        if (this.initialized) this.load();
+      });
       window.addEventListener('intaris:logout', () => {
         this._stopPeriodicRefresh();
         this._destroyAllCharts();
@@ -245,13 +248,23 @@ function dashboardTab() {
     async load() {
       this.loading = true;
       try {
+        const agentFilter = Alpine.store('nav').selectedAgent;
+        const statsParams = agentFilter ? { agent_id: agentFilter } : {};
+        const auditParams = { limit: 10 };
+        if (agentFilter) auditParams.agent_id = agentFilter;
+
         const [stats, audit] = await Promise.all([
-          IntarisAPI.stats(),
-          IntarisAPI.listAudit({ limit: 10 }),
+          IntarisAPI.stats(statsParams),
+          IntarisAPI.listAudit(auditParams),
         ]);
         this.stats = stats;
         this.recentActivity = audit.items || [];
         this.initialized = true;
+
+        // Update agents list in nav store (always from unfiltered stats)
+        if (stats.agents) {
+          Alpine.store('nav').agents = stats.agents;
+        }
 
         // Render charts after data is loaded (next tick for DOM readiness)
         this.$nextTick(() => this._renderAllCharts());

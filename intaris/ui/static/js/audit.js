@@ -31,6 +31,9 @@ function auditTab() {
       window.addEventListener('intaris:user-changed', () => {
         if (this.initialized) this.load();
       });
+      window.addEventListener('intaris:agent-changed', () => {
+        if (this.initialized) this.load();
+      });
 
       // Subscribe to WebSocket events for live audit updates
       window.addEventListener('intaris:ws-message', (e) => {
@@ -95,6 +98,8 @@ function auditTab() {
         if (this.filterDecision) params.decision = this.filterDecision;
         if (this.filterRisk) params.risk = this.filterRisk;
         if (this.filterPath) params.path = this.filterPath;
+        const agentFilter = Alpine.store('nav').selectedAgent;
+        if (agentFilter) params.agent_id = agentFilter;
         const result = await IntarisAPI.listAudit(params);
         this.records = result.items || [];
         this.total = result.total;

@@ -152,10 +152,33 @@ class Database:
         # tasks are cleaned up periodically, so this is safe.
         self._migrate_analysis_tasks_check(conn)
 
+        # Migration: add agent_id to sessions (global agent filter)
+        if not self._column_exists(conn, "sessions", "agent_id"):
+            conn.execute("ALTER TABLE sessions ADD COLUMN agent_id TEXT")
+            # Backfill from the earliest audit_log record per session
+            conn.execute(
+                """
+                UPDATE sessions SET agent_id = (
+                    SELECT agent_id FROM audit_log
+                    WHERE audit_log.user_id = sessions.user_id
+                      AND audit_log.session_id = sessions.session_id
+                      AND audit_log.agent_id IS NOT NULL
+                    ORDER BY timestamp ASC
+                    LIMIT 1
+                ) WHERE agent_id IS NULL
+                """
+            )
+            logger.info("Migration: added agent_id column to sessions (backfilled)")
+
         # Index for idle session sweep (status + last_activity_at)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
             "ON sessions(status, last_activity_at)"
+        )
+
+        # Index for agent_id filtering on audit_log
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(user_id, agent_id)"
         )
 
     @staticmethod
