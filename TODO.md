@@ -52,8 +52,6 @@ Approve or deny this call in the Intaris UI, then retry.
 - Session links does not work, it should show session details. We can use modal to open session details if linking to Sessions properly is an issue
 - There is online green dot on Approvals (Pending Approvals) but it is redundant as whole app now uses websockets and there is online status on intaris.
 
-- Session recording (Event Store): full-fidelity ndjson event logs with S3/filesystem backends, chunked storage, in-memory buffering, auto-append from existing endpoints, REST API (POST/GET events, flush), UI player with live tail + play/pause/speed controls, OpenCode plugin recording hooks, Claude Code recording hooks
-
 ## In progress
 
 ## Major
@@ -74,6 +72,7 @@ Approve or deny this call in the Intaris UI, then retry.
 - Prometheus metrics, we want to know more about performance, like having histogram for evaluations, etc.
 - Grafana dashboard
 
-## Open questions?
+## Issue
 
-- does evaluator receives recent approve/deny decisions from within that session? It should to be able to let further calls pass.
+- When user resumes auto-suspended session it gets suspended again. There should be also reason and overall it should be same as for tool escalate
+Reason for suspending session was: "Session is suspended — evaluation denied. Reason: Child intention conflicts with parent session: Investigating system prompt tuning is about prompt/LLM behavior, which does not support or decompose the task of designing a session storage architecture for Intaris; therefore it is outside the parent's scope." where intention was "Investigating system-prompt tuning for the Intaris project by examining evaluator, decision, and prompts code to inform the session storage architecture design." and it was child session to "Intaris session storage architecture design"

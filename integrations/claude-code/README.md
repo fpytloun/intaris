@@ -39,6 +39,7 @@ export INTARIS_AGENT_ID=claude-code        # optional, defaults to "claude-code"
 export INTARIS_USER_ID=your-username       # optional if API key maps to user
 export INTARIS_FAIL_OPEN=false             # optional, defaults to false
 export INTARIS_INTENTION=""                # optional, auto-generated from cwd
+export INTARIS_ALLOW_PATHS=~/src           # optional, allow reads from sibling projects
 export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disabled)
 export INTARIS_SESSION_RECORDING=false     # optional, enable session recording
 export INTARIS_DEBUG=false                 # optional, enable stderr logging
@@ -52,6 +53,7 @@ export INTARIS_DEBUG=false                 # optional, enable stderr logging
 | `INTARIS_USER_ID` | (empty) | User ID (optional if API key maps to a user) |
 | `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed when Intaris is unreachable. Default is `false` (fail-closed) -- tool calls are blocked when Intaris is down. |
 | `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"Claude Code coding session in <cwd>"` |
+| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories to allow reads from without LLM evaluation. Supports `~` expansion. E.g., `~/src` allows reads from all projects under `~/src/`. |
 | `INTARIS_CHECKPOINT_INTERVAL` | `25` | Number of evaluate calls between periodic checkpoints. Set to `0` to disable checkpoints. Each checkpoint consumes one rate limit slot. |
 | `INTARIS_SESSION_RECORDING` | `false` | Enable session recording. When `true`, tool calls and results are recorded to the event store for playback and analysis. |
 | `INTARIS_DEBUG` | `false` | Enable debug logging to stderr |

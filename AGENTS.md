@@ -790,15 +790,16 @@ Client integrations live in `integrations/` and provide two approaches for each 
 
 - **Plugin**: `integrations/opencode/intaris.ts` — TypeScript plugin using `tool.execute.before` hook. Creates Intaris sessions on `session.created` (including child sessions with `parent_session_id`), evaluates every tool call before execution, sends periodic checkpoints, and signals session completion on `session.deleted`.
 - **MCP config**: `integrations/opencode/opencode.json` — Remote MCP server pointing at `/mcp`.
-- **Env vars**: `INTARIS_URL`, `INTARIS_API_KEY`, `INTARIS_AGENT_ID` (default: `opencode`), `INTARIS_USER_ID`, `INTARIS_FAIL_OPEN` (default: `false`), `INTARIS_INTENTION`, `INTARIS_CHECKPOINT_INTERVAL` (default: `25`, `0`=disabled).
+- **Env vars**: `INTARIS_URL`, `INTARIS_API_KEY`, `INTARIS_AGENT_ID` (default: `opencode`), `INTARIS_USER_ID`, `INTARIS_FAIL_OPEN` (default: `false`), `INTARIS_INTENTION`, `INTARIS_ALLOW_PATHS` (comma-separated parent dirs for cross-project reads, e.g., `~/src`), `INTARIS_CHECKPOINT_INTERVAL` (default: `25`, `0`=disabled).
 - **Install**: Copy `intaris.ts` to `~/.config/opencode/plugins/` (global) or `.opencode/plugins/` (project).
+- **OpenCode permissions**: Set `"permission": "allow"` in `opencode.jsonc` to disable OpenCode's built-in approval prompts and let Intaris be the sole gatekeeper. See [OpenCode Permissions](https://opencode.ai/docs/permissions/).
 - **Behavioral analysis**: Tracks per-session statistics (call count, approve/deny/escalate breakdown, recent tools). Sends periodic checkpoints via `POST /checkpoint`. Signals completion via `PATCH /session/{id}/status` + `POST /session/{id}/agent-summary` on session deletion.
 
 ### Claude Code
 
 - **Hooks**: `integrations/claude-code/hooks.json` — `SessionStart` creates session, `PreToolUse` evaluates tool calls and sends periodic checkpoints, `Stop` signals session completion and sends agent summary.
 - **Scripts**: `integrations/claude-code/scripts/session.sh`, `evaluate.sh`, and `stop.sh` — Bash scripts using `curl` and `jq`. Session state tracked as JSON in `/tmp/intaris_state_*.json`.
-- **Env vars**: Same as OpenCode, plus `INTARIS_DEBUG` (default: `false`) for stderr logging.
+- **Env vars**: Same as OpenCode, plus `INTARIS_ALLOW_PATHS` (comma-separated parent dirs for cross-project reads), `INTARIS_DEBUG` (default: `false`) for stderr logging.
 - **Install**: Copy scripts to `~/.claude/scripts/`, merge `hooks.json` into `~/.claude/settings.json`.
 - **Behavioral analysis**: Tracks per-session statistics in JSON state files. Sends periodic checkpoints via `POST /checkpoint`. Signals completion via `PATCH /session/{id}/status` + `POST /session/{id}/agent-summary` on session stop.
 

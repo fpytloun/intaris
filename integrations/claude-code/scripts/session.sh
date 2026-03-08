@@ -11,6 +11,7 @@
 #   INTARIS_AGENT_ID   - Agent ID (default: claude-code)
 #   INTARIS_USER_ID    - User ID (optional if API key maps to user)
 #   INTARIS_INTENTION  - Session intention override (default: auto-generated)
+#   INTARIS_ALLOW_PATHS - Comma-separated parent directories to allow reads from (e.g., ~/src)
 #   INTARIS_DEBUG      - Enable debug logging to stderr (default: false)
 
 set -euo pipefail
@@ -20,6 +21,7 @@ INTARIS_API_KEY="${INTARIS_API_KEY:-}"
 INTARIS_AGENT_ID="${INTARIS_AGENT_ID:-claude-code}"
 INTARIS_USER_ID="${INTARIS_USER_ID:-}"
 INTARIS_INTENTION="${INTARIS_INTENTION:-}"
+INTARIS_ALLOW_PATHS="${INTARIS_ALLOW_PATHS:-}"
 INTARIS_DEBUG="${INTARIS_DEBUG:-false}"
 
 log() {
@@ -65,11 +67,41 @@ if [ -n "$INTARIS_USER_ID" ]; then
     HEADERS+=(-H "X-User-Id: $INTARIS_USER_ID")
 fi
 
+# Build allow_paths policy from INTARIS_ALLOW_PATHS (comma-separated directories)
+# E.g., "~/src,~/projects" → ["/home/user/src/*", "/home/user/projects/*"]
+POLICY_JSON="null"
+if [ -n "$INTARIS_ALLOW_PATHS" ]; then
+    ALLOW_PATTERNS="[]"
+    IFS=',' read -ra AP_ENTRIES <<< "$INTARIS_ALLOW_PATHS"
+    for ap_entry in "${AP_ENTRIES[@]}"; do
+        ap_entry=$(echo "$ap_entry" | xargs)  # trim whitespace
+        [ -z "$ap_entry" ] && continue
+        # Expand ~ to home directory
+        if [[ "$ap_entry" == "~/"* ]] || [[ "$ap_entry" == "~" ]]; then
+            ap_entry="${HOME}${ap_entry:1}"
+        fi
+        # Ensure trailing /* for glob matching
+        if [[ "$ap_entry" != *"*" ]]; then
+            if [[ "$ap_entry" == */ ]]; then
+                ap_entry="${ap_entry}*"
+            else
+                ap_entry="${ap_entry}/*"
+            fi
+        fi
+        ALLOW_PATTERNS=$(echo "$ALLOW_PATTERNS" | jq --arg pat "$ap_entry" '. + [$pat]')
+    done
+    if [ "$(echo "$ALLOW_PATTERNS" | jq 'length')" -gt 0 ]; then
+        POLICY_JSON=$(jq -n --argjson ap "$ALLOW_PATTERNS" '{"allow_paths": $ap}')
+    fi
+    log "Allow paths policy: $POLICY_JSON"
+fi
+
 # Build request body
 BODY=$(jq -n \
     --arg session_id "$INTARIS_SESSION_ID" \
     --arg intention "$INTENTION" \
     --arg cwd "$CWD" \
+    --argjson policy "$POLICY_JSON" \
     '{
         session_id: $session_id,
         intention: $intention,
@@ -77,7 +109,7 @@ BODY=$(jq -n \
             source: "claude-code",
             working_directory: $cwd
         }
-    }')
+    } + (if $policy != null then {policy: $policy} else {} end)')
 
 log "Creating session: $INTARIS_SESSION_ID"
 

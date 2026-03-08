@@ -39,6 +39,7 @@ export INTARIS_USER_ID=your-username       # required for single-key mode (INTAR
 export INTARIS_AGENT_ID=opencode           # optional, defaults to "opencode"
 export INTARIS_FAIL_OPEN=false             # optional, defaults to false
 export INTARIS_INTENTION=""                # optional, auto-generated from cwd
+export INTARIS_ALLOW_PATHS=~/src           # optional, allow reads from sibling projects
 export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disabled)
 ```
 
@@ -50,6 +51,7 @@ export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disable
 | `INTARIS_USER_ID` | (empty) | User ID. **Required** when using `INTARIS_API_KEY` (single-key mode) — the server needs a user identity to scope sessions and audit records. Optional if `INTARIS_API_KEYS` maps your key to a specific user. |
 | `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed when Intaris is unreachable. Default is `false` (fail-closed) -- tool calls are blocked when Intaris is down. |
 | `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"OpenCode coding session in <cwd>"` |
+| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories to allow reads from without LLM evaluation. Supports `~` expansion. E.g., `~/src` allows reads from all projects under `~/src/`. |
 | `INTARIS_CHECKPOINT_INTERVAL` | `25` | Number of evaluate calls between periodic checkpoints. Set to `0` to disable checkpoints. Each checkpoint consumes one rate limit slot. |
 
 ### 2. Install the Plugin
@@ -100,6 +102,31 @@ Add to your `~/.config/opencode/opencode.json` (global) or `opencode.json` (proj
 Configure upstream MCP servers in Intaris (via the UI, REST API, or `MCP_CONFIG_FILE`). OpenCode will see all upstream tools namespaced as `server_name:tool_name`.
 
 See `opencode.json` in this directory for a complete example.
+
+## Disabling OpenCode's Built-in Approvals
+
+OpenCode has its own permission system that prompts for approval on certain actions (e.g., `external_directory` prompts when tools access paths outside the working directory). When using the Intaris plugin, this creates **double prompting** -- OpenCode asks first, then Intaris evaluates.
+
+To let Intaris be the sole gatekeeper, disable OpenCode's built-in approvals in your `opencode.jsonc`:
+
+```jsonc
+{
+  // Let Intaris handle all tool approval decisions
+  "permission": "allow"
+}
+```
+
+Or, to only disable the external directory prompt while keeping other OpenCode permissions:
+
+```jsonc
+{
+  "permission": {
+    "external_directory": "allow"
+  }
+}
+```
+
+See [OpenCode Permissions](https://opencode.ai/docs/permissions/) for details.
 
 ## How It Works
 

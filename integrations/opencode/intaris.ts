@@ -26,6 +26,7 @@
  *   INTARIS_USER_ID              - User ID (optional if API key maps to user)
  *   INTARIS_FAIL_OPEN            - Allow tool calls if Intaris is unreachable (default: false)
  *   INTARIS_INTENTION            - Session intention override (default: auto-generated)
+ *   INTARIS_ALLOW_PATHS          - Comma-separated parent directories to allow reads from (e.g., ~/src)
  *   INTARIS_CHECKPOINT_INTERVAL  - Evaluate calls between checkpoints (default: 25, 0=disabled)
  *   INTARIS_ESCALATION_TIMEOUT   - Max seconds to wait for escalation approval (default: 0=no timeout)
  *   INTARIS_SESSION_RECORDING    - Enable session recording (default: false)
@@ -100,6 +101,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     10,
   )
   const recordingFlushMs = isNaN(rawRecordingFlushMs) ? 10000 : rawRecordingFlushMs
+  const allowPathsRaw = process.env.INTARIS_ALLOW_PATHS || ""
 
   // -- State ----------------------------------------------------------------
   // Track Intaris session per OpenCode session.
@@ -306,6 +308,33 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
   }
 
   /**
+   * Build session policy from INTARIS_ALLOW_PATHS.
+   * Expands ~ to home directory and converts each path to a glob pattern.
+   * E.g., "~/src" → "/Users/name/src/*"
+   */
+  function buildPolicy(): Record<string, any> | null {
+    if (!allowPathsRaw) return null
+    const home = process.env.HOME || process.env.USERPROFILE || ""
+    const patterns = allowPathsRaw
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((p) => {
+        // Expand ~ to home directory
+        if (p.startsWith("~/") || p === "~") {
+          p = home + p.slice(1)
+        }
+        // Ensure trailing /* for glob matching
+        if (!p.endsWith("*")) {
+          p = p.endsWith("/") ? p + "*" : p + "/*"
+        }
+        return p
+      })
+    if (patterns.length === 0) return null
+    return { allow_paths: patterns }
+  }
+
+  /**
    * Update the session intention on the server after gathering context.
    * Called after the first few tool calls to refine the generic intention.
    */
@@ -397,7 +426,20 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       events,
       5000,
       { "X-Intaris-Source": "opencode" },
-    ).catch(() => {})
+    ).then(({ error, status }) => {
+      if (error) {
+        client.app
+          .log({
+            body: {
+              service: "intaris",
+              level: "warn",
+              message: `Recording flush failed for ${state!.intarisSessionId}: ${error} (HTTP ${status})`,
+              extra: { eventCount: events.length },
+            },
+          })
+          .catch(() => {})
+      }
+    }).catch(() => {})
   }
 
   // Periodic recording flush timer (flushes all sessions)
@@ -428,6 +470,12 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       session_id: intarisSessionId,
       intention: buildIntention(state),
       details: buildDetails(state),
+    }
+
+    // Include allow_paths policy from INTARIS_ALLOW_PATHS
+    const policy = buildPolicy()
+    if (policy) {
+      intentionBody.policy = policy
     }
 
     // Include parent_session_id for child sessions (session continuation chains)
