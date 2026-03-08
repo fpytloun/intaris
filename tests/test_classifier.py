@@ -322,6 +322,42 @@ class TestCriticalPatterns:
         assert classify("bash", {"command": "rm file.txt"}) == Classification.WRITE
         assert classify("bash", {"command": "rm -r ./temp/"}) == Classification.WRITE
 
+    def test_critical_keyword_in_quoted_string_not_critical(self):
+        """Critical keywords inside quoted strings should not trigger."""
+        # git commit message containing 'shutdown'
+        assert (
+            classify(
+                "bash",
+                {"command": "git commit -m 'fix: handle shutdown gracefully'"},
+            )
+            == Classification.WRITE
+        )
+        # Double-quoted commit message with multiple critical keywords
+        assert (
+            classify(
+                "bash",
+                {"command": 'git commit -m "fix(stream): handle shutdown and reboot"'},
+            )
+            == Classification.WRITE
+        )
+        # echo with 'reboot' in message (echo is read-only, not CRITICAL)
+        assert (
+            classify("bash", {"command": 'echo "reboot the server"'})
+            != Classification.CRITICAL
+        )
+        # grep for 'halt' in a file (read-only)
+        assert (
+            classify("bash", {"command": "grep 'halt' /var/log/syslog"})
+            == Classification.READ
+        )
+
+    def test_critical_command_outside_quotes_still_critical(self):
+        """Actual critical commands are still detected even with quoted args."""
+        assert (
+            classify("bash", {"command": "shutdown -h now"}) == Classification.CRITICAL
+        )
+        assert classify("bash", {"command": "reboot"}) == Classification.CRITICAL
+
 
 class TestWriteClassification:
     """Test default WRITE classification."""

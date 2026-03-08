@@ -311,6 +311,7 @@ function dashboardTab() {
             legend: {
               position: 'bottom',
               labels: {
+                color: CHART_COLORS.text,
                 padding: 10,
                 font: { size: 10 },
                 generateLabels(chart) {

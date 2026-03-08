@@ -284,10 +284,31 @@ def _extract_bash_command(args: dict[str, Any]) -> str:
     return str(command).strip()
 
 
+# Regex to match single-quoted or double-quoted strings.
+# Handles escaped quotes inside double-quoted strings (\").
+# Single-quoted strings have no escape mechanism in bash.
+_QUOTED_STRING_RE = re.compile(r"""'[^']*'|"(?:[^"\\]|\\.)*\"""")
+
+
+def _strip_quoted_strings(command: str) -> str:
+    """Remove quoted string content from a command.
+
+    Replaces single-quoted and double-quoted strings with empty
+    placeholders to prevent their content from triggering pattern
+    matches. Used before critical pattern detection to avoid false
+    positives from keywords appearing in arguments (e.g., "shutdown"
+    in a git commit message).
+    """
+    return _QUOTED_STRING_RE.sub('""', command)
+
+
 def _is_critical(command: str) -> bool:
     """Check if a bash command matches any critical pattern."""
+    # Strip quoted strings to prevent false positives from keywords
+    # appearing in arguments (e.g., "shutdown" in a commit message).
+    stripped = _strip_quoted_strings(command)
     for pattern in _CRITICAL_PATTERNS:
-        if pattern.search(command):
+        if pattern.search(stripped):
             logger.warning("Critical pattern matched: %s", pattern.pattern)
             return True
     return False
