@@ -209,9 +209,13 @@ function sessionPlayer() {
     handleScroll() {
       const el = this.$refs.eventList;
       if (!el) return;
-      // Consider "at bottom" if within 50px of the end
-      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+      // Consider "at bottom" if within 100px of the end
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
       this.autoScroll = atBottom;
+      // Infinite scroll: load more when near bottom
+      if (atBottom && this.hasMore && !this.loading) {
+        this.loadMore();
+      }
     },
 
     // ── Player mode ──────────────────────────────────────────
@@ -327,6 +331,28 @@ function sessionPlayer() {
     formatTime(ts) {
       if (!ts) return '';
       return new Date(ts).toLocaleTimeString();
+    },
+
+    /**
+     * Format duration since the previous visible event.
+     * Returns e.g. "+0.1s", "+3.2s", "+1m 5s", "+1h 2m", or "" for first event.
+     */
+    eventDuration(idx) {
+      if (idx === 0) return '';
+      const curr = this.events[idx];
+      const prev = this.events[idx - 1];
+      if (!curr?.ts || !prev?.ts) return '';
+      const ms = new Date(curr.ts) - new Date(prev.ts);
+      if (ms < 0) return '';
+      if (ms < 1000) return '+' + (ms / 1000).toFixed(1) + 's';
+      const sec = Math.floor(ms / 1000);
+      if (sec < 60) return '+' + sec + '.' + Math.floor((ms % 1000) / 100) + 's';
+      const min = Math.floor(sec / 60);
+      const remSec = sec % 60;
+      if (min < 60) return '+' + min + 'm ' + remSec + 's';
+      const hr = Math.floor(min / 60);
+      const remMin = min % 60;
+      return '+' + hr + 'h ' + remMin + 'm';
     },
 
     get eventCount() {

@@ -1477,9 +1477,9 @@
       <!-- Empty state -->
       <div x-show="!loading && events.length === 0 && !error" class="text-sm text-muted py-8 text-center">No recorded events</div>
 
-      <!-- Event list -->
+      <!-- Event list (infinite scroll) -->
       <div x-show="events.length > 0" class="space-y-0.5 max-h-[80vh] overflow-y-auto" x-ref="eventList" @scroll="handleScroll()">
-        <template x-for="event in events" :key="event.seq">
+        <template x-for="(event, idx) in events" :key="event.seq">
           <div>
             <div class="flex items-center justify-between py-1 text-xs cursor-pointer hover:bg-brand-bg/50 rounded px-2 overflow-hidden"
                  :class="expandedSeq === event.seq ? 'bg-brand-bg/50' : ''"
@@ -1491,6 +1491,7 @@
               </div>
               <div class="flex items-center gap-2 flex-shrink-0 ml-2">
                 <span class="text-muted" x-text="event.source || ''"></span>
+                <span class="text-brand-accent/60 font-mono whitespace-nowrap" x-show="eventDuration(idx)" x-text="eventDuration(idx)"></span>
                 <span class="text-muted whitespace-nowrap" x-text="formatTime(event.ts)"></span>
               </div>
             </div>
@@ -1503,12 +1504,8 @@
             </div>
           </div>
         </template>
-      </div>
-
-      <!-- Load more -->
-      <div x-show="hasMore" class="text-center mt-3">
-        <button @click.stop="loadMore()" class="btn-secondary text-xs py-1 px-3"
-                :disabled="loading" x-text="loading ? 'Loading...' : 'Load more'"></button>
+        <!-- Infinite scroll loading indicator -->
+        <div x-show="loading && events.length > 0" class="text-center py-2 text-xs text-muted">Loading more...</div>
       </div>
     </div>
   </div>
