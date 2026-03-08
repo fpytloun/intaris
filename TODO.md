@@ -58,10 +58,13 @@ Approve or deny this call in the Intaris UI, then retry.
 
 - opencode does not notify user on escalate action
 
+- Session recording select by sources has hard-coded values. It should be only All/Agent/Intaris.
+
 ## Minor
 
 - Sessions filters (All, Active, Idle) should only filter parent session if in tree view, child sessions when parent is expanded should be shown no matter of state.
 - Search sessions should not filter child sessions. It should query among parents and childs but always show parent + all it's children if tree view. We could also highlight matched string.
+- By default parent sessions should be collapsed and pagination limit should only affect parent sessions (in tree view)
 - Opencode plugin should put session into "Idle" when ended (waiting for user input) to make it clear it is not doing anything and resume right after user input when the work starts again.
 
 - Notifications should notify on escalate but also on deny and session suspend
@@ -78,3 +81,5 @@ Approve or deny this call in the Intaris UI, then retry.
 
 - When user resumes auto-suspended session it gets suspended again. There should be also reason and overall it should be same as for tool escalate
 Reason for suspending session was: "Session is suspended — evaluation denied. Reason: Child intention conflicts with parent session: Investigating system prompt tuning is about prompt/LLM behavior, which does not support or decompose the task of designing a session storage architecture for Intaris; therefore it is outside the parent's scope." where intention was "Investigating system-prompt tuning for the Intaris project by examining evaluator, decision, and prompts code to inform the session storage architecture design." and it was child session to "Intaris session storage architecture design"
+
+- Missing assistant messages from opencode reasoning (typically before tool call)

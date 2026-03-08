@@ -794,6 +794,65 @@ class TestEventStore:
         assert events[0]["source"] == "opencode"
         assert events[0]["type"] == "message"
 
+    def test_read_with_exclude_source_filter(self, store):
+        """Exclude source filter removes events from specified sources."""
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "message", "data": {}}],
+            source="opencode",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "evaluation", "data": {}}],
+            source="intaris",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "tool_call", "data": {}}],
+            source="client",
+        )
+
+        # Exclude intaris — should return opencode + client
+        events = store.read("alice", "sess1", exclude_sources={"intaris"})
+        assert len(events) == 2
+        sources = {e["source"] for e in events}
+        assert "intaris" not in sources
+        assert sources == {"opencode", "client"}
+
+    def test_read_with_exclude_and_include_source(self, store):
+        """Include and exclude source filters can be combined."""
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "message", "data": {}}],
+            source="opencode",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "evaluation", "data": {}}],
+            source="intaris",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "tool_call", "data": {}}],
+            source="client",
+        )
+
+        # Include opencode+intaris, then exclude intaris → only opencode
+        events = store.read(
+            "alice",
+            "sess1",
+            sources={"opencode", "intaris"},
+            exclude_sources={"intaris"},
+        )
+        assert len(events) == 1
+        assert events[0]["source"] == "opencode"
+
     def test_thread_safety(self, store):
         """Concurrent appends from multiple threads produce unique seqs."""
         results = []

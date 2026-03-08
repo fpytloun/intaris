@@ -245,6 +245,7 @@ const IntarisAPI = {
     if (params.limit) qs.set('limit', params.limit);
     if (params.type) qs.set('type', params.type);
     if (params.source) qs.set('source', params.source);
+    if (params.exclude_source) qs.set('exclude_source', params.exclude_source);
     const query = qs.toString();
     return this.get(`/session/${encodeURIComponent(sessionId)}/events${query ? '?' + query : ''}`);
   },

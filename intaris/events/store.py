@@ -173,6 +173,7 @@ class EventStore:
         limit: int = 0,
         event_types: set[str] | None = None,
         sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
     ) -> list[dict]:
         """Read events from storage and buffer.
 
@@ -183,8 +184,9 @@ class EventStore:
             after_seq: Return events with seq > this value.
             limit: Max events to return. 0 = all.
             event_types: Filter by event type. None = all types.
-            sources: Filter by event source (e.g., "opencode", "intaris").
-                None = all sources.
+            sources: Include only events from these sources. None = all.
+            exclude_sources: Exclude events from these sources. None = no
+                exclusion. Applied after ``sources`` include filter.
 
         Returns:
             List of event dicts ordered by seq.
@@ -218,9 +220,11 @@ class EventStore:
         if event_types:
             events = [e for e in events if e.get("type") in event_types]
 
-        # Filter by source
+        # Filter by source (include / exclude)
         if sources:
             events = [e for e in events if e.get("source") in sources]
+        if exclude_sources:
+            events = [e for e in events if e.get("source") not in exclude_sources]
 
         # Apply limit
         if limit:

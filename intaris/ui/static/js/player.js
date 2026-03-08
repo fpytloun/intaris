@@ -88,7 +88,7 @@ function sessionPlayer() {
         };
         if (this.typeFilter !== '__all__') params.type = this.typeFilter;
         if (this.sourceFilter === '__agent__') {
-          params.source = 'opencode,claude-code,client';
+          params.exclude_source = 'intaris';
         } else if (this.sourceFilter !== '__all__') {
           params.source = this.sourceFilter;
         }
@@ -154,7 +154,7 @@ function sessionPlayer() {
               if (this.typeFilter !== '__all__' && event.type !== this.typeFilter) return;
               // Apply source filter
               if (this.sourceFilter === '__agent__') {
-                if (!['opencode', 'claude-code', 'client'].includes(event.source)) return;
+                if (event.source === 'intaris') return;
               } else if (this.sourceFilter !== '__all__') {
                 if (event.source !== this.sourceFilter) return;
               }
@@ -341,12 +341,13 @@ function sessionPlayer() {
     },
 
     get filteredSources() {
-      return ['__all__', '__agent__', 'intaris', 'opencode', 'claude-code', 'client'];
+      return ['__agent__', '__all__', 'intaris'];
     },
 
     sourceLabel(s) {
       if (s === '__all__') return 'All sources';
       if (s === '__agent__') return 'Agent only';
+      if (s === 'intaris') return 'Intaris only';
       return s;
     },
   };
