@@ -32,6 +32,18 @@ class EvaluateResponse(BaseModel):
     risk: str | None = Field(None, description="Risk level")
     path: str = Field(..., description="Evaluation path: fast, critical, or llm")
     latency_ms: int = Field(..., description="Evaluation latency in ms")
+    session_status: str | None = Field(
+        None,
+        description=(
+            "Session status when evaluation is denied due to session state "
+            "(suspended, terminated, completed). Allows clients to "
+            "distinguish deny reasons and react accordingly."
+        ),
+    )
+    status_reason: str | None = Field(
+        None,
+        description="Reason for session suspension/termination (if applicable)",
+    )
 
 
 # ── Intention / Session ───────────────────────────────────────────────
@@ -73,6 +85,7 @@ class SessionResponse(BaseModel):
     denied_count: int = 0
     escalated_count: int = 0
     status: str = "active"
+    status_reason: str | None = None
     last_activity_at: str | None = None
     parent_session_id: str | None = None
     summary_count: int = 0

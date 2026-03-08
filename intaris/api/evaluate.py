@@ -56,6 +56,14 @@ async def evaluate(
     if barrier is not None:
         await barrier.wait(ctx.user_id, request.session_id)
 
+    # Wait for any pending alignment check (barrier pattern).
+    # If a child session was just created or its intention was updated,
+    # the alignment check runs async and we wait for it here. This
+    # ensures no tool calls execute before alignment is verified.
+    alignment_barrier = getattr(http_request.app.state, "alignment_barrier", None)
+    if alignment_barrier is not None:
+        await alignment_barrier.wait(ctx.user_id, request.session_id)
+
     try:
         evaluator = _get_evaluator()
         # agent_id: request body overrides header if provided
@@ -107,6 +115,32 @@ async def evaluate(
                 ui_url=None,  # Set by dispatcher
                 approve_url=None,  # Set by dispatcher
                 deny_url=None,  # Set by dispatcher
+                timestamp=datetime.now(tz.utc).isoformat(),
+            )
+            asyncio.create_task(
+                dispatcher.notify(
+                    user_id=ctx.user_id,
+                    notification=notification,
+                )
+            )
+
+        # Fire-and-forget notification on session suspension
+        if dispatcher is not None and result.get("session_status") == "suspended":
+            from intaris.notifications.providers import Notification
+
+            notification = Notification(
+                event_type="session_suspended",
+                call_id=result["call_id"],
+                session_id=request.session_id,
+                user_id=ctx.user_id,
+                agent_id=agent_id,
+                tool=request.tool,
+                args_redacted=result.get("args_redacted"),
+                risk=result.get("risk"),
+                reasoning=result.get("status_reason") or result.get("reasoning"),
+                ui_url=None,
+                approve_url=None,
+                deny_url=None,
                 timestamp=datetime.now(tz.utc).isoformat(),
             )
             asyncio.create_task(

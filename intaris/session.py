@@ -115,13 +115,23 @@ class SessionStore:
 
         return _row_to_dict(row)
 
-    def update_status(self, session_id: str, status: str, *, user_id: str) -> None:
+    def update_status(
+        self,
+        session_id: str,
+        status: str,
+        *,
+        user_id: str,
+        status_reason: str | None = None,
+    ) -> None:
         """Update session status.
 
         Args:
             session_id: Session to update.
             status: New status (active, completed, suspended, terminated).
             user_id: Tenant identifier (must match session owner).
+            status_reason: Optional reason for the status change. Cleared
+                automatically when status transitions to ``active``
+                (reactivation clears the reason).
 
         Raises:
             ValueError: If session not found or invalid status.
@@ -132,15 +142,19 @@ class SessionStore:
                 f"Invalid status '{status}'. Must be one of: {valid_statuses}"
             )
 
+        # Clear status_reason on reactivation (user override)
+        if status == "active":
+            status_reason = None
+
         now = datetime.now(timezone.utc).isoformat()
         with self._db.cursor() as cur:
             cur.execute(
                 """
                 UPDATE sessions
-                SET status = ?, updated_at = ?
+                SET status = ?, status_reason = ?, updated_at = ?
                 WHERE session_id = ? AND user_id = ?
                 """,
-                (status, now, session_id, user_id),
+                (status, status_reason, now, session_id, user_id),
             )
             if cur.rowcount == 0:
                 raise ValueError(f"Session {session_id} not found")

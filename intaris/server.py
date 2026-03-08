@@ -138,6 +138,14 @@ async def health_check(request: Request) -> JSONResponse:
     except Exception:
         pass  # Health check should never fail due to barrier
 
+    # Include alignment barrier metrics if available
+    try:
+        alignment_barrier = getattr(request.app.state, "alignment_barrier", None)
+        if alignment_barrier is not None:
+            response["alignment_barrier"] = alignment_barrier.metrics()
+    except Exception:
+        pass  # Health check should never fail due to barrier
+
     return JSONResponse(response)
 
 
@@ -346,6 +354,7 @@ async def lifespan(app):
     from intaris.llm import LLMClient
 
     barrier_timeout_ms = int(os.environ.get("INTENTION_BARRIER_TIMEOUT_MS", "1000"))
+    analysis_llm: LLMClient | None = None
     if cfg.analysis.enabled and cfg.llm_analysis.api_key:
         analysis_llm = LLMClient(cfg.llm_analysis)
         app.state.intention_barrier = IntentionBarrier(
@@ -358,6 +367,29 @@ async def lifespan(app):
     else:
         app.state.intention_barrier = None
         logger.info("Intention barrier not initialized (analysis disabled)")
+
+    # Initialize alignment barrier for parent/child intention enforcement
+    from intaris.alignment import AlignmentBarrier
+
+    alignment_timeout_ms = int(os.environ.get("ALIGNMENT_BARRIER_TIMEOUT_MS", "15000"))
+    if cfg.analysis.enabled and analysis_llm is not None:
+        app.state.alignment_barrier = AlignmentBarrier(
+            db=_get_db(),
+            llm=analysis_llm,
+            timeout_ms=alignment_timeout_ms,
+        )
+        app.state.alignment_barrier.set_event_bus(app.state.event_bus)
+        # Chain: IntentionBarrier → AlignmentBarrier for child sessions
+        if app.state.intention_barrier is not None:
+            app.state.intention_barrier.set_alignment_barrier(
+                app.state.alignment_barrier
+            )
+        logger.info(
+            "Alignment barrier initialized (timeout=%dms)", alignment_timeout_ms
+        )
+    else:
+        app.state.alignment_barrier = None
+        logger.info("Alignment barrier not initialized (analysis disabled)")
 
     # Initialize background worker for behavioral analysis
     from intaris.background import BackgroundWorker, TaskQueue
@@ -423,6 +455,7 @@ async def lifespan(app):
         api_app.state.mcp_proxy = mcp_proxy
         api_app.state.background_worker = background_worker
         api_app.state.intention_barrier = app.state.intention_barrier
+        api_app.state.alignment_barrier = app.state.alignment_barrier
         api_app.state.notification_dispatcher = notification_dispatcher
 
     if mcp_proxy is not None:
@@ -588,6 +621,7 @@ def main():
         host=cfg.server.host,
         port=cfg.server.port,
         log_level="warning",
+        timeout_graceful_shutdown=5,
     )
 
 

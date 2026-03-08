@@ -55,7 +55,7 @@ class Notification:
     Providers select which fields to include based on their platform.
     """
 
-    event_type: str  # "escalation" or "resolution"
+    event_type: str  # "escalation", "resolution", or "session_suspended"
     call_id: str
     session_id: str
     user_id: str
@@ -206,6 +206,9 @@ class PushoverProvider:
         if notification.event_type == "resolution":
             title = "Intaris: Escalation Resolved"
             message = self._format_resolution_message(notification)
+        elif notification.event_type == "session_suspended":
+            title = "Intaris: Session Suspended"
+            message = self._format_escalation_message(notification)
         else:
             title = "Intaris: Escalation Required"
             message = self._format_escalation_message(notification)
@@ -308,6 +311,8 @@ class SlackProvider:
 
         if notification.event_type == "resolution":
             blocks = self._build_resolution_blocks(notification)
+        elif notification.event_type == "session_suspended":
+            blocks = self._build_escalation_blocks(notification)
         else:
             blocks = self._build_escalation_blocks(notification)
 

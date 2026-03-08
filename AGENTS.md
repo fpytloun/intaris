@@ -40,6 +40,7 @@ intaris/
 ├── prompts_analysis.py    # L2/L3 analysis prompt templates + JSON schemas
 ├── intention.py           # IntentionBarrier (user-driven intention updates) + generate_intention()
 ├── evaluator.py           # Evaluation pipeline orchestrator (ESCALATE branch, retry, behavioral context)
+├── alignment.py           # AlignmentBarrier (parent/child intention enforcement via LLM)
 ├── analyzer.py            # Stub: L2 summary generation + L3 behavioral analysis (Phase 2)
 ├── background.py          # TaskQueue (SQLite), BackgroundWorker (idle sweep, scheduler), Metrics
 ├── decision.py            # Decision matrix (priority-ordered, escalate fast path)
@@ -95,6 +96,7 @@ intaris/
 | **Info** | `api/info.py` | Identity (/whoami), stats (/stats), config (/config) for management UI |
 | **Intention** | `intention.py` | IntentionBarrier (user-driven intention updates) + generate_intention() |
 | **Orchestration** | `evaluator.py` | Full evaluation pipeline (classify → LLM → decide → audit), behavioral context injection |
+| **Alignment** | `alignment.py` | AlignmentBarrier (parent/child intention enforcement via LLM) |
 | **Classification** | `classifier.py` | Read-only allowlist, critical patterns, session policy |
 | **Decision** | `decision.py` | Priority-ordered decision matrix |
 | **LLM** | `llm.py` | OpenAI-compatible client with structured output |
@@ -170,6 +172,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `MCP_ALLOW_STDIO` | Allow stdio transport for MCP servers (default `false`) |
 | `MCP_UPSTREAM_TIMEOUT_MS` | Timeout for upstream MCP server calls in milliseconds (default `30000`) |
 | `INTENTION_BARRIER_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for a pending intention update (default `1000`) |
+| `ALIGNMENT_BARRIER_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for a pending alignment check (default `15000`) |
 | `ANALYSIS_ENABLED` | Enable behavioral analysis pipeline (default `true`) |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | Minutes of inactivity before session transitions to idle (default `30`) |
 | `SUMMARY_VOLUME_THRESHOLD` | Evaluate calls per session before triggering a summary (default `50`) |
@@ -299,6 +302,43 @@ Sessions that never receive user messages (e.g., Claude Code, MCP proxy) keep th
 ### generate_intention()
 
 Shared function in `intention.py` used by both the IntentionBarrier (immediate path) and the background worker (bootstrap path). Uses the analysis LLM to summarize what the session is about based on user messages (primary signal) and recent tool calls (secondary). Accepts an injected `LLMClient` rather than creating one per call.
+
+### AlignmentBarrier pattern
+
+The `AlignmentBarrier` (`alignment.py`) enforces parent/child session intention compatibility using the same barrier pattern as the IntentionBarrier. When a child session is created (or its intention is updated), an async LLM alignment check runs. The first `POST /evaluate` call waits for the check to complete before proceeding.
+
+**Flow:**
+
+1. **Trigger at creation**: `POST /intention` with `parent_session_id` → validates parent exists → creates session (status=active) → triggers `alignment_barrier.trigger()` async.
+2. **Trigger on intention update**: When `IntentionBarrier` completes an intention update for a child session, or when `PATCH /session/{id}` updates a child session's intention, a re-check is triggered via `alignment_barrier.trigger()`.
+3. **Wait at evaluate**: `POST /evaluate` calls `await alignment_barrier.wait()` after the intention barrier wait. If a check is pending, it blocks up to `ALIGNMENT_BARRIER_TIMEOUT_MS` (default 15s).
+4. **Auto-suspend on misalignment**: If the LLM determines the child intention contradicts the parent, the barrier auto-suspends the session with a `status_reason` explaining why.
+5. **Fail-open**: If the LLM call fails or times out, the session stays active. Per-call LLM evaluation still catches misaligned WRITE calls.
+
+**Timing budget (worst case, first evaluate of new child session):**
+- Intention barrier wait: up to 1s
+- Alignment barrier wait: up to 15s
+- LLM evaluation: up to 4s
+- Total: 20s max (within OpenCode plugin's 30s evaluate timeout)
+
+This worst case only applies to the very first evaluate call. Subsequent calls have no barrier waits.
+
+**Parent lifecycle cascade**: The evaluator also checks parent session status on every evaluate call for child sessions. If the parent is terminated or suspended, the child is auto-suspended with `status_reason = "Parent session is {status}"`.
+
+**Client-side handling** (OpenCode plugin):
+- `session_status === "suspended"` in evaluate response → enter polling loop (poll `GET /session/{id}` with exponential backoff). If reactivated → allow tool call. If terminated → throw error.
+- `session_status === "terminated"` → throw error immediately (hard kill).
+- Reuses `INTARIS_ESCALATION_TIMEOUT` for max wait time during suspension.
+
+**Design principles:**
+- No tool calls execute before alignment is verified (barrier blocks first evaluate)
+- Cancel-and-restart on re-trigger (e.g., intention update while check is in flight)
+- User can override by reactivating in the UI (no re-check on reactivation)
+- `status_reason` column on sessions stores the suspension reason; cleared on reactivation
+
+| Env Var | Default | Description |
+|---|---|---|
+| `ALIGNMENT_BARRIER_TIMEOUT_MS` | `15000` | Max time evaluate waits for alignment check |
 
 ## Behavioral Analysis
 

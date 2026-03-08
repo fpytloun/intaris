@@ -754,6 +754,126 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       updateIntention(intarisSessionId, state)
 
       if (result.decision === "deny") {
+        // Handle session-level suspension: wait for user action
+        // (reactivation or termination) rather than dying immediately.
+        if (result.session_status === "suspended") {
+          const statusReason = result.status_reason || "Session suspended"
+          await client.app
+            .log({
+              body: {
+                service: "intaris",
+                level: "warn",
+                message: `Session suspended: ${statusReason}. Waiting for approval in Intaris UI...`,
+              },
+            })
+            .catch(() => {})
+
+          // Poll GET /session/{id} with exponential backoff
+          const suspendBackoffMs = [2000, 4000, 8000, 16000, 30000]
+          const suspendStart = Date.now()
+          let suspendAttempt = 0
+          let suspendLastReminder = suspendStart
+
+          while (true) {
+            // Check timeout (reuse escalation timeout)
+            if (escalationTimeoutMs > 0 && Date.now() - suspendStart > escalationTimeoutMs) {
+              throw new Error(
+                `[intaris] SESSION SUSPENSION TIMEOUT: ${statusReason}\n` +
+                  `No response within ${rawEscalationTimeout}s. Reactivate or terminate in the Intaris UI.`,
+              )
+            }
+
+            // Periodic reminder every 60s
+            const suspendNow = Date.now()
+            if (suspendNow - suspendLastReminder >= 60000) {
+              const waitSec = Math.round((suspendNow - suspendStart) / 1000)
+              await client.app
+                .log({
+                  body: {
+                    service: "intaris",
+                    level: "warn",
+                    message: `Still waiting for session approval... ${waitSec}s elapsed. Reason: ${statusReason}`,
+                  },
+                })
+                .catch(() => {})
+              suspendLastReminder = suspendNow
+            }
+
+            // Wait with exponential backoff
+            const suspendDelay = suspendBackoffMs[Math.min(suspendAttempt, suspendBackoffMs.length - 1)]
+            await new Promise((resolve) => setTimeout(resolve, suspendDelay))
+            suspendAttempt++
+
+            // Poll session status
+            const { data: sessionData } = await callApi(
+              "GET",
+              `/api/v1/session/${encodeURIComponent(intarisSessionId)}`,
+              null,
+              5000,
+            )
+
+            if (!sessionData) continue // Server unreachable — keep polling
+
+            if (sessionData.status === "active") {
+              // Session reactivated — re-evaluate this tool call.
+              // The user explicitly approved the session, but we still
+              // need to evaluate this specific tool call for safety.
+              await client.app
+                .log({
+                  body: {
+                    service: "intaris",
+                    level: "info",
+                    message: `Session reactivated — re-evaluating ${tool}`,
+                  },
+                })
+                .catch(() => {})
+
+              const { data: reResult } = await callApiWithRetry(
+                "POST",
+                "/api/v1/evaluate",
+                {
+                  session_id: intarisSessionId,
+                  tool,
+                  args: _output.args || {},
+                },
+                30000,
+                2,
+              )
+
+              if (!reResult) {
+                if (failOpen) return
+                throw new Error(`[intaris] Re-evaluation failed for ${tool} after session reactivation`)
+              }
+
+              if (reResult.decision === "deny") {
+                throw new Error(`[intaris] DENIED: ${reResult.reasoning || "Tool call denied after session reactivation"}`)
+              }
+              if (reResult.decision === "escalate") {
+                // Fall through to the escalation handling below would be
+                // complex; for simplicity, treat post-reactivation escalation
+                // as a deny. The user just reactivated — they can retry.
+                throw new Error(`[intaris] ESCALATED after reactivation: ${reResult.reasoning || "Requires human approval"}`)
+              }
+              // Approved — let tool proceed
+              return
+            }
+
+            if (sessionData.status === "terminated") {
+              throw new Error(
+                `[intaris] Session terminated: ${sessionData.status_reason || "terminated by user"}`,
+              )
+            }
+            // Still suspended — continue polling
+          }
+        }
+
+        // Handle session termination: hard kill
+        if (result.session_status === "terminated") {
+          throw new Error(
+            `[intaris] Session terminated: ${result.status_reason || "terminated by user"}`,
+          )
+        }
+
         const reason = result.reasoning || "Tool call denied by safety evaluation"
         throw new Error(
           `[intaris] DENIED: ${reason}`,

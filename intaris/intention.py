@@ -229,6 +229,7 @@ class IntentionBarrier:
         self._llm = llm
         self._timeout = timeout_ms / 1000.0
         self._event_bus: Any | None = None
+        self._alignment_barrier: Any | None = None
         self._pending: dict[tuple[str, str], tuple[asyncio.Event, asyncio.Task]] = {}
 
         # Metrics
@@ -243,6 +244,15 @@ class IntentionBarrier:
         Called after initialization since EventBus is created separately.
         """
         self._event_bus = event_bus
+
+    def set_alignment_barrier(self, alignment_barrier: Any) -> None:
+        """Set the AlignmentBarrier reference for chaining re-checks.
+
+        When an intention update completes for a child session, we
+        trigger an alignment re-check to verify the new intention is
+        still compatible with the parent.
+        """
+        self._alignment_barrier = alignment_barrier
 
     def metrics(self) -> dict[str, Any]:
         """Export barrier metrics for health check response."""
@@ -364,6 +374,14 @@ class IntentionBarrier:
                     session_id,
                     result[:80],
                 )
+
+                # Chain alignment re-check for child sessions.
+                # When a child session's intention is updated (from user
+                # message), re-verify it's still aligned with the parent.
+                if self._alignment_barrier is not None:
+                    session = session_store.get(session_id, user_id=user_id)
+                    if session.get("parent_session_id"):
+                        await self._alignment_barrier.trigger(user_id, session_id)
         except asyncio.CancelledError:
             logger.debug(
                 "Intention update cancelled (superseded) for user=%s session=%s",

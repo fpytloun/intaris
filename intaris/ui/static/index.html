@@ -429,6 +429,14 @@
                   </template>
                 </div>
 
+                <!-- Status Reason (shown when session is suspended/terminated) -->
+                <template x-if="session.status_reason">
+                  <div class="mb-4 p-3 rounded border border-yellow-500/30 bg-yellow-500/10">
+                    <div class="text-xs text-yellow-400 font-semibold mb-1">Status Reason</div>
+                    <p class="text-sm text-yellow-200" x-text="session.status_reason"></p>
+                  </div>
+                </template>
+
                 <!-- Session Audit Feed (Expandable) -->
                 <div class="mt-3">
                   <div class="text-xs text-muted mb-2">Recent Evaluations</div>
@@ -1312,6 +1320,14 @@
               <button @click="$store.nav.updateSessionStatus($store.nav.sessionModal.session_id, 'active')" class="btn-success text-sm">Reactivate</button>
             </template>
           </div>
+
+          <!-- Status Reason (modal) -->
+          <template x-if="$store.nav.sessionModal.status_reason">
+            <div class="mb-4 p-3 rounded border border-yellow-500/30 bg-yellow-500/10">
+              <div class="text-xs text-yellow-400 font-semibold mb-1">Status Reason</div>
+              <p class="text-sm text-yellow-200" x-text="$store.nav.sessionModal.status_reason"></p>
+            </div>
+          </template>
 
           <!-- Audit Feed -->
           <div class="mt-3 border-t border-brand-border pt-3">

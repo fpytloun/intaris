@@ -156,6 +156,11 @@ class Evaluator:
             # Clean up approved paths cache for inactive sessions
             self.clear_approved_paths(user_id, session_id)
 
+            status_reason = session.get("status_reason")
+            reasoning = f"Session is {session_status} — evaluation denied"
+            if status_reason:
+                reasoning = f"{reasoning}. Reason: {status_reason}"
+
             latency_ms = int((time.monotonic() - start_time) * 1000)
             self._audit.insert(
                 call_id=call_id,
@@ -168,7 +173,7 @@ class Evaluator:
                 evaluation_path="fast",
                 decision="deny",
                 risk="low",
-                reasoning=f"Session is {session_status} — evaluation denied",
+                reasoning=reasoning,
                 latency_ms=latency_ms,
             )
             try:
@@ -178,12 +183,14 @@ class Evaluator:
             return {
                 "call_id": call_id,
                 "decision": "deny",
-                "reasoning": f"Session is {session_status} — evaluation denied",
+                "reasoning": reasoning,
                 "risk": "low",
                 "path": "fast",
                 "latency_ms": latency_ms,
                 "args_redacted": redact(args),
                 "classification": "write",
+                "session_status": session_status,
+                "status_reason": status_reason,
             }
 
         # Update session activity timestamp (for idle detection)
@@ -227,6 +234,59 @@ class Evaluator:
             try:
                 parent_session = self._sessions.get(parent_session_id, user_id=user_id)
                 parent_intention = parent_session.get("intention")
+
+                # Parent lifecycle cascade: if parent is terminated or
+                # suspended, auto-suspend the child session. This prevents
+                # orphaned children from operating under a dead parent.
+                parent_status = parent_session.get("status", "active")
+                if parent_status in ("terminated", "suspended"):
+                    status_reason = f"Parent session is {parent_status}"
+                    try:
+                        self._sessions.update_status(
+                            session_id,
+                            "suspended",
+                            user_id=user_id,
+                            status_reason=status_reason,
+                        )
+                    except ValueError:
+                        pass
+                    latency_ms = int((time.monotonic() - start_time) * 1000)
+                    cascade_args_redacted = redact(args)
+                    cascade_reasoning = (
+                        f"Session suspended — parent session is {parent_status}"
+                    )
+                    self._audit.insert(
+                        call_id=call_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        tool=tool,
+                        args_redacted=cascade_args_redacted,
+                        classification="write",
+                        evaluation_path="fast",
+                        decision="deny",
+                        risk="low",
+                        reasoning=cascade_reasoning,
+                        latency_ms=latency_ms,
+                    )
+                    try:
+                        self._sessions.increment_counter(
+                            session_id, "deny", user_id=user_id
+                        )
+                    except ValueError:
+                        pass
+                    return {
+                        "call_id": call_id,
+                        "decision": "deny",
+                        "reasoning": cascade_reasoning,
+                        "risk": "low",
+                        "path": "fast",
+                        "latency_ms": latency_ms,
+                        "args_redacted": cascade_args_redacted,
+                        "classification": "write",
+                        "session_status": "suspended",
+                        "status_reason": status_reason,
+                    }
             except ValueError:
                 logger.debug(
                     "Parent session %s not found for sub-session %s",

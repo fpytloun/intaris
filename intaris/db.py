@@ -152,6 +152,12 @@ class Database:
         # tasks are cleaned up periodically, so this is safe.
         self._migrate_analysis_tasks_check(conn)
 
+        # Migration: add status_reason to sessions (explains why a session
+        # was suspended/terminated, e.g., intention alignment failure)
+        if not self._column_exists(conn, "sessions", "status_reason"):
+            conn.execute("ALTER TABLE sessions ADD COLUMN status_reason TEXT")
+            logger.info("Migration: added status_reason column to sessions")
+
         # Migration: add agent_id to sessions (global agent filter)
         if not self._column_exists(conn, "sessions", "agent_id"):
             conn.execute("ALTER TABLE sessions ADD COLUMN agent_id TEXT")

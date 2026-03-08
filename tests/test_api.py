@@ -1348,6 +1348,122 @@ class TestEvaluatorBehavioral:
         resp = client_no_auth.get("/api/v1/session/sess-idle-upd", headers=headers)
         assert resp.json()["status"] == "idle"
 
+    def test_create_child_validates_parent_exists(self, client_no_auth):
+        """Creating a child session with nonexistent parent returns 404."""
+        headers = {"X-User-Id": "user-parent-val"}
+        resp = client_no_auth.post(
+            "/api/v1/intention",
+            json={
+                "session_id": "sess-orphan",
+                "intention": "Child session",
+                "parent_session_id": "nonexistent-parent",
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["detail"].lower()
+
+    def test_create_child_validates_parent_ownership(self, client_no_auth):
+        """Creating a child session referencing another user's parent returns 404."""
+        # Create parent under user-a
+        headers_a = {"X-User-Id": "user-own-a"}
+        _create_session(client_no_auth, "sess-parent-own", headers_a)
+
+        # Try to create child under user-b referencing user-a's parent
+        headers_b = {"X-User-Id": "user-own-b"}
+        resp = client_no_auth.post(
+            "/api/v1/intention",
+            json={
+                "session_id": "sess-child-own",
+                "intention": "Child session",
+                "parent_session_id": "sess-parent-own",
+            },
+            headers=headers_b,
+        )
+        assert resp.status_code == 404
+
+    def test_session_response_includes_status_reason(self, client_no_auth):
+        """Session response includes status_reason field."""
+        headers = {"X-User-Id": "user-sr"}
+        _create_session(client_no_auth, "sess-sr", headers)
+        resp = client_no_auth.get("/api/v1/session/sess-sr", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "status_reason" in data
+        assert data["status_reason"] is None
+
+    def test_status_reason_cleared_on_reactivation(self, client_no_auth):
+        """Reactivating a session clears status_reason."""
+        headers = {"X-User-Id": "user-sr-clear"}
+        _create_session(client_no_auth, "sess-sr-clear", headers)
+
+        # Suspend the session (status_reason would normally be set by the
+        # alignment barrier, but we test the clear behavior via API)
+        resp = client_no_auth.patch(
+            "/api/v1/session/sess-sr-clear/status",
+            json={"status": "suspended"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+
+        # Reactivate
+        resp = client_no_auth.patch(
+            "/api/v1/session/sess-sr-clear/status",
+            json={"status": "active"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+
+        # Verify status_reason is cleared
+        resp = client_no_auth.get("/api/v1/session/sess-sr-clear", headers=headers)
+        assert resp.json()["status_reason"] is None
+
+    def test_evaluate_suspended_includes_session_status(self, client_no_auth):
+        """Evaluating against a suspended session includes session_status."""
+        headers = {"X-User-Id": "user-eval-ss"}
+        _create_session(client_no_auth, "sess-eval-ss", headers)
+        client_no_auth.patch(
+            "/api/v1/session/sess-eval-ss/status",
+            json={"status": "suspended"},
+            headers=headers,
+        )
+        resp = client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-eval-ss",
+                "tool": "read",
+                "args": {"path": "/tmp/test.txt"},
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["decision"] == "deny"
+        assert data["session_status"] == "suspended"
+
+    def test_evaluate_terminated_includes_session_status(self, client_no_auth):
+        """Evaluating against a terminated session includes session_status."""
+        headers = {"X-User-Id": "user-eval-ts"}
+        _create_session(client_no_auth, "sess-eval-ts", headers)
+        client_no_auth.patch(
+            "/api/v1/session/sess-eval-ts/status",
+            json={"status": "terminated"},
+            headers=headers,
+        )
+        resp = client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-eval-ts",
+                "tool": "read",
+                "args": {"path": "/tmp/test.txt"},
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["decision"] == "deny"
+        assert data["session_status"] == "terminated"
+
 
 # ── Audit Record Types ───────────────────────────────────────────────
 

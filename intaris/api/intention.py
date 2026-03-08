@@ -32,12 +32,27 @@ async def declare_intention(
 
     Creates a new session with the declared intention, optional details,
     and optional policy. Must be called before /evaluate for a session.
+
+    For child sessions (parent_session_id set), validates the parent
+    exists and triggers an async alignment check. The first /evaluate
+    call will wait for the alignment check to complete.
     """
     from intaris.server import _get_db
     from intaris.session import SessionStore
 
     try:
         store = SessionStore(_get_db())
+
+        # Validate parent session exists and belongs to the same user
+        if request.parent_session_id:
+            try:
+                store.get(request.parent_session_id, user_id=ctx.user_id)
+            except ValueError:
+                raise HTTPException(
+                    status_code=404,
+                    detail=(f"Parent session {request.parent_session_id} not found"),
+                )
+
         store.create(
             user_id=ctx.user_id,
             session_id=request.session_id,
@@ -64,7 +79,19 @@ async def declare_intention(
                 }
             )
 
+        # Trigger async alignment check for child sessions.
+        # The check runs in the background; the first /evaluate call
+        # waits for it via the alignment barrier.
+        if request.parent_session_id:
+            alignment_barrier = getattr(
+                http_request.app.state, "alignment_barrier", None
+            )
+            if alignment_barrier is not None:
+                await alignment_barrier.trigger(ctx.user_id, request.session_id)
+
         return IntentionResponse(ok=True)
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except Exception:
@@ -166,6 +193,14 @@ async def update_session(
                     "details": session.get("details"),
                 }
             )
+
+        # Re-check alignment for child sessions when intention changes
+        if request.intention and session.get("parent_session_id"):
+            alignment_barrier = getattr(
+                http_request.app.state, "alignment_barrier", None
+            )
+            if alignment_barrier is not None:
+                await alignment_barrier.trigger(ctx.user_id, session_id)
 
         return SessionResponse(**session)
     except ValueError as e:
