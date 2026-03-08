@@ -218,29 +218,21 @@ function processOpenCode(events) {
 
     // ── User message ──
     if (event.type === 'message' && data.role === 'user') {
+      // Skip empty user messages
+      if (!data.text || !data.text.trim()) continue;
       blocks.push({
         type: 'user-message',
         id: 'b' + (blockId++),
-        text: data.text || '',
+        text: data.text,
         ts: event.ts,
       });
       continue;
     }
 
-    // ── Assistant message metadata ──
+    // Skip assistant message metadata — these fire after every assistant
+    // message (including intermediate tool-call turns) and add noise.
+    // Token/cost info is already visible in step-finish blocks.
     if (event.type === 'message' && data.role === 'assistant') {
-      const meta = data.metadata || {};
-      blocks.push({
-        type: 'assistant-meta',
-        id: 'b' + (blockId++),
-        model: data.model || meta.modelID || '',
-        tokens: meta.tokens || null,
-        tokenSummary: formatTokens(meta.tokens),
-        cost: meta.cost || 0,
-        finish: meta.finish || '',
-        agent: meta.agent || '',
-        ts: event.ts,
-      });
       continue;
     }
 
@@ -662,6 +654,7 @@ function consolePlayer() {
       await this.loadEvents();
       this.processEvents();
       this.scrollToBottom();
+      this.startLiveTail();
     },
 
     close() {

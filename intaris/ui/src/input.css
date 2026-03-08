@@ -311,10 +311,6 @@
            border-t border-b border-brand-border/20;
   }
 
-  .console-assistant-meta {
-    @apply text-xs text-muted my-2 flex items-center gap-1 flex-wrap;
-  }
-
   .console-subtask {
     @apply my-2 pl-4 border-l-2 border-purple-500/50 text-xs py-1;
   }
