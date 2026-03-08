@@ -7,6 +7,7 @@ for safety evaluation endpoints, and MCP proxy server.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import hmac
@@ -473,32 +474,50 @@ async def lifespan(app):
         api_app.state.notification_dispatcher = notification_dispatcher
         api_app.state.event_store = app.state.event_store
 
-    if mcp_proxy is not None:
-        await mcp_proxy.start()
-        # The session manager requires run() as an async context manager
-        # to manage its internal task group for handling MCP sessions.
-        async with mcp_proxy.session_manager.run():
-            logger.info("MCP proxy initialized")
+    try:
+        if mcp_proxy is not None:
+            await mcp_proxy.start()
+            # The session manager requires run() as an async context manager
+            # to manage its internal task group for handling MCP sessions.
+            async with mcp_proxy.session_manager.run():
+                logger.info("MCP proxy initialized")
+                yield
+                # Cleanup MCP proxy before exiting the session manager context.
+                await mcp_proxy.shutdown()
+        else:
             yield
-            # Cleanup MCP proxy before exiting the session manager context.
-            await mcp_proxy.shutdown()
-    else:
-        yield
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        logger.info("Shutdown interrupted — running cleanup")
+        # Best-effort MCP proxy cleanup if interrupted before normal exit
+        if mcp_proxy is not None:
+            with contextlib.suppress(Exception):
+                await mcp_proxy.shutdown()
+    finally:
+        # Cleanup always runs, even on CancelledError/KeyboardInterrupt.
+        # Each step is individually guarded so one failure doesn't block
+        # the rest.
+        _mcp_proxy_ref = None
 
-    # Cleanup
-    _mcp_proxy_ref = None
+        # Flush event store buffers (deterministic — no event loss)
+        if app.state.event_store is not None:
+            with contextlib.suppress(Exception):
+                app.state.event_store.flush_all()
+                logger.info("Event store flushed")
 
-    # Flush event store buffers before shutdown (deterministic — no event loss)
-    if app.state.event_store is not None:
-        app.state.event_store.flush_all()
-        logger.info("Event store flushed")
+        with contextlib.suppress(Exception):
+            await background_worker.stop()
 
-    await background_worker.stop()
-    await app.state.webhook.close()
-    await notification_dispatcher.close()
-    db = _get_db()
-    db.close()
-    logger.info("Intaris shutting down")
+        with contextlib.suppress(Exception):
+            await app.state.webhook.close()
+
+        with contextlib.suppress(Exception):
+            await notification_dispatcher.close()
+
+        with contextlib.suppress(Exception):
+            db = _get_db()
+            db.close()
+
+        logger.info("Intaris shut down")
 
 
 def _init_mcp_proxy(cfg):
