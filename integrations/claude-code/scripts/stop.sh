@@ -10,7 +10,8 @@
 #   INTARIS_API_KEY    - API key for authentication (required)
 #   INTARIS_AGENT_ID   - Agent ID (default: claude-code)
 #   INTARIS_USER_ID    - User ID (optional if API key maps to user)
-#   INTARIS_DEBUG      - Enable debug logging to stderr (default: false)
+#   INTARIS_SESSION_RECORDING  - Enable session recording (default: false)
+#   INTARIS_DEBUG              - Enable debug logging to stderr (default: false)
 
 set -euo pipefail
 
@@ -21,6 +22,7 @@ INTARIS_URL="${INTARIS_URL:-http://localhost:8060}"
 INTARIS_API_KEY="${INTARIS_API_KEY:-}"
 INTARIS_AGENT_ID="${INTARIS_AGENT_ID:-claude-code}"
 INTARIS_USER_ID="${INTARIS_USER_ID:-}"
+INTARIS_SESSION_RECORDING="${INTARIS_SESSION_RECORDING:-false}"
 INTARIS_DEBUG="${INTARIS_DEBUG:-false}"
 
 log() {
@@ -88,6 +90,45 @@ fi
 # Build request bodies
 STATUS_BODY=$(jq -n '{status: "completed"}')
 SUMMARY_BODY=$(jq -n --arg s "$SUMMARY" '{summary: $s}')
+
+# -- Session Recording: upload transcript (fire-and-forget) -----------------
+
+if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
+    # Claude Code stores transcripts as JSONL files. The transcript path
+    # may be available in the hook input or can be found by session ID.
+    TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+
+    if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+        log "Uploading transcript from: $TRANSCRIPT_PATH"
+
+        # Read transcript and wrap each line as a recording event
+        EVENTS="[]"
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            EVENTS=$(echo "$EVENTS" | jq --argjson entry "$line" \
+                '. + [{type: "transcript", data: $entry}]' 2>/dev/null || echo "$EVENTS")
+        done < "$TRANSCRIPT_PATH"
+
+        EVENT_COUNT=$(echo "$EVENTS" | jq 'length' 2>/dev/null || echo "0")
+        if [ "$EVENT_COUNT" -gt 0 ]; then
+            log "Uploading $EVENT_COUNT transcript events"
+            curl -s --max-time 5 \
+                -X POST \
+                "${HEADERS[@]}" \
+                -H "X-Intaris-Source: claude-code" \
+                -d "$EVENTS" \
+                "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
+
+            # Flush events to storage
+            curl -s --max-time 2 \
+                -X POST \
+                "${HEADERS[@]}" \
+                "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events/flush" >/dev/null 2>&1 || true
+        fi
+    else
+        log "No transcript path available or file not found"
+    fi
+fi
 
 log "Signaling completion for session: $INTARIS_SESSION_ID"
 

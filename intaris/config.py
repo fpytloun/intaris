@@ -226,6 +226,62 @@ class NotificationConfig:
     )
 
 
+@dataclass
+class EventStoreConfig:
+    """Session event store configuration.
+
+    Controls the session recording feature: append-only event logs
+    that capture the full session timeline for live tailing, playback,
+    reconstruction, and behavioral analysis.
+
+    Storage uses chunked ndjson files — one chunk per flush. Both
+    filesystem and S3 backends use the same chunked layout:
+      {user_id}/{session_id}/seq_{start:06d}_{end:06d}.ndjson
+    """
+
+    # Master switch for the event store.
+    enabled: bool = field(
+        default_factory=lambda: _env_bool("EVENT_STORE_ENABLED", default=True)
+    )
+
+    # Storage backend: "filesystem" or "s3".
+    backend: str = field(
+        default_factory=lambda: _env("EVENT_STORE_BACKEND", "filesystem")
+    )
+
+    # Filesystem settings (default for local development).
+    filesystem_path: str = field(
+        default_factory=lambda: (
+            _env("EVENT_STORE_PATH") or os.path.join(_data_dir(), "events")
+        )
+    )
+
+    # S3 / MinIO settings.
+    s3_endpoint: str = field(
+        default_factory=lambda: _env("EVENT_STORE_S3_ENDPOINT", "http://localhost:9000")
+    )
+    s3_access_key: str = field(
+        default_factory=lambda: _env("EVENT_STORE_S3_ACCESS_KEY")
+    )
+    s3_secret_key: str = field(
+        default_factory=lambda: _env("EVENT_STORE_S3_SECRET_KEY")
+    )
+    s3_bucket: str = field(
+        default_factory=lambda: _env("EVENT_STORE_S3_BUCKET", "intaris-events")
+    )
+    s3_region: str = field(default_factory=lambda: _env("EVENT_STORE_S3_REGION"))
+
+    # Write buffer: max events per chunk before flushing.
+    flush_size: int = field(
+        default_factory=lambda: _env_int("EVENT_STORE_FLUSH_SIZE", 100)
+    )
+
+    # Write buffer: seconds between periodic flushes.
+    flush_interval: int = field(
+        default_factory=lambda: _env_int("EVENT_STORE_FLUSH_INTERVAL", 30)
+    )
+
+
 def _build_analysis_llm_config() -> LLMConfig:
     """Build LLM config for analysis tasks.
 
@@ -256,6 +312,7 @@ class Config:
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
     notification: NotificationConfig = field(default_factory=NotificationConfig)
+    event_store: EventStoreConfig = field(default_factory=EventStoreConfig)
 
     def validate(self) -> None:
         """Validate that required configuration is present."""
@@ -315,6 +372,33 @@ class Config:
                 "timeout than the evaluate model). Set ANALYSIS_ENABLED=false "
                 "to disable behavioral analysis."
             )
+
+        # Event store backend validation.
+        if self.event_store.enabled:
+            if self.event_store.backend not in ("filesystem", "s3"):
+                raise ValueError(
+                    f"EVENT_STORE_BACKEND={self.event_store.backend} is not "
+                    "supported. Use 'filesystem' or 's3'."
+                )
+            if self.event_store.backend == "s3":
+                if (
+                    not self.event_store.s3_access_key
+                    or not self.event_store.s3_secret_key
+                ):
+                    raise ValueError(
+                        "EVENT_STORE_S3_ACCESS_KEY and EVENT_STORE_S3_SECRET_KEY "
+                        "are required when EVENT_STORE_BACKEND=s3."
+                    )
+            if self.event_store.flush_size < 1:
+                raise ValueError(
+                    f"EVENT_STORE_FLUSH_SIZE={self.event_store.flush_size} "
+                    "must be >= 1."
+                )
+            if self.event_store.flush_interval < 1:
+                raise ValueError(
+                    f"EVENT_STORE_FLUSH_INTERVAL={self.event_store.flush_interval} "
+                    "must be >= 1."
+                )
 
 
 def load_config() -> Config:

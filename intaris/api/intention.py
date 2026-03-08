@@ -79,6 +79,33 @@ async def declare_intention(
                 }
             )
 
+        # Auto-append lifecycle event to event store (session recording)
+        event_store = getattr(http_request.app.state, "event_store", None)
+        if event_store is not None:
+            try:
+                event_store.append(
+                    ctx.user_id,
+                    request.session_id,
+                    [
+                        {
+                            "type": "lifecycle",
+                            "data": {
+                                "event": "session_created",
+                                "status": "active",
+                                "intention": request.intention,
+                                "agent_id": ctx.agent_id,
+                                "parent_session_id": request.parent_session_id,
+                                "details": request.details,
+                            },
+                        }
+                    ],
+                    source="intaris",
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to auto-append session_created event", exc_info=True
+                )
+
         # Trigger async alignment check for child sessions.
         # The check runs in the background; the first /evaluate call
         # waits for it via the alignment barrier.
@@ -242,6 +269,40 @@ async def update_session_status(
                     "status": request.status,
                 }
             )
+
+        # Auto-append lifecycle event to event store (session recording)
+        event_store = getattr(http_request.app.state, "event_store", None)
+        if event_store is not None:
+            try:
+                event_store.append(
+                    ctx.user_id,
+                    session_id,
+                    [
+                        {
+                            "type": "lifecycle",
+                            "data": {
+                                "event": "session_status_changed",
+                                "status": request.status,
+                            },
+                        }
+                    ],
+                    source="intaris",
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to auto-append status_changed event", exc_info=True
+                )
+
+            # Flush event buffer on session completion/termination/suspension
+            if request.status in ("completed", "terminated", "suspended"):
+                try:
+                    event_store.flush_session(ctx.user_id, session_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to flush events on session %s",
+                        request.status,
+                        exc_info=True,
+                    )
 
         return StatusUpdateResponse(ok=True)
     except ValueError as e:

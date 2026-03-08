@@ -21,11 +21,12 @@ intaris/
 │   │   ├── opencode.json  # MCP proxy config example
 │   │   └── README.md      # Setup and usage guide
 │   └── claude-code/
-│       ├── hooks.json     # Hook configuration (SessionStart + PreToolUse + Stop)
+│       ├── hooks.json     # Hook configuration (SessionStart + PreToolUse + PostToolUse + Stop)
 │       ├── scripts/
 │       │   ├── session.sh # SessionStart handler (creates Intaris session)
-│       │   ├── evaluate.sh # PreToolUse handler (calls /api/v1/evaluate + checkpoints)
-│       │   └── stop.sh    # Stop handler (session completion + agent summary)
+│       │   ├── evaluate.sh # PreToolUse handler (calls /api/v1/evaluate + checkpoints + recording)
+│       │   ├── record.sh  # PostToolUse handler (records tool results when recording enabled)
+│       │   └── stop.sh    # Stop handler (session completion + agent summary + transcript upload)
 │       └── README.md      # Setup and usage guide
 ├── server.py              # HTTP server entry point, health endpoint, auth middleware, lifespan, MCP mount
 ├── config.py              # Configuration from environment variables (dataclasses)
@@ -46,6 +47,10 @@ intaris/
 ├── decision.py            # Decision matrix (priority-ordered, escalate fast path)
 ├── ratelimit.py           # In-memory sliding window rate limiter
 ├── webhook.py             # Async webhook client with HMAC-SHA256 signing
+├── events/
+│   ├── __init__.py        # Package marker
+│   ├── backend.py         # EventBackend Protocol, FilesystemEventBackend, S3EventBackend
+│   └── store.py           # EventStore (high-level wrapper with EventBuffer, EventBus integration)
 ├── mcp/
 │   ├── __init__.py        # Package marker
 │   ├── store.py           # MCPServerStore CRUD + tool preferences (encrypted secrets)
@@ -62,6 +67,7 @@ intaris/
 │   ├── info.py            # GET /whoami, /stats, /config (management UI support, MCP stats)
 │   ├── mcp.py             # MCP server CRUD + tool preference endpoints
 │   ├── analysis.py        # Behavioral analysis endpoints (L1/L2/L3 data collection + retrieval)
+│   ├── events.py          # Session recording endpoints (POST/GET events, flush)
 │   └── stream.py          # EventBus + WebSocket streaming (first-message auth)
 └── ui/
     ├── __init__.py        # Package marker
@@ -77,6 +83,7 @@ intaris/
         │   ├── app.js     # Alpine.js stores (auth, nav, notify)
         │   ├── dashboard.js # Dashboard tab component
         │   ├── sessions.js  # Sessions tab component
+        │   ├── player.js    # Session recording player component
         │   ├── audit.js     # Audit tab component
         │   ├── approvals.js # Approvals tab component (WebSocket + polling fallback)
         │   ├── servers.js   # Servers tab component (MCP server management)
@@ -107,10 +114,11 @@ intaris/
 | **Redaction** | `redactor.py` | Secret redaction before audit storage |
 | **Rate Limiting** | `ratelimit.py` | In-memory sliding window rate limiter per (user_id, session_id) |
 | **Webhook** | `webhook.py` | Async webhook client with HMAC-SHA256 signing for escalation callbacks |
+| **Event Store** | `events/` | Session recording: chunked ndjson storage, write buffering, EventBus integration |
 | **Session** | `session.py` | Session CRUD, counter management, paginated listing, idle sweep |
 | **Audit** | `audit.py` | Audit log CRUD and querying (reasoning, checkpoint, summary record types) |
 | **Database** | `db.py` | SQLite connection management, schema (incl. analysis tables) |
-| **Configuration** | `config.py` | Environment variable parsing (incl. AnalysisConfig, analysis LLM config) |
+| **Configuration** | `config.py` | Environment variable parsing (incl. AnalysisConfig, EventStoreConfig) |
 
 ### Key design decisions
 
@@ -505,6 +513,76 @@ Uses **first-message auth** (no secrets in URLs):
 ### Session Status Enforcement
 
 The evaluator checks session status **before** any classification or LLM work. Suspended or terminated sessions are immediately denied with an appropriate message. This is enforced in `evaluator.py` at the start of the `evaluate()` method.
+
+## Session Recording (Event Store)
+
+Full-fidelity session recording system that captures the complete timeline of AI agent sessions as append-only ndjson event logs. Enables live tailing via WebSocket, session playback in the UI, and deeper behavioral analysis.
+
+### Architecture
+
+```
+Client (OpenCode/Claude Code)
+  → POST /session/{id}/events (batch append)
+  → EventStore.append() (seq assignment, buffering, EventBus publish)
+  → EventBuffer (in-memory, per-session)
+  → FilesystemEventBackend / S3EventBackend (chunked ndjson)
+```
+
+### Event format
+
+Each ndjson line:
+```json
+{"seq": 1, "ts": "2026-03-12T10:00:00.123Z", "type": "message", "source": "opencode", "data": {...}}
+```
+
+### Canonical event types
+
+`message`, `tool_call`, `tool_result`, `evaluation`, `part`, `lifecycle`, `checkpoint`, `reasoning`, `transcript`
+
+### Storage
+
+Chunked ndjson files, one chunk per flush. Filename encodes seq range: `{user_id}/{session_id}/seq_{start:06d}_{end:06d}.ndjson`. Both filesystem and S3 backends use identical layout.
+
+### API endpoints
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/v1/session/{id}/events` | POST | Append events (single or batch) |
+| `/api/v1/session/{id}/events` | GET | Read events with pagination and filtering |
+| `/api/v1/session/{id}/events/flush` | POST | Force flush buffered events |
+
+### Auto-append
+
+Existing endpoints auto-append to the event store as a side effect:
+- `/evaluate` → `evaluation` events
+- `/reasoning` → `reasoning` events
+- `/checkpoint` → `checkpoint` events
+- Session lifecycle → `lifecycle` events (created, status changed)
+
+### Client-side recording
+
+- **OpenCode plugin**: `INTARIS_SESSION_RECORDING=true` enables client-side buffering (50 events or 10s) with batch sends. Captures `tool_call`, `tool_result`, `message`, and `part` events.
+- **Claude Code hooks**: `INTARIS_SESSION_RECORDING=true` enables per-hook recording. `PostToolUse` records tool results. `Stop` uploads the full transcript.
+
+### Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `EVENT_STORE_ENABLED` | `true` | Master switch for the event store |
+| `EVENT_STORE_BACKEND` | `filesystem` | Storage backend: `filesystem` or `s3` |
+| `EVENT_STORE_PATH` | `~/.intaris/events` | Filesystem backend path |
+| `EVENT_STORE_FLUSH_SIZE` | `100` | Events per chunk before flushing |
+| `EVENT_STORE_FLUSH_INTERVAL` | `30` | Seconds between periodic flushes |
+| `EVENT_STORE_S3_*` | (various) | S3 endpoint, bucket, credentials |
+
+### UI Player
+
+The session recording player is embedded in the Sessions tab's session detail expansion. Features:
+- Scrollable event list with type badges and expandable JSON details
+- Event type filtering
+- Live tailing via WebSocket (`session_event` type)
+- Play/pause mode with configurable speed (0.5x-10x)
+- Pagination (load more on demand)
 
 ## E2E Tests
 

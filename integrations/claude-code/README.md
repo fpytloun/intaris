@@ -40,6 +40,7 @@ export INTARIS_USER_ID=your-username       # optional if API key maps to user
 export INTARIS_FAIL_OPEN=false             # optional, defaults to false
 export INTARIS_INTENTION=""                # optional, auto-generated from cwd
 export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disabled)
+export INTARIS_SESSION_RECORDING=false     # optional, enable session recording
 export INTARIS_DEBUG=false                 # optional, enable stderr logging
 ```
 
@@ -52,6 +53,7 @@ export INTARIS_DEBUG=false                 # optional, enable stderr logging
 | `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed when Intaris is unreachable. Default is `false` (fail-closed) -- tool calls are blocked when Intaris is down. |
 | `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"Claude Code coding session in <cwd>"` |
 | `INTARIS_CHECKPOINT_INTERVAL` | `25` | Number of evaluate calls between periodic checkpoints. Set to `0` to disable checkpoints. Each checkpoint consumes one rate limit slot. |
+| `INTARIS_SESSION_RECORDING` | `false` | Enable session recording. When `true`, tool calls and results are recorded to the event store for playback and analysis. |
 | `INTARIS_DEBUG` | `false` | Enable debug logging to stderr |
 
 ### 2. Install the Hooks
@@ -63,6 +65,7 @@ Copy the hooks configuration and scripts:
 mkdir -p ~/.claude/scripts
 cp integrations/claude-code/scripts/session.sh ~/.claude/scripts/intaris-session.sh
 cp integrations/claude-code/scripts/evaluate.sh ~/.claude/scripts/intaris-evaluate.sh
+cp integrations/claude-code/scripts/record.sh ~/.claude/scripts/intaris-record.sh
 cp integrations/claude-code/scripts/stop.sh ~/.claude/scripts/intaris-stop.sh
 chmod +x ~/.claude/scripts/intaris-*.sh
 
@@ -71,7 +74,7 @@ cp integrations/claude-code/hooks.json ~/.claude/settings.json
 # Or merge with existing settings.json if you have other hooks
 ```
 
-If you already have a `~/.claude/settings.json`, merge the `hooks` section from `hooks.json` into it. The hooks section includes `SessionStart`, `PreToolUse`, and `Stop` hooks.
+If you already have a `~/.claude/settings.json`, merge the `hooks` section from `hooks.json` into it. The hooks section includes `SessionStart`, `PreToolUse`, `PostToolUse`, and `Stop` hooks.
 
 ### 3. Verify
 
@@ -139,6 +142,28 @@ Configure upstream MCP servers in Intaris (via the UI, REST API, or `MCP_CONFIG_
 1. Claude Code connects to Intaris at `/mcp` as a Streamable HTTP MCP server.
 2. `tools/list` returns aggregated tools from all upstream servers.
 3. `tools/call` evaluates each call through the safety pipeline before forwarding.
+
+## Session Recording
+
+When `INTARIS_SESSION_RECORDING=true`, the hooks record tool calls and results to the Intaris event store for session playback and analysis.
+
+### What's recorded
+
+- **`PreToolUse`**: Records `tool_call` events with tool name, arguments, and evaluation decision
+- **`PostToolUse`**: Records `tool_result` events with tool output and error status
+- **`Stop`**: Uploads the full Claude Code transcript (JSONL) as `transcript` events, then flushes
+
+### How it works
+
+Unlike the OpenCode plugin (which buffers events client-side), the Claude Code hooks send events directly on each invocation since bash scripts are stateless. Each hook call sends 1-2 events via `POST /session/{id}/events`. The server-side EventStore buffers and consolidates these into chunks.
+
+Recording is completely non-blocking -- all recording API calls are fire-and-forget with 2s timeouts. Recording failures never block tool execution.
+
+### Enable recording
+
+```bash
+export INTARIS_SESSION_RECORDING=true
+```
 
 ## Behavioral Analysis
 

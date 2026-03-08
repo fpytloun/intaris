@@ -19,6 +19,7 @@
 #   INTARIS_FAIL_OPEN            - Allow tool calls if Intaris is unreachable (default: false)
 #   INTARIS_INTENTION            - Session intention override (default: auto-generated)
 #   INTARIS_CHECKPOINT_INTERVAL  - Evaluate calls between checkpoints (default: 25, 0=disabled)
+#   INTARIS_SESSION_RECORDING    - Enable session recording (default: false)
 #   INTARIS_DEBUG                - Enable debug logging to stderr (default: false)
 
 set -euo pipefail
@@ -30,6 +31,7 @@ INTARIS_USER_ID="${INTARIS_USER_ID:-}"
 INTARIS_FAIL_OPEN="${INTARIS_FAIL_OPEN:-false}"
 INTARIS_INTENTION="${INTARIS_INTENTION:-}"
 INTARIS_CHECKPOINT_INTERVAL="${INTARIS_CHECKPOINT_INTERVAL:-25}"
+INTARIS_SESSION_RECORDING="${INTARIS_SESSION_RECORDING:-false}"
 INTARIS_DEBUG="${INTARIS_DEBUG:-false}"
 
 log() {
@@ -255,6 +257,34 @@ if [ "$INTARIS_CHECKPOINT_INTERVAL" -gt 0 ] 2>/dev/null && [ $((CALL_COUNT % INT
         "${HEADERS[@]}" \
         -d "$CHECKPOINT_BODY" \
         "${INTARIS_URL}/api/v1/checkpoint" >/dev/null 2>&1 || true
+fi
+
+# -- Session Recording (fire-and-forget) ------------------------------------
+
+if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
+    RECORD_BODY=$(jq -n \
+        --arg tool "$TOOL_NAME" \
+        --argjson args "$TOOL_INPUT" \
+        --arg decision "$DECISION" \
+        --arg risk "$RISK" \
+        --arg call_id "$CALL_ID" \
+        '[{
+            type: "tool_call",
+            data: {
+                tool: $tool,
+                args: $args,
+                decision: $decision,
+                risk: $risk,
+                call_id: $call_id
+            }
+        }]')
+
+    curl -s --max-time 2 \
+        -X POST \
+        "${HEADERS[@]}" \
+        -H "X-Intaris-Source: claude-code" \
+        -d "$RECORD_BODY" \
+        "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
 fi
 
 # -- Output Decision --------------------------------------------------------

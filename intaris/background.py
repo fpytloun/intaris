@@ -423,6 +423,7 @@ class BackgroundWorker:
         # set to True in Phase 3 when real analyzer is available.
         self.analyzer_ready = False
         self._event_bus = None
+        self._event_store = None
 
     def set_event_bus(self, event_bus) -> None:
         """Set the EventBus reference for publishing events.
@@ -430,6 +431,14 @@ class BackgroundWorker:
         Called after initialization since EventBus is created separately.
         """
         self._event_bus = event_bus
+
+    def set_event_store(self, event_store) -> None:
+        """Set the EventStore reference for periodic flushing.
+
+        Called after initialization since EventStore is created separately.
+        When set, the background worker runs a periodic flush loop.
+        """
+        self._event_store = event_store
 
     async def start(self) -> None:
         """Launch all background loops.
@@ -455,7 +464,21 @@ class BackgroundWorker:
                 self._resilient_loop("scheduler", self._periodic_scheduler)
             ),
         ]
-        logger.info("Background worker started (3 loops)")
+
+        # Add event store flush loop if event store is configured
+        if self._event_store is not None:
+            self._tasks.append(
+                asyncio.create_task(
+                    self._resilient_loop(
+                        "event_store_flusher", self._event_store_flusher
+                    )
+                )
+            )
+            logger.info(
+                "Background worker started (4 loops, incl. event store flusher)"
+            )
+        else:
+            logger.info("Background worker started (3 loops)")
 
     async def stop(self) -> None:
         """Cancel all background loops.
@@ -604,6 +627,34 @@ class BackgroundWorker:
         if intention is not None:
             return {"intention": intention}
         return {"skipped": "No update needed"}
+
+    async def _event_store_flusher(self) -> None:
+        """Periodically flush event store buffers to storage.
+
+        Runs every EVENT_STORE_FLUSH_INTERVAL seconds (default 30s).
+        This bounds the maximum data loss window on hard crash.
+        """
+        # Import here to get the flush interval from the event store config
+        from intaris.config import load_config
+
+        cfg = load_config()
+        interval = cfg.event_store.flush_interval
+
+        while self._running:
+            await asyncio.sleep(interval)
+
+            if self._event_store is None:
+                continue
+
+            try:
+                buffered = self._event_store.buffered_event_count
+                if buffered > 0:
+                    self._event_store.flush_all()
+                    logger.debug(
+                        "Event store periodic flush: %d events flushed", buffered
+                    )
+            except Exception:
+                logger.exception("Event store periodic flush failed")
 
     async def _idle_sweeper(self) -> None:
         """Periodically transition inactive sessions to idle.

@@ -232,6 +232,30 @@ const IntarisAPI = {
     return this.post(`/notifications/channels/${encodeURIComponent(name)}/test`);
   },
 
+  // ── Session Events (Recording) ──────────────────────────────
+
+  /**
+   * Read events from a session's event log.
+   * @param {string} sessionId
+   * @param {Object} params - { after_seq, limit, type }
+   */
+  getSessionEvents(sessionId, params = {}) {
+    const qs = new URLSearchParams();
+    if (params.after_seq) qs.set('after_seq', params.after_seq);
+    if (params.limit) qs.set('limit', params.limit);
+    if (params.type) qs.set('type', params.type);
+    const query = qs.toString();
+    return this.get(`/session/${encodeURIComponent(sessionId)}/events${query ? '?' + query : ''}`);
+  },
+
+  /**
+   * Flush buffered events for a session.
+   * @param {string} sessionId
+   */
+  flushSessionEvents(sessionId) {
+    return this.post(`/session/${encodeURIComponent(sessionId)}/events/flush`);
+  },
+
   // ── WebSocket ───────────────────────────────────────────────
 
   /**

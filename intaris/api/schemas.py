@@ -320,3 +320,41 @@ class ProfileResponse(BaseModel):
     context_summary: str | None = None
     profile_version: int = 0
     updated_at: str | None = None
+
+
+# ── Session Events (Recording) ────────────────────────────────────────
+
+
+class SessionEvent(BaseModel):
+    """A single session event for recording."""
+
+    type: str = Field(
+        ...,
+        description=(
+            "Canonical event type: message, tool_call, tool_result, "
+            "evaluation, part, lifecycle, checkpoint, reasoning, transcript"
+        ),
+    )
+    data: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Event payload (client-native for reconstruction)",
+    )
+
+
+class EventAppendResponse(BaseModel):
+    """Response from appending events."""
+
+    ok: bool = True
+    count: int = Field(..., description="Number of events appended")
+    first_seq: int = Field(..., description="First assigned sequence number")
+    last_seq: int = Field(..., description="Last assigned sequence number")
+
+
+class EventReadResponse(BaseModel):
+    """Response from reading events."""
+
+    events: list[dict[str, Any]] = Field(
+        default_factory=list, description="Events ordered by seq"
+    )
+    last_seq: int = Field(0, description="Last sequence number in response")
+    has_more: bool = Field(False, description="Whether more events exist")

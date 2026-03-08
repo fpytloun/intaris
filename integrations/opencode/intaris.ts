@@ -28,9 +28,17 @@
  *   INTARIS_INTENTION            - Session intention override (default: auto-generated)
  *   INTARIS_CHECKPOINT_INTERVAL  - Evaluate calls between checkpoints (default: 25, 0=disabled)
  *   INTARIS_ESCALATION_TIMEOUT   - Max seconds to wait for escalation approval (default: 0=no timeout)
+ *   INTARIS_SESSION_RECORDING    - Enable session recording (default: false)
+ *   INTARIS_RECORDING_FLUSH_SIZE - Events per recording batch (default: 50)
+ *   INTARIS_RECORDING_FLUSH_MS   - Recording flush interval in ms (default: 10000)
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
+
+interface RecordingEvent {
+  type: string
+  data: Record<string, any>
+}
 
 interface SessionState {
   intarisSessionId: string | null
@@ -45,6 +53,8 @@ interface SessionState {
   agentName: string | null
   sessionTitle: string | null
   intentionUpdated: boolean
+  // Recording buffer
+  recordingBuffer: RecordingEvent[]
 }
 
 interface EvaluateResponse {
@@ -78,6 +88,18 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
   const escalationTimeoutMs = isNaN(rawEscalationTimeout)
     ? 0
     : Math.max(0, rawEscalationTimeout * 1000)
+  const sessionRecording =
+    (process.env.INTARIS_SESSION_RECORDING || "false").toLowerCase() === "true"
+  const rawRecordingFlushSize = parseInt(
+    process.env.INTARIS_RECORDING_FLUSH_SIZE || "50",
+    10,
+  )
+  const recordingFlushSize = isNaN(rawRecordingFlushSize) ? 50 : rawRecordingFlushSize
+  const rawRecordingFlushMs = parseInt(
+    process.env.INTARIS_RECORDING_FLUSH_MS || "10000",
+    10,
+  )
+  const recordingFlushMs = isNaN(rawRecordingFlushMs) ? 10000 : rawRecordingFlushMs
 
   // -- State ----------------------------------------------------------------
   // Track Intaris session per OpenCode session.
@@ -99,9 +121,11 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     path: string,
     payload: object | null,
     timeoutMs: number = 5000,
+    extraHeaders?: Record<string, string>,
   ): Promise<ApiResult> {
     const headers: Record<string, string> = {
       "X-Agent-Id": agentId,
+      ...extraHeaders,
     }
     if (payload !== null) {
       headers["Content-Type"] = "application/json"
@@ -222,6 +246,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         agentName: null,
         sessionTitle: null,
         intentionUpdated: false,
+        recordingBuffer: [],
       }
       sessions.set(sessionId, state)
       // Evict oldest entries if over limit
@@ -332,6 +357,59 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     )
   }
 
+  // -- Recording Helpers ---------------------------------------------------
+
+  /**
+   * Queue a recording event for a session. Events are buffered and
+   * flushed in batches to reduce API calls. No-op if recording is disabled.
+   */
+  function recordEvent(
+    sessionId: string,
+    event: RecordingEvent,
+  ): void {
+    if (!sessionRecording) return
+    const state = sessions.get(sessionId)
+    if (!state?.intarisSessionId) return
+
+    state.recordingBuffer.push(event)
+
+    // Auto-flush when buffer reaches threshold
+    if (state.recordingBuffer.length >= recordingFlushSize) {
+      flushRecordingBuffer(sessionId)
+    }
+  }
+
+  /**
+   * Flush the recording buffer for a session (fire-and-forget).
+   * Sends buffered events to POST /session/{id}/events.
+   */
+  function flushRecordingBuffer(sessionId: string): void {
+    const state = sessions.get(sessionId)
+    if (!state?.intarisSessionId) return
+    if (state.recordingBuffer.length === 0) return
+
+    // Drain the buffer
+    const events = state.recordingBuffer.splice(0)
+
+    callApi(
+      "POST",
+      `/api/v1/session/${encodeURIComponent(state.intarisSessionId)}/events`,
+      events,
+      5000,
+      { "X-Intaris-Source": "opencode" },
+    ).catch(() => {})
+  }
+
+  // Periodic recording flush timer (flushes all sessions)
+  let recordingFlushTimer: ReturnType<typeof setInterval> | null = null
+  if (sessionRecording) {
+    recordingFlushTimer = setInterval(() => {
+      for (const [sessionId] of sessions) {
+        flushRecordingBuffer(sessionId)
+      }
+    }, recordingFlushMs)
+  }
+
   /**
    * Ensure an Intaris session exists for the given OpenCode session.
    * Creates one via POST /api/v1/intention if needed.
@@ -439,12 +517,18 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
   /**
    * Signal session completion to Intaris (fire-and-forget).
-   * Sends status update and agent summary in parallel.
+   * Flushes recording buffer, then sends status update and agent summary.
    */
   function signalCompletion(
     intarisSessionId: string,
     state: SessionState,
+    sessionId?: string,
   ): void {
+    // Flush recording buffer before completion
+    if (sessionId) {
+      flushRecordingBuffer(sessionId)
+    }
+
     // Fire both calls in parallel — neither blocks the other
     Promise.all([
       callApi(
@@ -468,7 +552,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
   function completeChildSessions(parentIntarisId: string): void {
     for (const [childId, childState] of sessions) {
       if (childState.parentSessionId === parentIntarisId && childState.intarisSessionId) {
-        signalCompletion(childState.intarisSessionId, childState)
+        signalCompletion(childState.intarisSessionId, childState, childId)
         sessions.delete(childId)
       }
     }
@@ -508,7 +592,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         service: "intaris",
         level: "info",
         message: "Plugin initialized",
-        extra: { baseUrl, agentId, failOpen, checkpointInterval },
+        extra: { baseUrl, agentId, failOpen, checkpointInterval, sessionRecording },
       },
     })
     .catch(() => {})
@@ -572,6 +656,19 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
             },
             2000,
           ).catch(() => {})
+
+          // Record user message for session recording
+          recordEvent(input.sessionID, {
+            type: "message",
+            data: {
+              role: "user",
+              text: userText,
+              agent: input.agent,
+              model: input.model,
+              messageID: input.messageID,
+              sessionID: input.sessionID,
+            },
+          })
         }
       }
     },
@@ -633,7 +730,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         if (!state?.intarisSessionId) return
 
         // Complete this session
-        signalCompletion(state.intarisSessionId, state)
+        signalCompletion(state.intarisSessionId, state, sessionId)
         // Also complete any child sessions that are still active
         completeChildSessions(state.intarisSessionId)
         sessions.delete(sessionId)
@@ -651,9 +748,47 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
         // Only auto-complete child sessions on idle, not parent sessions
         if (state.parentSessionId) {
-          signalCompletion(state.intarisSessionId, state)
+          signalCompletion(state.intarisSessionId, state, sessionId)
           sessions.delete(sessionId)
         }
+      }
+
+      // -- Session Recording: capture part updates --------------------------
+      // message.part.updated fires for every part creation/update including
+      // streaming deltas. Captures assistant text, step-start/finish, tool
+      // invocations, and all other part types for full session fidelity.
+      if (event.type === "message.part.updated") {
+        const sessionId: string = event.properties?.sessionID
+        if (!sessionId) return
+
+        const part = event.properties?.part
+        if (!part) return
+
+        recordEvent(sessionId, {
+          type: "part",
+          data: {
+            sessionID: sessionId,
+            messageID: event.properties?.messageID,
+            part,
+          },
+        })
+      }
+
+      // message.updated captures full message metadata (role, model, tokens)
+      if (event.type === "message.updated") {
+        const sessionId: string = event.properties?.sessionID
+        if (!sessionId) return
+
+        recordEvent(sessionId, {
+          type: "message",
+          data: {
+            sessionID: sessionId,
+            messageID: event.properties?.messageID,
+            role: event.properties?.role,
+            model: event.properties?.model,
+            metadata: event.properties?.metadata,
+          },
+        })
       }
     },
 
@@ -685,6 +820,17 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           `[intaris] Cannot create session: ${detail}`,
         )
       }
+
+      // Record tool call event (before evaluation, fire-and-forget)
+      recordEvent(sessionID, {
+        type: "tool_call",
+        data: {
+          tool,
+          args: _output.args || {},
+          callID: input.callID,
+          sessionID,
+        },
+      })
 
       // Evaluate the tool call (30s timeout, retries with backoff)
       const { data: result, error: evalError, status: evalStatus } = await callApiWithRetry(
@@ -969,6 +1115,36 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       }
 
       // decision === "approve" (or escalation approved) — tool call proceeds normally
+    },
+
+    // -- Tool Result Recording ------------------------------------------------
+    "tool.execute.after": async (
+      input: {
+        tool: string
+        sessionID: string
+        callID: string
+      },
+      output: {
+        output?: any
+        isError?: boolean
+        title?: string
+        metadata?: Record<string, any>
+      },
+    ) => {
+      if (!input.sessionID) return
+
+      recordEvent(input.sessionID, {
+        type: "tool_result",
+        data: {
+          tool: input.tool,
+          callID: input.callID,
+          sessionID: input.sessionID,
+          output: output.output,
+          isError: output.isError || false,
+          title: output.title,
+          metadata: output.metadata,
+        },
+      })
     },
   }
 }

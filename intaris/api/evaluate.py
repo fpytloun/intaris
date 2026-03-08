@@ -171,6 +171,35 @@ async def evaluate(
                 }
             )
 
+        # Auto-append evaluation event to event store (session recording)
+        event_store = getattr(http_request.app.state, "event_store", None)
+        if event_store is not None:
+            try:
+                event_store.append(
+                    ctx.user_id,
+                    request.session_id,
+                    [
+                        {
+                            "type": "evaluation",
+                            "data": {
+                                "call_id": result["call_id"],
+                                "tool": request.tool,
+                                "args_redacted": result.get("args_redacted"),
+                                "classification": result.get("classification"),
+                                "decision": result["decision"],
+                                "risk": result.get("risk"),
+                                "reasoning": result.get("reasoning"),
+                                "path": result["path"],
+                                "latency_ms": result["latency_ms"],
+                                "agent_id": agent_id,
+                            },
+                        }
+                    ],
+                    source="intaris",
+                )
+            except Exception:
+                logger.debug("Failed to auto-append evaluation event", exc_info=True)
+
         return EvaluateResponse(**result)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e

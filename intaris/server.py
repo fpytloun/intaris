@@ -391,6 +391,19 @@ async def lifespan(app):
         app.state.alignment_barrier = None
         logger.info("Alignment barrier not initialized (analysis disabled)")
 
+    # Initialize event store for session recording (before background worker
+    # so the flush loop is included when the worker starts).
+    from intaris.events.store import EventStore
+
+    if cfg.event_store.enabled:
+        event_store = EventStore(cfg.event_store)
+        event_store.set_event_bus(app.state.event_bus)
+        app.state.event_store = event_store
+        logger.info("Event store initialized (backend=%s)", cfg.event_store.backend)
+    else:
+        app.state.event_store = None
+        logger.info("Event store disabled")
+
     # Initialize background worker for behavioral analysis
     from intaris.background import BackgroundWorker, TaskQueue
 
@@ -402,6 +415,7 @@ async def lifespan(app):
     )
     app.state.background_worker = background_worker
     background_worker.set_event_bus(app.state.event_bus)
+    background_worker.set_event_store(app.state.event_store)
     if cfg.analysis.enabled:
         await background_worker.start()
         logger.info("Background worker started (analysis enabled)")
@@ -457,6 +471,7 @@ async def lifespan(app):
         api_app.state.intention_barrier = app.state.intention_barrier
         api_app.state.alignment_barrier = app.state.alignment_barrier
         api_app.state.notification_dispatcher = notification_dispatcher
+        api_app.state.event_store = app.state.event_store
 
     if mcp_proxy is not None:
         await mcp_proxy.start()
@@ -472,6 +487,12 @@ async def lifespan(app):
 
     # Cleanup
     _mcp_proxy_ref = None
+
+    # Flush event store buffers before shutdown (deterministic — no event loss)
+    if app.state.event_store is not None:
+        app.state.event_store.flush_all()
+        logger.info("Event store flushed")
+
     await background_worker.stop()
     await app.state.webhook.close()
     await notification_dispatcher.close()

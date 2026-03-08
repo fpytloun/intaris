@@ -10,6 +10,7 @@
   <script src="/ui/js/app.js"></script>
   <script src="/ui/js/dashboard.js"></script>
   <script src="/ui/js/sessions.js"></script>
+  <script src="/ui/js/player.js"></script>
   <script src="/ui/js/audit.js"></script>
   <script src="/ui/js/approvals.js"></script>
   <script src="/ui/js/servers.js"></script>
@@ -436,6 +437,97 @@
                     <p class="text-sm text-yellow-200" x-text="session.status_reason"></p>
                   </div>
                 </template>
+
+                <!-- Session Recording Player -->
+                <div x-data="sessionPlayer()" class="mt-3 mb-4">
+                  <button @click.stop="visible ? close() : open(session.session_id)"
+                          class="btn-secondary text-sm mb-2">
+                    <span x-text="visible ? 'Hide Recording' : 'Show Recording'"></span>
+                    <span x-show="eventCount > 0" class="ml-1 text-xs text-muted" x-text="'(' + eventCount + ' events)'"></span>
+                  </button>
+
+                  <div x-show="visible" x-cloak class="border border-brand-border rounded-lg p-3 bg-brand-elevated">
+                    <!-- Controls bar -->
+                    <div class="flex items-center justify-between mb-3">
+                      <div class="flex items-center gap-2">
+                        <!-- Type filter -->
+                        <select x-model="typeFilter" @change="applyFilter()"
+                                class="input text-xs py-1 px-2 w-auto">
+                          <template x-for="t in filteredTypes" :key="t">
+                            <option :value="t" x-text="t || 'All types'"></option>
+                          </template>
+                        </select>
+
+                        <!-- Live tail toggle -->
+                        <button @click.stop="toggleLiveTail()"
+                                :class="liveTail ? 'btn-success' : 'btn-secondary'"
+                                class="text-xs py-1 px-2">
+                          <span x-text="liveTail ? 'Live' : 'Tail'"></span>
+                        </button>
+
+                        <!-- Player controls -->
+                        <button @click.stop="togglePlaying()"
+                                class="btn-secondary text-xs py-1 px-2"
+                                x-text="playing ? 'Pause' : 'Play'"></button>
+                        <select x-model.number="playSpeed" class="input text-xs py-1 px-2 w-auto">
+                          <option value="0.5">0.5x</option>
+                          <option value="1">1x</option>
+                          <option value="2">2x</option>
+                          <option value="5">5x</option>
+                          <option value="10">10x</option>
+                        </select>
+                      </div>
+
+                      <div class="text-xs text-muted">
+                        <span x-text="eventCount"></span> events
+                        <span x-show="hasMore"> (more available)</span>
+                      </div>
+                    </div>
+
+                    <!-- Error -->
+                    <div x-show="error" class="text-sm text-red-400 mb-2" x-text="error"></div>
+
+                    <!-- Loading -->
+                    <div x-show="loading && events.length === 0" class="text-sm text-muted py-4 text-center">Loading events...</div>
+
+                    <!-- Empty state -->
+                    <div x-show="!loading && events.length === 0 && !error" class="text-sm text-muted py-4 text-center">No recorded events</div>
+
+                    <!-- Event list -->
+                    <div x-show="events.length > 0" class="space-y-0.5 max-h-96 overflow-y-auto" x-ref="eventList">
+                      <template x-for="event in events" :key="event.seq">
+                        <div>
+                          <div class="flex items-center justify-between py-1 text-xs cursor-pointer hover:bg-brand-bg/50 rounded px-2 -mx-1"
+                               :class="expandedSeq === event.seq ? 'bg-brand-bg/50' : ''"
+                               @click.stop="toggleExpand(event)">
+                            <div class="flex items-center gap-1.5 min-w-0">
+                              <span class="text-muted w-8 text-right flex-shrink-0" x-text="'#' + event.seq"></span>
+                              <span :class="eventTypeBadge(event.type)" x-text="event.type" class="text-xs flex-shrink-0"></span>
+                              <span class="truncate text-secondary" x-text="eventSummary(event)"></span>
+                            </div>
+                            <div class="flex items-center gap-2 flex-shrink-0 ml-2">
+                              <span class="text-muted" x-text="event.source || ''"></span>
+                              <span class="text-muted" x-text="formatTime(event.ts)"></span>
+                            </div>
+                          </div>
+
+                          <!-- Expanded event detail -->
+                          <div x-show="expandedSeq === event.seq" x-cloak
+                               class="ml-10 mt-0.5 mb-1 p-2 bg-brand-bg rounded border border-brand-border">
+                            <pre class="text-xs overflow-x-auto whitespace-pre-wrap break-all max-h-64 overflow-y-auto"
+                                 x-text="eventDetail(event)"></pre>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+
+                    <!-- Load more -->
+                    <div x-show="hasMore" class="text-center mt-2">
+                      <button @click.stop="loadMore()" class="btn-secondary text-xs py-1 px-3"
+                              :disabled="loading" x-text="loading ? 'Loading...' : 'Load more'"></button>
+                    </div>
+                  </div>
+                </div>
 
                 <!-- Session Audit Feed (Expandable) -->
                 <div class="mt-3">
