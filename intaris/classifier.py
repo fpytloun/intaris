@@ -1,27 +1,31 @@
 """Tool call classifier for intaris.
 
 Classifies tool calls into READ, WRITE, CRITICAL, or ESCALATE categories
-using an explicit read-only allowlist, critical pattern detection, and
-optional per-tool preference overrides.
+using an explicit read-only allowlist, critical pattern detection,
+optional per-tool preference overrides, and filesystem path policy.
 
 Security model: default-deny. Everything not explicitly allowlisted
 as read-only goes through LLM evaluation. Unknown tools, third-party
 MCP tools, and unrecognized bash commands are all classified as WRITE.
 
 Classification priority (deny always wins):
-1. Session policy deny (deny_tools, deny_commands) → CRITICAL
-2. Tool preference deny → CRITICAL
-3. Tool preference escalate → ESCALATE
-4. Session policy allow (allow_tools, allow_commands) → READ
-5. Tool preference auto-approve → READ
-6. Critical pattern detection (bash only) → CRITICAL
-7. Built-in read-only allowlist → READ
-8. Default → WRITE
+1.   Session policy deny (deny_tools, deny_commands) → CRITICAL
+1.5. Session policy deny_paths (fnmatch on resolved paths) → CRITICAL
+2.   Tool preference deny → CRITICAL
+3.   Tool preference escalate → ESCALATE
+4.   Session policy allow (allow_tools, allow_commands) → READ
+5.   Tool preference auto-approve → READ
+6.   Critical pattern detection (bash only) → CRITICAL
+7.   Built-in read-only allowlist → READ
+7.5. Path outside project (not in allow_paths) → WRITE
+8.   Default → WRITE
 """
 
 from __future__ import annotations
 
+import fnmatch
 import logging
+import os
 import re
 import shlex
 from enum import Enum
@@ -183,6 +187,201 @@ _CRITICAL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\biptables\s+-F\b"),
 ]
 
+# ── Path Policy ───────────────────────────────────────────────────────
+# Filesystem path awareness for tool call classification.
+
+# Known argument keys that contain file paths.
+PATH_ARG_KEYS: tuple[str, ...] = (
+    "filePath",
+    "file_path",
+    "path",
+    "directory",
+    "dir",
+    "folder",
+    "filename",
+)
+
+# Regex to extract absolute paths from bash command strings.
+# Matches sequences starting with / followed by path characters.
+# Intentionally simple — catches obvious cases like "cat /etc/shadow"
+# without trying to handle all shell constructs.
+_BASH_ABSOLUTE_PATH_RE = re.compile(r"(?<![a-zA-Z0-9_:])(/[a-zA-Z0-9_./-]+)")
+
+
+def extract_paths(args: dict[str, Any]) -> list[str]:
+    """Extract file paths from tool arguments.
+
+    Scans known argument keys for string values that look like file paths.
+
+    Args:
+        args: Tool arguments dict.
+
+    Returns:
+        List of path strings found in args (may be empty).
+    """
+    paths: list[str] = []
+    for key in PATH_ARG_KEYS:
+        val = args.get(key)
+        if isinstance(val, str) and val:
+            paths.append(val)
+    return paths
+
+
+def extract_bash_paths(command: str) -> list[str]:
+    """Extract absolute paths from a bash command string.
+
+    Uses a simple regex to find absolute paths. Intentionally
+    conservative — only catches obvious cases like ``cat /etc/shadow``.
+    Does not handle shell variables, tilde expansion, or subshells.
+
+    Args:
+        command: Bash command string.
+
+    Returns:
+        List of absolute path strings found in the command.
+    """
+    # Strip quoted strings first to avoid matching paths inside
+    # string literals that may be data, not filesystem targets.
+    stripped = _strip_quoted_strings(command)
+    return _BASH_ABSOLUTE_PATH_RE.findall(stripped)
+
+
+def resolve_path(path: str, working_directory: str) -> str:
+    """Resolve a file path against a working directory.
+
+    Absolute paths are normalized in place. Relative paths are joined
+    with the working directory first. Uses ``os.path.normpath`` to
+    collapse ``..`` components (prevents traversal bypasses).
+
+    Note: does NOT resolve symlinks (would require filesystem access).
+
+    Args:
+        path: File path (absolute or relative).
+        working_directory: Session's working directory.
+
+    Returns:
+        Normalized absolute path string.
+    """
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    return os.path.normpath(os.path.join(working_directory, path))
+
+
+def is_path_within(resolved_path: str, directory: str) -> bool:
+    """Check if a resolved path is within a directory.
+
+    Both paths should already be normalized (via ``os.path.normpath``).
+    Uses string prefix matching with a trailing separator to avoid
+    false positives (e.g., ``/home/user2`` is not within ``/home/user``).
+
+    Args:
+        resolved_path: Normalized absolute path.
+        directory: Normalized absolute directory path.
+
+    Returns:
+        True if resolved_path is within or equal to directory.
+    """
+    norm_dir = os.path.normpath(directory)
+    norm_path = os.path.normpath(resolved_path)
+    # Exact match (path IS the directory)
+    if norm_path == norm_dir:
+        return True
+    # Prefix match with separator
+    return norm_path.startswith(norm_dir + os.sep)
+
+
+def _check_deny_paths(
+    resolved_paths: list[str],
+    policy: dict[str, Any],
+) -> bool:
+    """Check if any resolved path matches deny_paths patterns.
+
+    Args:
+        resolved_paths: List of normalized absolute paths.
+        policy: Session policy dict.
+
+    Returns:
+        True if any path matches a deny_paths pattern.
+    """
+    deny_paths = policy.get("deny_paths", [])
+    if not deny_paths:
+        return False
+
+    for rp in resolved_paths:
+        for pattern in deny_paths:
+            if isinstance(pattern, str) and fnmatch.fnmatch(rp, pattern):
+                return True
+    return False
+
+
+def _check_allow_paths(
+    resolved_paths: list[str],
+    policy: dict[str, Any],
+) -> bool:
+    """Check if ALL resolved paths match allow_paths patterns.
+
+    Args:
+        resolved_paths: List of normalized absolute paths.
+        policy: Session policy dict.
+
+    Returns:
+        True if every path matches at least one allow_paths pattern.
+    """
+    allow_paths = policy.get("allow_paths", [])
+    if not allow_paths:
+        return False
+
+    for rp in resolved_paths:
+        matched = False
+        for pattern in allow_paths:
+            if isinstance(pattern, str) and fnmatch.fnmatch(rp, pattern):
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
+def _check_path_policy(
+    resolved_paths: list[str],
+    working_directory: str,
+    policy: dict[str, Any],
+) -> Classification | None:
+    """Check resolved paths against path policy and project boundary.
+
+    Priority:
+    1. deny_paths match → CRITICAL
+    2. allow_paths match (all paths) → None (no override)
+    3. Any path outside working_directory → WRITE
+    4. All paths within project → None (no override)
+
+    Args:
+        resolved_paths: List of normalized absolute paths.
+        working_directory: Session's working directory.
+        policy: Session policy dict (may contain allow_paths, deny_paths).
+
+    Returns:
+        Classification override, or None if no policy applies.
+    """
+    if not resolved_paths:
+        return None
+
+    # 1. deny_paths always wins
+    if _check_deny_paths(resolved_paths, policy):
+        return Classification.CRITICAL
+
+    # 2. allow_paths exempts from out-of-project override
+    if _check_allow_paths(resolved_paths, policy):
+        return None
+
+    # 3. Check if any path is outside the project
+    for rp in resolved_paths:
+        if not is_path_within(rp, working_directory):
+            return Classification.WRITE
+
+    # 4. All paths within project
+    return None
+
 
 def classify(
     tool: str,
@@ -190,18 +389,21 @@ def classify(
     *,
     session_policy: dict[str, Any] | None = None,
     tool_preferences: dict[str, str] | None = None,
+    working_directory: str | None = None,
 ) -> Classification:
     """Classify a tool call as READ, WRITE, CRITICAL, or ESCALATE.
 
     Classification priority (deny always wins):
-    1. Session policy deny (deny_tools, deny_commands) → CRITICAL
-    2. Tool preference deny → CRITICAL
-    3. Tool preference escalate → ESCALATE
-    4. Session policy allow (allow_tools, allow_commands) → READ
-    5. Tool preference auto-approve → READ
-    6. Critical pattern detection (bash only) → CRITICAL
-    7. Built-in read-only allowlist → READ
-    8. Default → WRITE (goes to LLM evaluation)
+    1.   Session policy deny (deny_tools, deny_commands) → CRITICAL
+    1.5. Session policy deny_paths (fnmatch on resolved paths) → CRITICAL
+    2.   Tool preference deny → CRITICAL
+    3.   Tool preference escalate → ESCALATE
+    4.   Session policy allow (allow_tools, allow_commands) → READ
+    5.   Tool preference auto-approve → READ
+    6.   Critical pattern detection (bash only) → CRITICAL
+    7.   Built-in read-only allowlist → READ
+    7.5. Path outside project (not in allow_paths) → WRITE
+    8.   Default → WRITE (goes to LLM evaluation)
 
     Args:
         tool: Tool name (e.g., "bash", "edit", "read", "mcp:add_memory").
@@ -209,6 +411,10 @@ def classify(
         session_policy: Optional per-session policy with custom rules.
         tool_preferences: Optional per-tool preference overrides mapping
             'server:tool' or 'tool' → preference string.
+        working_directory: Optional session working directory for path
+            policy enforcement. When set, file paths in tool args are
+            resolved against this directory and checked against path
+            policy (deny_paths, allow_paths) and project boundary.
 
     Returns:
         Classification enum value.
@@ -218,6 +424,12 @@ def classify(
         deny_override = _check_session_policy_deny(tool, args, session_policy)
         if deny_override is not None:
             return deny_override
+
+    # Step 1.5: Session policy deny_paths (resolved path matching)
+    if working_directory and session_policy:
+        resolved = _resolve_tool_paths(tool, args, working_directory)
+        if resolved and _check_deny_paths(resolved, session_policy):
+            return Classification.CRITICAL
 
     # Step 2: Tool preference deny
     pref = _get_tool_preference(tool, tool_preferences)
@@ -245,11 +457,53 @@ def classify(
             return Classification.CRITICAL
 
     # Step 7: Check read-only allowlist
-    if _is_read_only(tool, args):
+    if is_read_only(tool, args):
+        # Step 7.5: Path policy check for read-only tools.
+        # If the tool would be READ but targets paths outside the project
+        # directory, reclassify as WRITE to force LLM evaluation.
+        if working_directory:
+            resolved = _resolve_tool_paths(tool, args, working_directory)
+            if resolved:
+                path_override = _check_path_policy(
+                    resolved, working_directory, session_policy or {}
+                )
+                if path_override is not None:
+                    return path_override
         return Classification.READ
 
     # Step 8: Default to WRITE (goes to LLM evaluation)
     return Classification.WRITE
+
+
+def _resolve_tool_paths(
+    tool: str, args: dict[str, Any], working_directory: str
+) -> list[str]:
+    """Extract and resolve file paths from tool arguments.
+
+    For structured tools (Read, Edit, etc.), extracts paths from known
+    argument keys. For read-only bash commands, also extracts absolute
+    paths from the command string.
+
+    Args:
+        tool: Tool name.
+        args: Tool arguments.
+        working_directory: Session's working directory for resolution.
+
+    Returns:
+        List of resolved (normalized absolute) paths.
+    """
+    raw_paths = extract_paths(args)
+
+    # For bash commands, also extract absolute paths from the command string
+    if tool == "bash":
+        command = _extract_bash_command(args)
+        if command:
+            raw_paths.extend(extract_bash_paths(command))
+
+    if not raw_paths:
+        return []
+
+    return [resolve_path(p, working_directory) for p in raw_paths]
 
 
 def _get_tool_preference(tool: str, preferences: dict[str, str] | None) -> str | None:
@@ -314,8 +568,24 @@ def _is_critical(command: str) -> bool:
     return False
 
 
-def _is_read_only(tool: str, args: dict[str, Any]) -> bool:
-    """Check if a tool call is read-only."""
+def is_read_only(tool: str, args: dict[str, Any]) -> bool:
+    """Check if a tool call is read-only.
+
+    Checks the tool name against the built-in read-only allowlist.
+    For bash commands, also checks the command string for read-only
+    commands, piped chains, and git subcommands.
+
+    This is a pure classification check — it does NOT consider session
+    policy, tool preferences, or path policy. Use ``classify()`` for
+    the full classification pipeline.
+
+    Args:
+        tool: Tool name.
+        args: Tool arguments.
+
+    Returns:
+        True if the tool call is read-only by its nature.
+    """
     # Built-in read-only tools
     if tool in _READ_ONLY_TOOLS:
         return True
@@ -541,7 +811,9 @@ def _check_session_policy(
         "allow_tools": ["tool_name", ...],     # Force READ classification
         "deny_tools": ["tool_name", ...],      # Force CRITICAL classification
         "allow_commands": ["pattern", ...],     # Glob patterns for bash
-        "deny_commands": ["pattern", ...]       # Glob patterns for bash
+        "deny_commands": ["pattern", ...],     # Glob patterns for bash
+        "allow_paths": ["pattern", ...],       # Exempt paths from project boundary
+        "deny_paths": ["pattern", ...]         # Always deny (fnmatch on resolved)
     }
 
     Deny rules take priority over allow rules.
@@ -562,8 +834,6 @@ def _check_session_policy_deny(
     policy: dict[str, Any],
 ) -> Classification | None:
     """Check session policy deny rules only."""
-    import fnmatch
-
     deny_tools = policy.get("deny_tools", [])
     if tool in deny_tools:
         return Classification.CRITICAL
@@ -584,8 +854,6 @@ def _check_session_policy_allow(
     policy: dict[str, Any],
 ) -> Classification | None:
     """Check session policy allow rules only."""
-    import fnmatch
-
     allow_tools = policy.get("allow_tools", [])
     if tool in allow_tools:
         return Classification.READ

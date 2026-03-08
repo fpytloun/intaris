@@ -11,6 +11,8 @@ For MCP proxy calls, the evaluator also supports:
 - Escalation retry: reuses a prior approval if the same tool+args
   combination was approved within the last 10 minutes.
 - args_hash storage for escalation retry lookups.
+- Approved path prefix cache: learns from LLM approvals to fast-path
+  subsequent reads to the same out-of-project directory.
 """
 
 from __future__ import annotations
@@ -18,12 +20,22 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import threading
 import time
 import uuid
 from typing import Any
 
 from intaris.audit import AuditStore
-from intaris.classifier import Classification, classify
+from intaris.classifier import (
+    Classification,
+    classify,
+    extract_bash_paths,
+    extract_paths,
+    is_path_within,
+    is_read_only,
+    resolve_path,
+)
 from intaris.config import AnalysisConfig
 from intaris.db import Database
 from intaris.decision import (
@@ -43,6 +55,9 @@ from intaris.session import SessionStore
 
 # Escalation retry: reuse approval if same tool+args approved within this window.
 _ESCALATION_RETRY_TTL_MINUTES = 10
+
+# Maximum number of approved path prefixes per session (LRU eviction).
+_MAX_APPROVED_PATHS_PER_SESSION = 50
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +84,15 @@ class Evaluator:
         self._db = db
         self._analysis_config = analysis_config
         self._analysis_enabled = analysis_config is not None and analysis_config.enabled
+
+        # Approved path prefixes per session.
+        # Key: (user_id, session_id) → set of normalized directory prefixes.
+        # When the LLM approves a read-only tool call that was reclassified
+        # to WRITE due to path policy, the evaluator caches the approved
+        # directory prefix. Subsequent reads under that prefix are fast-pathed
+        # as READ without LLM evaluation.
+        self._approved_paths: dict[tuple[str, str], list[str]] = {}
+        self._approved_paths_lock = threading.Lock()
 
     def evaluate(
         self,
@@ -129,6 +153,9 @@ class Evaluator:
                 pass
 
         if session_status in ("completed", "suspended", "terminated"):
+            # Clean up approved paths cache for inactive sessions
+            self.clear_approved_paths(user_id, session_id)
+
             latency_ms = int((time.monotonic() - start_time) * 1000)
             self._audit.insert(
                 call_id=call_id,
@@ -185,6 +212,10 @@ class Evaluator:
         # Get session policy for classifier
         session_policy = session.get("policy")
 
+        # Extract working directory for path-aware classification
+        details = session.get("details") or {}
+        working_directory: str | None = details.get("working_directory") or None
+
         # Resolve parent intention for sub-sessions (intention chain).
         # Sub-agent tool calls must be aligned with BOTH the parent
         # session's intention and their own. This prevents sub-agents
@@ -203,20 +234,72 @@ class Evaluator:
                     session_id,
                 )
 
-        # Step 1-2: Classify (with tool preferences for MCP proxy)
+        # Step 1-2: Classify (with path awareness via working_directory)
         classification = classify(
             tool,
             args,
             session_policy=session_policy,
             tool_preferences=tool_preferences,
+            working_directory=working_directory,
         )
+
+        # Path approval cache override: if the classifier reclassified a
+        # read-only tool to WRITE due to path policy, check whether the
+        # paths have been previously approved. If so, override back to READ.
+        # CRITICAL from deny_paths is never overridden (it's not WRITE).
+        path_reclassified = False
+        resolved_paths: list[str] = []
+        if (
+            classification == Classification.WRITE
+            and working_directory
+            and is_read_only(tool, args)
+        ):
+            raw_paths = extract_paths(args)
+            # Also extract absolute paths from bash commands for consistency
+            # with the classifier's _resolve_tool_paths().
+            if tool == "bash":
+                command = args.get("command", "") or args.get("cmd", "")
+                if command:
+                    raw_paths.extend(extract_bash_paths(str(command)))
+            if raw_paths:
+                resolved_paths = [resolve_path(p, working_directory) for p in raw_paths]
+                outside_paths = [
+                    rp
+                    for rp in resolved_paths
+                    if not is_path_within(rp, working_directory)
+                ]
+                if outside_paths:
+                    path_reclassified = True
+                    # Check approved paths cache
+                    if self._check_approved_paths(
+                        user_id, session_id, outside_paths, working_directory
+                    ):
+                        classification = Classification.READ
+                        path_reclassified = False
+                        logger.debug(
+                            "Path approved via prior evaluation: %s",
+                            outside_paths,
+                        )
+
+        # Inject project_path into LLM context for WRITE evaluations
+        if working_directory and classification == Classification.WRITE:
+            context = dict(context) if context else {}
+            context["project_path"] = working_directory
 
         # Step 3-5: Fast paths for read-only, critical, and escalate
         if classification == Classification.READ:
-            decision = make_fast_decision(
-                "read",
-                f"Read-only tool call: {tool}",
-            )
+            reasoning = f"Read-only tool call: {tool}"
+            if resolved_paths and not path_reclassified:
+                # Check if this was a cache-hit override
+                if any(
+                    not is_path_within(rp, working_directory or "")
+                    for rp in resolved_paths
+                ):
+                    reasoning = (
+                        f"Read-only tool call: {tool} "
+                        f"(path approved via prior evaluation)"
+                    )
+            decision = make_fast_decision("read", reasoning)
         elif classification == Classification.CRITICAL:
             decision = make_fast_decision(
                 "critical",
@@ -247,6 +330,19 @@ class Evaluator:
                 context=context,
                 parent_intention=parent_intention,
             )
+
+        # Learn from LLM approvals: cache path prefixes for path-reclassified
+        # calls so subsequent reads to the same directory are fast-pathed.
+        if path_reclassified and decision.decision == "approve" and working_directory:
+            for rp in resolved_paths:
+                if not is_path_within(rp, working_directory):
+                    prefix = _compute_path_prefix(rp, working_directory)
+                    self._approve_path_prefix(user_id, session_id, prefix)
+                    logger.info(
+                        "Learned approved path prefix: %s (session %s)",
+                        prefix,
+                        session_id,
+                    )
 
         # Calculate latency
         latency_ms = int((time.monotonic() - start_time) * 1000)
@@ -402,6 +498,98 @@ class Evaluator:
 
         return None
 
+    # ── Approved Path Prefix Cache ────────────────────────────────────
+
+    def _check_approved_paths(
+        self,
+        user_id: str,
+        session_id: str,
+        resolved_paths: list[str],
+        working_directory: str,
+    ) -> bool:
+        """Check if all resolved paths are under an approved prefix.
+
+        Args:
+            user_id: Tenant identifier.
+            session_id: Session identifier.
+            resolved_paths: Normalized absolute paths to check.
+            working_directory: Session's working directory.
+
+        Returns:
+            True if every path is either within working_directory or
+            under an approved prefix for this session.
+        """
+        key = (user_id, session_id)
+        with self._approved_paths_lock:
+            # Copy under lock to avoid TOCTOU with concurrent modifications
+            prefixes = list(self._approved_paths.get(key, []))
+
+        for rp in resolved_paths:
+            if is_path_within(rp, working_directory):
+                continue
+            # Check against approved prefixes
+            if not any(is_path_within(rp, prefix) for prefix in prefixes):
+                return False
+        return True
+
+    def _approve_path_prefix(
+        self,
+        user_id: str,
+        session_id: str,
+        prefix: str,
+    ) -> None:
+        """Add an approved path prefix for a session.
+
+        Thread-safe. Enforces a maximum number of prefixes per session
+        with FIFO eviction (oldest prefix removed first).
+
+        Args:
+            user_id: Tenant identifier.
+            session_id: Session identifier.
+            prefix: Normalized directory prefix to approve.
+        """
+        key = (user_id, session_id)
+        with self._approved_paths_lock:
+            prefixes = self._approved_paths.setdefault(key, [])
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+                # FIFO eviction if over limit
+                while len(prefixes) > _MAX_APPROVED_PATHS_PER_SESSION:
+                    prefixes.pop(0)
+
+    def clear_approved_paths(self, user_id: str, session_id: str) -> None:
+        """Clear approved path prefixes for a session.
+
+        Called when a session transitions to completed/terminated/suspended,
+        or when the session intention changes.
+
+        Args:
+            user_id: Tenant identifier.
+            session_id: Session identifier.
+        """
+        key = (user_id, session_id)
+        with self._approved_paths_lock:
+            self._approved_paths.pop(key, None)
+
+    def sweep_approved_paths(self, active_keys: set[tuple[str, str]]) -> int:
+        """Remove approved paths for sessions no longer active.
+
+        Called periodically by the background worker to prevent memory
+        leaks from abandoned sessions.
+
+        Args:
+            active_keys: Set of (user_id, session_id) tuples for
+                sessions that are still active.
+
+        Returns:
+            Number of entries removed.
+        """
+        with self._approved_paths_lock:
+            stale = [k for k in self._approved_paths if k not in active_keys]
+            for k in stale:
+                del self._approved_paths[k]
+        return len(stale)
+
     def _llm_evaluate(
         self,
         *,
@@ -478,6 +666,61 @@ class Evaluator:
             # (approve/deny/escalate) on an infra failure is wrong.
             logger.exception("LLM safety evaluation failed")
             raise
+
+
+def _compute_path_prefix(resolved_path: str, working_directory: str) -> str:
+    """Compute the approved directory prefix for a path.
+
+    Uses a depth-aware heuristic:
+    - If the path shares a deep common ancestor with working_directory
+      (depth >= len(wd_parts) - 1), uses the "sibling project" prefix
+      (one level deeper than the common ancestor). This is convenient
+      for sibling projects under the same parent directory.
+    - If the common ancestor is shallow (distant paths like /var/log),
+      uses the exact parent directory of the target file. This prevents
+      over-broad approval (e.g., approving /var/ when only /var/log/
+      was accessed).
+
+    Examples:
+        wd:     /Users/foo/src/mnemory
+        target: /Users/foo/src/intaris/intaris/classifier.py
+        common: /Users/foo/src  (depth 4, >= 4)  → /Users/foo/src/intaris
+
+        wd:     /Users/foo/src/mnemory
+        target: /var/log/app.log
+        common: /  (depth 1, < 4)  → /var/log
+
+    Args:
+        resolved_path: Normalized absolute path of the accessed file.
+        working_directory: Session's working directory.
+
+    Returns:
+        Normalized directory prefix string.
+    """
+    wd_parts = os.path.normpath(working_directory).split(os.sep)
+    path_parts = os.path.normpath(resolved_path).split(os.sep)
+
+    # Find common prefix length
+    common_len = 0
+    for a, b in zip(wd_parts, path_parts):
+        if a != b:
+            break
+        common_len += 1
+
+    # Depth threshold: sibling prefix only when paths share a deep ancestor
+    min_depth = len(wd_parts) - 1
+    if min_depth < 1:
+        min_depth = 1
+
+    if common_len >= min_depth and common_len < len(path_parts):
+        # Sibling project prefix: common ancestor + one more component
+        prefix_parts = path_parts[: common_len + 1]
+    else:
+        # Distant path: use exact parent directory
+        parent = os.path.dirname(resolved_path)
+        return os.path.normpath(parent)
+
+    return os.sep.join(prefix_parts)
 
 
 def _compute_args_hash(args: dict[str, Any]) -> str:

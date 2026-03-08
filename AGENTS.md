@@ -122,7 +122,9 @@ intaris/
 
 5. **5-second circuit breaker constraint**: The Executor Adapter has a 5-second timeout. LLM_TIMEOUT_MS defaults to 4000ms to ensure Intaris responds within the window.
 
-6. **Session policy extensibility**: Sessions can define custom allow/deny rules using glob patterns (fnmatch, NOT regex) to avoid ReDoS.
+6. **Session policy extensibility**: Sessions can define custom allow/deny rules using glob patterns (fnmatch, NOT regex) to avoid ReDoS. Includes `allow_paths`/`deny_paths` for filesystem path policy.
+
+10. **Filesystem path protection**: When `working_directory` is set on a session, the classifier checks file paths in tool arguments against the project boundary. Read-only tools targeting paths outside the project are reclassified as WRITE (forcing LLM evaluation). The evaluator maintains an approved path prefix cache that learns from LLM approvals — once a sibling project is approved, subsequent reads are fast-pathed. See [Filesystem Path Protection](#filesystem-path-protection) below.
 
 7. **Follows mnemory conventions**: Same build system (hatchling), config pattern (dataclasses + env vars), LLM client (OpenAI wrapper with structured output), error handling, and code style.
 
@@ -361,6 +363,68 @@ L3: Cross-Session Analysis (per-user)
 - **Phase 3 (Profile Updates)**: Not started — profile computation from analysis results.
 - **Phase 4 (UI Integration)**: Not started — management UI tabs for analysis.
 - **Phase 5 (Tuning)**: Not started — threshold tuning, alert rules.
+
+## Filesystem Path Protection
+
+When `working_directory` is set in session details (sent by integrations at session creation), the classifier and evaluator enforce filesystem path boundaries.
+
+### Classification priority chain (with path steps)
+
+| Step | Check | Result |
+|---|---|---|
+| 1 | Session policy `deny_tools` / `deny_commands` | CRITICAL |
+| **1.5** | **Session policy `deny_paths` (fnmatch on resolved paths)** | **CRITICAL** |
+| 2 | Tool preference deny | CRITICAL |
+| 3 | Tool preference escalate | ESCALATE |
+| 4 | Session policy `allow_tools` / `allow_commands` | READ |
+| 5 | Tool preference auto-approve | READ |
+| 6 | Critical patterns (bash) | CRITICAL |
+| 7 | Read-only allowlist | READ |
+| **7.5** | **Path outside project (not in `allow_paths`)** | **WRITE** |
+| 8 | Default | WRITE |
+
+### Path extraction
+
+File paths are extracted from tool arguments using known keys: `filePath`, `file_path`, `path`, `directory`, `dir`, `folder`, `filename`. For read-only bash commands, absolute paths are also extracted from the command string using a simple regex.
+
+Relative paths are resolved against `working_directory` using `os.path.normpath()` to prevent `../../../etc/shadow` traversal bypasses.
+
+### Session policy path fields
+
+```json
+{
+    "allow_paths": ["/home/user/other-project/*", "/tmp/*"],
+    "deny_paths": ["/etc/*", "/root/*"]
+}
+```
+
+- `deny_paths`: fnmatch patterns. Matched paths → CRITICAL (auto-deny). Checked at step 1.5 (highest priority deny). Always checked, even when the approved paths cache has entries.
+- `allow_paths`: fnmatch patterns. Matched paths are exempt from the out-of-project WRITE override at step 7.5. Does NOT override `deny_paths`.
+
+### Approved path prefix cache (learning from approvals)
+
+The evaluator maintains an in-memory cache of approved path prefixes per session. When the LLM approves a read-only tool call that was reclassified to WRITE due to path policy, the evaluator caches the approved directory prefix. Subsequent reads under that prefix are fast-pathed as READ without LLM evaluation.
+
+**Prefix computation** uses a depth-aware heuristic:
+- **Sibling projects** (deep common ancestor with `working_directory`): prefix is one level deeper than the common ancestor. E.g., working in `/src/mnemory`, reading `/src/intaris/file.py` → prefix `/src/intaris`.
+- **Distant paths** (shallow common ancestor): prefix is the exact parent directory of the target file. E.g., reading `/var/log/app.log` → prefix `/var/log` (NOT `/var/`).
+
+**Cache properties:**
+- In-memory, session-scoped (keyed by `(user_id, session_id)`)
+- No TTL — persists for session lifetime
+- Cleared on session completion/termination/suspension
+- Max 50 prefixes per session (FIFO eviction)
+- Thread-safe via `threading.Lock()`
+- `deny_paths` always checked BEFORE the cache (deny wins over approval)
+- Periodic sweep removes entries for dead sessions
+
+### LLM context injection
+
+When a WRITE-classified tool call goes to LLM evaluation and `working_directory` is set, the evaluator injects `project_path` into the evaluation context. The LLM system prompt instructs it to consider whether file operations are within the expected project scope.
+
+### Backward compatibility
+
+All path logic is gated on `working_directory is not None`. Sessions without `working_directory` (e.g., MCP proxy sessions that don't set it) behave exactly as before — no path checking, no overrides.
 
 ## Rate Limiting
 

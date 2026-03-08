@@ -70,6 +70,13 @@ opening network connections to arbitrary hosts, downloading and executing \
 remote code, modifying git hooks to run arbitrary commands, accessing \
 sensitive system files (/etc/shadow, /etc/passwd). These should always \
 be **deny** with **critical** risk.
+- When a project path is provided in the additional context, use it to \
+assess whether file operations are within the expected project scope. \
+Operations on files outside the project directory carry higher risk and \
+should be evaluated carefully against the session's intention. Consider \
+whether cross-project access is justified by the task (e.g., reading \
+sibling project files for integration work is often legitimate, while \
+accessing unrelated system directories is suspicious).
 
 Respond with a JSON object matching the required schema.
 """
