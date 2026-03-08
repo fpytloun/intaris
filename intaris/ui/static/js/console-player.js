@@ -196,6 +196,14 @@ function processOpenCode(events) {
   }
   const latestPartSeqs = new Set([...latestPartByPartId.values()].map(e => e.seq));
 
+  // Step 1b: Collect user message IDs to filter out echoed text parts
+  const userMessageIds = new Set();
+  for (const event of events) {
+    if (event.type === 'message' && event.data?.role === 'user' && event.data?.messageID) {
+      userMessageIds.add(event.data.messageID);
+    }
+  }
+
   // Step 2: Build correlation maps
   const toolResultsByCallId = new Map();
   const evaluationsBySeq = [];
@@ -248,7 +256,11 @@ function processOpenCode(events) {
       if (['tool', 'snapshot', 'compaction', 'step-start'].includes(partType)) continue;
 
       if (partType === 'text') {
-        // Skip empty/synthetic text parts
+        // Skip synthetic parts (system-generated echoes)
+        if (part.synthetic) continue;
+        // Skip text parts belonging to user messages (echoed input)
+        if (part.messageID && userMessageIds.has(part.messageID)) continue;
+        // Skip empty text parts
         if (!part.text && !data.delta) continue;
         blocks.push({
           type: 'assistant-text',
