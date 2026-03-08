@@ -7,7 +7,7 @@
 @source "../../ui/static/**/*.{html,js}";
 
 /* Safelist: dynamic classes constructed in JS that Tailwind can't detect */
-@source inline("text-green-400 text-red-400 text-amber-400 text-blue-400 text-slate-400 text-cyan-400 bg-green-500/15 bg-red-500/15 bg-amber-500/15 bg-blue-500/15 bg-slate-500/15 bg-cyan-500/15 bg-green-500/10 bg-red-500/10 bg-amber-500/10 bg-blue-500/10 bg-emerald-500/15 bg-emerald-500/10 text-emerald-400 border-green-500/30 border-red-500/30 border-amber-500/30 border-blue-500/30");
+@source inline("text-green-400 text-red-400 text-amber-400 text-blue-400 text-slate-400 text-cyan-400 bg-green-500/15 bg-red-500/15 bg-amber-500/15 bg-blue-500/15 bg-slate-500/15 bg-cyan-500/15 bg-green-500/10 bg-red-500/10 bg-amber-500/10 bg-blue-500/10 bg-emerald-500/15 bg-emerald-500/10 text-emerald-400 border-green-500/30 border-red-500/30 border-amber-500/30 border-blue-500/30 border-purple-500/50 text-purple-400 border-red-500/30");
 
 /* ── Brand color tokens (accessible from JS via getComputedStyle) ── */
 :root {
@@ -204,6 +204,126 @@
 
   .chart-container-bar {
     height: 220px;
+  }
+
+  /* ── Console player ── */
+  .console-view {
+    @apply text-sm leading-relaxed;
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  }
+
+  .console-user-msg {
+    @apply border-l-2 border-blue-500/70 pl-3 my-4 py-1;
+  }
+  .console-role-label {
+    @apply text-xs font-bold text-blue-400 mb-1 uppercase tracking-wide;
+  }
+  .console-user-text {
+    @apply text-[#E6EDF3] whitespace-pre-wrap;
+  }
+
+  .console-assistant-text {
+    @apply my-3 text-[#E6EDF3];
+  }
+  /* Markdown prose styling */
+  .console-assistant-text h1 { @apply text-lg font-bold mt-4 mb-2 text-[#E6EDF3]; }
+  .console-assistant-text h2 { @apply text-base font-bold mt-3 mb-2 text-[#E6EDF3]; }
+  .console-assistant-text h3 { @apply text-sm font-bold mt-2 mb-1 text-[#E6EDF3]; }
+  .console-assistant-text p { @apply my-1.5; }
+  .console-assistant-text ul { @apply list-disc pl-5 my-1.5; }
+  .console-assistant-text ol { @apply list-decimal pl-5 my-1.5; }
+  .console-assistant-text li { @apply my-0.5; }
+  .console-assistant-text code {
+    @apply bg-brand-bg px-1.5 py-0.5 rounded text-xs text-brand-accent;
+  }
+  .console-assistant-text pre {
+    @apply bg-brand-bg rounded-lg p-3 my-2 overflow-x-auto text-xs;
+  }
+  .console-assistant-text pre code {
+    @apply bg-transparent p-0 text-[#E6EDF3];
+  }
+  .console-assistant-text blockquote {
+    @apply border-l-2 border-brand-border pl-3 italic opacity-80 my-2;
+  }
+  .console-assistant-text table { @apply border-collapse my-2 text-xs w-full; }
+  .console-assistant-text th {
+    @apply border border-brand-border px-2 py-1 bg-brand-bg font-bold text-left;
+  }
+  .console-assistant-text td { @apply border border-brand-border px-2 py-1; }
+  .console-assistant-text a { @apply text-brand-accent underline; }
+  .console-assistant-text strong { @apply font-bold; }
+  .console-assistant-text em { @apply italic; }
+  .console-assistant-text hr { @apply border-brand-border my-3; }
+
+  .console-reasoning {
+    @apply my-2;
+  }
+  .console-reasoning-toggle {
+    @apply text-xs text-muted hover:text-secondary cursor-pointer
+           flex items-center gap-1.5 py-1;
+  }
+  .console-reasoning-text {
+    @apply text-xs text-muted/80 italic mt-1 pl-4 whitespace-pre-wrap
+           max-h-[30vh] overflow-y-auto;
+  }
+
+  .console-tool {
+    @apply my-2 border border-brand-border/50 rounded-lg overflow-hidden;
+  }
+  .console-tool-error {
+    @apply border-red-500/30;
+  }
+  .console-tool-header {
+    @apply flex items-center gap-2 px-3 py-1.5 bg-brand-bg/60
+           cursor-pointer text-xs hover:bg-brand-bg/80 transition-colors;
+  }
+  .console-chevron {
+    @apply text-muted text-[10px] w-3 flex-shrink-0;
+  }
+  .console-tool-name {
+    @apply font-bold text-brand-accent;
+  }
+  .console-tool-subtitle {
+    @apply text-secondary truncate;
+  }
+  .console-tool-body {
+    @apply border-t border-brand-border/30;
+  }
+  .console-tool-section {
+    @apply px-3 py-2;
+  }
+  .console-tool-section + .console-tool-section {
+    @apply border-t border-brand-border/20;
+  }
+  .console-tool-section-label {
+    @apply text-[10px] text-muted uppercase tracking-wider mb-1;
+  }
+  .console-code {
+    @apply text-xs overflow-x-auto whitespace-pre-wrap break-words
+           max-h-[40vh] overflow-y-auto;
+  }
+  .console-code-error {
+    @apply text-red-400;
+  }
+
+  .console-step-finish {
+    @apply text-xs text-muted text-center my-3 py-1.5
+           border-t border-b border-brand-border/20;
+  }
+
+  .console-assistant-meta {
+    @apply text-xs text-muted my-2 flex items-center gap-1 flex-wrap;
+  }
+
+  .console-subtask {
+    @apply my-2 pl-4 border-l-2 border-purple-500/50 text-xs py-1;
+  }
+  .console-subtask-label {
+    @apply font-bold text-purple-400 mr-1;
+  }
+
+  .console-lifecycle {
+    @apply text-xs text-muted text-center my-2 opacity-60;
   }
 }
 

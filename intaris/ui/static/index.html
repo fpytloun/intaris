@@ -5,12 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>intaris</title>
   <link rel="stylesheet" href="/ui/css/app.css">
+  <link rel="stylesheet" href="/ui/vendor/highlight-github-dark.min.css">
   <script src="/ui/vendor/chart.min.js"></script>
+  <script src="/ui/vendor/marked.min.js"></script>
+  <script src="/ui/vendor/highlight.min.js"></script>
   <script src="/ui/js/api.js"></script>
   <script src="/ui/js/app.js"></script>
   <script src="/ui/js/dashboard.js"></script>
   <script src="/ui/js/sessions.js"></script>
   <script src="/ui/js/player.js"></script>
+  <script src="/ui/js/console-player.js"></script>
   <script src="/ui/js/audit.js"></script>
   <script src="/ui/js/approvals.js"></script>
   <script src="/ui/js/servers.js"></script>
@@ -329,7 +333,7 @@
                   <!-- Tree connector for child sessions -->
                   <span x-show="session._depth > 0" class="tree-connector text-muted">&#x2514;</span>
                   <span :class="statusBadgeClass(session.status)" x-text="session.status"></span>
-                  <span class="font-mono text-sm text-brand-accent" x-text="session.session_id"></span>
+                  <span class="font-mono text-sm text-brand-accent" x-html="highlightMatch(session.session_id)"></span>
                   <span x-show="session.parent_session_id && !session.details?.agent_type" class="text-xs text-muted">(child)</span>
                   <!-- Child count indicator when collapsed -->
                   <span x-show="treeView && session._children.length > 0 && collapsedSessions[session.session_id]"
@@ -350,7 +354,7 @@
                         :title="'Created: ' + formatTime(session.created_at)"></span>
                 </div>
               </div>
-              <div class="mt-2 text-sm text-secondary" x-text="truncate(session.intention, 120)"></div>
+              <div class="mt-2 text-sm text-secondary" x-html="highlightMatch(truncate(session.intention, 120))"></div>
 
               <!-- Expanded Detail -->
               <div x-show="expandedId === session.session_id" x-cloak @click.stop class="mt-4 pt-4 border-t border-brand-border">
@@ -430,8 +434,10 @@
                       <button @click.stop="updateStatus(session.session_id, 'active')" class="btn-success text-sm">Reactivate</button>
                     </template>
                   </div>
+                  <button @click.stop="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: session.session_id } }))"
+                          class="btn-primary text-sm">Console</button>
                   <button @click.stop="window.dispatchEvent(new CustomEvent('intaris:open-recording', { detail: { sessionId: session.session_id } }))"
-                          class="btn-secondary text-sm">Recording</button>
+                          class="btn-secondary text-sm">Events</button>
                 </div>
 
                 <!-- Status Reason (shown when session is suspended/terminated) -->
@@ -1093,7 +1099,7 @@
           <div class="flex items-center justify-between">
             <div>
               <h3 class="text-sm font-medium text-secondary">Browser Notifications</h3>
-              <p class="text-xs text-muted mt-1">Receive browser notifications when a tool call needs approval (only when tab is not focused).</p>
+              <p class="text-xs text-muted mt-1">Receive browser notifications when events occur (only when tab is not focused).</p>
             </div>
             <div class="flex items-center gap-3">
               <span x-show="$store.ws.notificationPermission === 'denied'" class="text-xs text-red-400">Blocked by browser</span>
@@ -1104,6 +1110,36 @@
                       :disabled="$store.ws.notificationPermission === 'denied'">
                 <span :class="$store.ws.notificationsEnabled ? 'translate-x-4' : 'translate-x-0'"
                       class="inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform"></span>
+              </button>
+            </div>
+          </div>
+          <!-- Per-event-type toggles (shown when notifications are enabled) -->
+          <div x-show="$store.ws.notificationsEnabled" x-cloak class="mt-4 pt-3 border-t border-brand-border space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-secondary">Escalations (approval needed)</span>
+              <button @click="$store.ws.toggleNotifyPreference('notifyOnEscalation', !$store.ws.notifyOnEscalation)"
+                      :class="$store.ws.notifyOnEscalation ? 'bg-green-600' : 'bg-gray-600'"
+                      class="relative inline-flex h-4 w-7 flex-shrink-0 cursor-pointer rounded-full transition-colors">
+                <span :class="$store.ws.notifyOnEscalation ? 'translate-x-3' : 'translate-x-0'"
+                      class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"></span>
+              </button>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-secondary">Denials (tool call blocked)</span>
+              <button @click="$store.ws.toggleNotifyPreference('notifyOnDeny', !$store.ws.notifyOnDeny)"
+                      :class="$store.ws.notifyOnDeny ? 'bg-green-600' : 'bg-gray-600'"
+                      class="relative inline-flex h-4 w-7 flex-shrink-0 cursor-pointer rounded-full transition-colors">
+                <span :class="$store.ws.notifyOnDeny ? 'translate-x-3' : 'translate-x-0'"
+                      class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"></span>
+              </button>
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="text-xs text-secondary">Session suspended</span>
+              <button @click="$store.ws.toggleNotifyPreference('notifyOnSuspend', !$store.ws.notifyOnSuspend)"
+                      :class="$store.ws.notifyOnSuspend ? 'bg-green-600' : 'bg-gray-600'"
+                      class="relative inline-flex h-4 w-7 flex-shrink-0 cursor-pointer rounded-full transition-colors">
+                <span :class="$store.ws.notifyOnSuspend ? 'translate-x-3' : 'translate-x-0'"
+                      class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"></span>
               </button>
             </div>
           </div>
@@ -1326,8 +1362,10 @@
                 <button @click="$store.nav.updateSessionStatus($store.nav.sessionModal.session_id, 'active')" class="btn-success text-sm">Reactivate</button>
               </template>
             </div>
+            <button @click="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: $store.nav.sessionModal.session_id } }))"
+                    class="btn-primary text-sm">Console</button>
             <button @click="window.dispatchEvent(new CustomEvent('intaris:open-recording', { detail: { sessionId: $store.nav.sessionModal.session_id } }))"
-                    class="btn-secondary text-sm">Recording</button>
+                    class="btn-secondary text-sm">Events</button>
           </div>
 
           <!-- Status Reason (modal) -->
@@ -1408,6 +1446,147 @@
     </div>
   </div>
 
+  <!-- ── Console Recording Modal ─────────────────────────────── -->
+  <div x-data="consolePlayer()" x-show="visible" x-cloak
+       @intaris:open-console.window="open($event.detail.sessionId)"
+       @keydown.escape.window="if (visible) close()"
+       class="modal-overlay" @click.self="close()">
+    <div class="modal-content max-w-4xl overflow-x-hidden" @click.stop>
+      <!-- Header -->
+      <div class="flex items-center justify-between mb-4">
+        <div class="flex items-center gap-3">
+          <span class="text-lg font-semibold">Session Console</span>
+          <span class="font-mono text-sm text-brand-accent" x-text="sessionId"></span>
+          <span class="badge badge-low text-xs" x-text="sourceLabel()"></span>
+        </div>
+        <div class="flex items-center gap-2">
+          <!-- Live tail toggle -->
+          <button @click.stop="toggleLiveTail()"
+                  :class="liveTail ? 'btn-success' : 'btn-secondary'"
+                  class="text-xs py-1 px-2">
+            <span x-text="liveTail ? 'Live' : 'Tail'"></span>
+          </button>
+          <button @click="close()" class="text-muted hover:text-[#E6EDF3] text-lg leading-none px-1">&times;</button>
+        </div>
+      </div>
+
+      <!-- Error -->
+      <div x-show="error" class="text-sm text-red-400 mb-2" x-text="error"></div>
+
+      <!-- Loading -->
+      <div x-show="loading && blocks.length === 0" class="text-sm text-muted py-8 text-center">Loading session...</div>
+
+      <!-- Empty state -->
+      <div x-show="!loading && blocks.length === 0 && !error" class="text-sm text-muted py-8 text-center">No recorded events</div>
+
+      <!-- Console output -->
+      <div x-show="blocks.length > 0" class="console-view max-h-[80vh] overflow-y-auto" x-ref="consoleList" @scroll="handleScroll()">
+        <template x-for="block in blocks" :key="block.id">
+          <div>
+            <!-- User message -->
+            <template x-if="block.type === 'user-message'">
+              <div class="console-user-msg">
+                <div class="console-role-label">User</div>
+                <div class="console-user-text" x-text="block.text"></div>
+              </div>
+            </template>
+
+            <!-- Assistant text (markdown) -->
+            <template x-if="block.type === 'assistant-text'">
+              <div class="console-assistant-text" x-html="block.html"></div>
+            </template>
+
+            <!-- Reasoning (collapsible) -->
+            <template x-if="block.type === 'reasoning'">
+              <div class="console-reasoning">
+                <button @click="toggleReasoning(block.id)" class="console-reasoning-toggle">
+                  <span x-text="isReasoningExpanded(block.id) ? '▼' : '▶'" class="text-[10px]"></span>
+                  <span class="italic">Thinking...</span>
+                </button>
+                <div x-show="isReasoningExpanded(block.id)" x-cloak
+                     class="console-reasoning-text" x-text="block.text"></div>
+              </div>
+            </template>
+
+            <!-- Tool group -->
+            <template x-if="block.type === 'tool-group'">
+              <div class="console-tool" :class="block.isError ? 'console-tool-error' : ''">
+                <div class="console-tool-header" @click="toggleTool(block.id)">
+                  <span x-text="isToolExpanded(block.id) ? '▼' : '▶'" class="console-chevron"></span>
+                  <span class="console-tool-name" x-text="block.tool"></span>
+                  <span class="console-tool-subtitle" x-text="block.subtitle"></span>
+                  <span class="ml-auto flex items-center gap-1.5 flex-shrink-0" x-show="block.decision">
+                    <span :class="decisionClass(block.decision)"
+                          class="text-xs" x-text="block.decision"></span>
+                    <span class="text-muted text-xs" x-text="'(' + (block.risk || '?') + ')'"></span>
+                    <span class="text-muted text-xs" x-show="block.latency" x-text="block.latency"></span>
+                  </span>
+                </div>
+                <div x-show="isToolExpanded(block.id)" x-cloak class="console-tool-body">
+                  <div x-show="block.argsDisplay" class="console-tool-section">
+                    <div class="console-tool-section-label">Input</div>
+                    <pre class="console-code"><code x-text="block.argsDisplay"></code></pre>
+                  </div>
+                  <div x-show="block.output != null" class="console-tool-section">
+                    <div class="console-tool-section-label" x-text="block.isError ? 'Error' : 'Output'"></div>
+                    <pre class="console-code" :class="block.isError ? 'console-code-error' : ''"><code x-html="block.outputHtml || ''"></code></pre>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- Step finish -->
+            <template x-if="block.type === 'step-finish'">
+              <div class="console-step-finish" x-text="block.summary"></div>
+            </template>
+
+            <!-- Assistant meta -->
+            <template x-if="block.type === 'assistant-meta'">
+              <div class="console-assistant-meta">
+                <span x-text="block.model"></span>
+                <template x-if="block.tokenSummary">
+                  <span> · <span x-text="block.tokenSummary"></span></span>
+                </template>
+                <template x-if="block.cost > 0">
+                  <span> · $<span x-text="block.cost.toFixed(4)"></span></span>
+                </template>
+                <template x-if="block.finish">
+                  <span> · <span x-text="block.finish"></span></span>
+                </template>
+              </div>
+            </template>
+
+            <!-- Subtask -->
+            <template x-if="block.type === 'subtask'">
+              <div class="console-subtask">
+                <span class="console-subtask-label">Subtask:</span>
+                <span x-text="block.description"></span>
+                <span class="text-muted" x-show="block.agent" x-text="'(' + block.agent + ')'"></span>
+              </div>
+            </template>
+
+            <!-- Lifecycle -->
+            <template x-if="block.type === 'lifecycle'">
+              <div class="console-lifecycle">
+                <span x-text="block.event"></span>
+                <span x-show="block.status" x-text="'→ ' + block.status"></span>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Loading more -->
+        <div x-show="loading && blocks.length > 0" class="text-center py-2 text-xs text-muted">Loading more...</div>
+      </div>
+
+      <!-- Footer info -->
+      <div class="flex items-center justify-between mt-3 text-xs text-muted" x-show="blocks.length > 0">
+        <span x-text="blockCount + ' blocks'"></span>
+        <span x-show="hasMore">(more available — scroll down)</span>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Session Recording Modal ─────────────────────────────── -->
   <div x-data="sessionPlayer()" x-show="visible" x-cloak
        @intaris:open-recording.window="open($event.detail.sessionId)"
@@ -1417,7 +1596,7 @@
       <!-- Header -->
       <div class="flex items-center justify-between mb-4">
         <div class="flex items-center gap-3">
-          <span class="text-lg font-semibold">Session Recording</span>
+          <span class="text-lg font-semibold">Session Events</span>
           <span class="font-mono text-sm text-brand-accent" x-text="sessionId"></span>
         </div>
         <button @click="close()" class="text-muted hover:text-[#E6EDF3] text-lg leading-none px-1">&times;</button>
