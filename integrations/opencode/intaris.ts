@@ -806,35 +806,39 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       // streaming deltas. Captures assistant text, step-start/finish, tool
       // invocations, and all other part types for full session fidelity.
       if (event.type === "message.part.updated") {
-        const sessionId: string = event.properties?.sessionID
-        if (!sessionId) return
-
         const part = event.properties?.part
         if (!part) return
+
+        const sessionId: string = part.sessionID
+        if (!sessionId) return
 
         recordEvent(sessionId, {
           type: "part",
           data: {
             sessionID: sessionId,
-            messageID: event.properties?.messageID,
+            messageID: part.messageID,
             part,
+            delta: event.properties?.delta,
           },
         })
       }
 
       // message.updated captures full message metadata (role, model, tokens)
       if (event.type === "message.updated") {
-        const sessionId: string = event.properties?.sessionID
+        const info = event.properties?.info
+        if (!info) return
+
+        const sessionId: string = info.sessionID
         if (!sessionId) return
 
         recordEvent(sessionId, {
           type: "message",
           data: {
             sessionID: sessionId,
-            messageID: event.properties?.messageID,
-            role: event.properties?.role,
-            model: event.properties?.model,
-            metadata: event.properties?.metadata,
+            messageID: info.id,
+            role: info.role,
+            model: "modelID" in info ? info.modelID : undefined,
+            metadata: info,
           },
         })
       }
