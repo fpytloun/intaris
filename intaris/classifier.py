@@ -140,7 +140,12 @@ _GIT_SUBCOMMANDS_WITH_CHECKS: set[str] = {
 }
 
 # MCP tools that are read-only (from Mnemory and common MCP servers).
+# For namespaced tools, the base tool name is matched after stripping
+# the server prefix (colon or double-underscore conventions).
+# The OpenCode single-underscore format (server_tool) is ambiguous,
+# so known full names are listed explicitly.
 _READ_ONLY_MCP_TOOLS: set[str] = {
+    # Mnemory read-only tools
     "search_memories",
     "find_memories",
     "ask_memories",
@@ -152,6 +157,9 @@ _READ_ONLY_MCP_TOOLS: set[str] = {
     "get_core_memories",
     "get_recent_memories",
     "initialize_memory",
+    # Thinking / reasoning tools (no side effects)
+    "sequentialthinking",
+    "sequentialthinking_sequentialthinking",  # OpenCode: server_tool format
 }
 
 # ── Critical Patterns ─────────────────────────────────────────────────
@@ -594,6 +602,12 @@ def is_read_only(tool: str, args: dict[str, Any]) -> bool:
     tool_name = tool.split(":")[-1] if ":" in tool else tool
     if tool_name in _READ_ONLY_MCP_TOOLS:
         return True
+
+    # Handle Claude Code double-underscore convention: mcp__server__tool → tool
+    if tool.startswith("mcp__") and "__" in tool[5:]:
+        tool_name = tool.rsplit("__", 1)[-1]
+        if tool_name in _READ_ONLY_MCP_TOOLS:
+            return True
 
     # Bash commands
     if tool == "bash":

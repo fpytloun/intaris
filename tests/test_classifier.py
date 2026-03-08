@@ -45,6 +45,28 @@ class TestReadOnlyTools:
         assert classify("mnemory:search_memories", {}) == Classification.READ
         assert classify("mnemory:list_memories", {}) == Classification.READ
 
+    def test_mcp_read_tools_double_underscore_prefix(self):
+        """Claude Code convention: mcp__server__tool."""
+        assert classify("mcp__mnemory__search_memories", {}) == Classification.READ
+        assert classify("mcp__mnemory__list_memories", {}) == Classification.READ
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            # Base name (MCP proxy colon-split resolves to this)
+            "sequentialthinking",
+            # OpenCode format: server_tool (explicit entry)
+            "sequentialthinking_sequentialthinking",
+            # Intaris MCP proxy format: server:tool
+            "sequentialthinking:sequentialthinking",
+            # Claude Code format: mcp__server__tool
+            "mcp__sequentialthinking__sequentialthinking",
+        ],
+    )
+    def test_thinking_tools_read_only(self, tool_name: str):
+        """Thinking/reasoning tools have no side effects -> READ."""
+        assert classify(tool_name, {"thought": "test"}) == Classification.READ
+
     def test_mcp_write_tools(self):
         assert classify("add_memory", {}) == Classification.WRITE
         assert classify("delete_memory", {}) == Classification.WRITE
@@ -790,3 +812,15 @@ class TestIsReadOnly:
     def test_mcp_read_tools(self):
         assert is_read_only("search_memories", {})
         assert is_read_only("mnemory:list_memories", {})
+
+    def test_mcp_read_tools_double_underscore(self):
+        """Claude Code mcp__server__tool convention."""
+        assert is_read_only("mcp__mnemory__search_memories", {})
+        assert is_read_only("mcp__sequentialthinking__sequentialthinking", {})
+
+    def test_thinking_tools(self):
+        """Thinking tools are read-only across all naming conventions."""
+        assert is_read_only("sequentialthinking", {})
+        assert is_read_only("sequentialthinking_sequentialthinking", {})
+        assert is_read_only("sequentialthinking:sequentialthinking", {})
+        assert is_read_only("mcp__sequentialthinking__sequentialthinking", {})
