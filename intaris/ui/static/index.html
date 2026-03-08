@@ -1413,7 +1413,7 @@
        @intaris:open-recording.window="open($event.detail.sessionId)"
        @keydown.escape.window="if (visible) close()"
        class="modal-overlay" @click.self="close()">
-    <div class="modal-content max-w-[95vw]" @click.stop>
+    <div class="modal-content max-w-[95vw] overflow-x-hidden" @click.stop>
       <!-- Header -->
       <div class="flex items-center justify-between mb-4">
         <div class="flex items-center gap-3">
@@ -1481,17 +1481,17 @@
       <div x-show="events.length > 0" class="space-y-0.5 max-h-[80vh] overflow-y-auto" x-ref="eventList" @scroll="handleScroll()">
         <template x-for="event in events" :key="event.seq">
           <div>
-            <div class="flex items-center justify-between py-1 text-xs cursor-pointer hover:bg-brand-bg/50 rounded px-2 -mx-1"
+            <div class="flex items-center justify-between py-1 text-xs cursor-pointer hover:bg-brand-bg/50 rounded px-2 overflow-hidden"
                  :class="expandedSeq === event.seq ? 'bg-brand-bg/50' : ''"
                  @click.stop="toggleExpand(event)">
-              <div class="flex items-center gap-1.5 min-w-0">
+              <div class="flex items-center gap-1.5 min-w-0 overflow-hidden">
                 <span class="text-muted w-8 text-right flex-shrink-0" x-text="'#' + event.seq"></span>
                 <span :class="eventTypeBadge(event.type)" x-text="event.type" class="text-xs flex-shrink-0"></span>
-                <span class="break-words text-secondary" x-text="eventSummary(event)"></span>
+                <span class="truncate text-secondary" x-text="eventSummary(event)"></span>
               </div>
               <div class="flex items-center gap-2 flex-shrink-0 ml-2">
                 <span class="text-muted" x-text="event.source || ''"></span>
-                <span class="text-muted" x-text="formatTime(event.ts)"></span>
+                <span class="text-muted whitespace-nowrap" x-text="formatTime(event.ts)"></span>
               </div>
             </div>
 
