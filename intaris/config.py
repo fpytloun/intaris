@@ -211,6 +211,21 @@ class AnalysisConfig:
     )
 
 
+@dataclass
+class NotificationConfig:
+    """Per-user notification system configuration.
+
+    Controls the action token TTL for one-click approve/deny links
+    in notification messages. Channel configuration is per-user in
+    the database, not in environment variables.
+    """
+
+    # Minutes before action tokens expire (approve/deny links).
+    action_ttl_minutes: int = field(
+        default_factory=lambda: _env_int("NOTIFICATION_ACTION_TTL_MINUTES", 60)
+    )
+
+
 def _build_analysis_llm_config() -> LLMConfig:
     """Build LLM config for analysis tasks.
 
@@ -240,6 +255,7 @@ class Config:
     server: ServerConfig = field(default_factory=ServerConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    notification: NotificationConfig = field(default_factory=NotificationConfig)
 
     def validate(self) -> None:
         """Validate that required configuration is present."""

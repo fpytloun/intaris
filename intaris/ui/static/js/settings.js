@@ -1,5 +1,5 @@
 /**
- * Settings tab — read-only server configuration display.
+ * Settings tab — server configuration display + notification channel management.
  */
 function settingsTab() {
   return {
@@ -7,11 +7,25 @@ function settingsTab() {
     loading: false,
     config: null,
 
+    // Notification channels
+    channels: [],
+    channelsLoading: false,
+    showChannelForm: false,
+    editingChannel: null,
+    channelForm: {
+      name: '',
+      provider: 'pushover',
+      enabled: true,
+      config: {},
+    },
+    testing: null,
+
     init() {
       window.addEventListener('intaris:tab-changed', (e) => {
         if (e.detail.tab === 'settings' && !this.initialized) {
           this.initialized = true;
           this.load();
+          this.loadChannels();
         }
       });
     },
@@ -25,6 +39,146 @@ function settingsTab() {
       } finally {
         this.loading = false;
       }
+    },
+
+    // ── Notification Channels ──────────────────────────────────
+
+    async loadChannels() {
+      this.channelsLoading = true;
+      try {
+        const result = await IntarisAPI.listNotificationChannels();
+        this.channels = result.items || [];
+      } catch (e) {
+        Alpine.store('notify').error('Failed to load channels: ' + e.message);
+      } finally {
+        this.channelsLoading = false;
+      }
+    },
+
+    openAddChannel() {
+      this.editingChannel = null;
+      this.channelForm = {
+        name: '',
+        provider: 'pushover',
+        enabled: true,
+        config: {},
+      };
+      this.showChannelForm = true;
+    },
+
+    openEditChannel(ch) {
+      this.editingChannel = ch.name;
+      this.channelForm = {
+        name: ch.name,
+        provider: ch.provider,
+        enabled: ch.enabled,
+        config: {},
+      };
+      this.showChannelForm = true;
+    },
+
+    cancelChannelForm() {
+      this.showChannelForm = false;
+      this.editingChannel = null;
+    },
+
+    /** Get the config fields for the selected provider */
+    providerFields() {
+      const p = this.channelForm.provider;
+      if (p === 'webhook') return [
+        { key: 'url', label: 'Webhook URL', type: 'url', required: true },
+        { key: 'secret', label: 'Signing Secret', type: 'password', required: false },
+      ];
+      if (p === 'pushover') return [
+        { key: 'user_key', label: 'User Key', type: 'text', required: true },
+        { key: 'app_token', label: 'App Token', type: 'password', required: true },
+        { key: 'priority', label: 'Priority (-2 to 2)', type: 'number', required: false },
+        { key: 'device', label: 'Device', type: 'text', required: false },
+      ];
+      if (p === 'slack') return [
+        { key: 'webhook_url', label: 'Slack Webhook URL', type: 'url', required: true },
+      ];
+      return [];
+    },
+
+    async saveChannel() {
+      const name = this.editingChannel || this.channelForm.name;
+      if (!name) {
+        Alpine.store('notify').error('Channel name is required');
+        return;
+      }
+
+      // Build config from form fields, omitting empty values
+      const config = {};
+      for (const f of this.providerFields()) {
+        const val = this.channelForm.config[f.key];
+        if (val !== undefined && val !== '') {
+          config[f.key] = f.type === 'number' ? Number(val) : val;
+        }
+      }
+
+      try {
+        await IntarisAPI.upsertNotificationChannel(name, {
+          provider: this.channelForm.provider,
+          enabled: this.channelForm.enabled,
+          config: Object.keys(config).length > 0 ? config : undefined,
+        });
+        Alpine.store('notify').success('Channel saved');
+        this.showChannelForm = false;
+        this.editingChannel = null;
+        await this.loadChannels();
+      } catch (e) {
+        Alpine.store('notify').error('Failed to save channel: ' + e.message);
+      }
+    },
+
+    async deleteChannel(name) {
+      if (!confirm(`Delete notification channel "${name}"?`)) return;
+      try {
+        await IntarisAPI.deleteNotificationChannel(name);
+        Alpine.store('notify').success('Channel deleted');
+        await this.loadChannels();
+      } catch (e) {
+        Alpine.store('notify').error('Failed to delete channel: ' + e.message);
+      }
+    },
+
+    async testChannel(name) {
+      this.testing = name;
+      try {
+        await IntarisAPI.testNotificationChannel(name);
+        Alpine.store('notify').success('Test notification sent');
+      } catch (e) {
+        Alpine.store('notify').error('Test failed: ' + e.message);
+      } finally {
+        this.testing = null;
+      }
+    },
+
+    async toggleChannel(ch) {
+      try {
+        await IntarisAPI.upsertNotificationChannel(ch.name, {
+          provider: ch.provider,
+          enabled: !ch.enabled,
+        });
+        await this.loadChannels();
+      } catch (e) {
+        Alpine.store('notify').error('Failed to toggle channel: ' + e.message);
+      }
+    },
+
+    channelHealthLabel(ch) {
+      if (ch.failure_count > 5) return 'Failing';
+      if (ch.failure_count > 0) return 'Degraded';
+      if (ch.last_success_at) return 'Healthy';
+      return 'Untested';
+    },
+
+    channelHealthColor(ch) {
+      if (ch.failure_count > 5) return 'text-red-400';
+      if (ch.failure_count > 0) return 'text-yellow-400';
+      if (ch.last_success_at) return 'text-green-400';
+      return 'text-gray-400';
     },
   };
 }

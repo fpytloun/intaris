@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import datetime
+from datetime import timezone as tz
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -111,24 +114,55 @@ async def resolve_decision(
             user_id=ctx.user_id,
         )
 
+        # Look up the audit record for EventBus and notifications
+        record = None
+        try:
+            record = store.get_by_call_id(request.call_id, user_id=ctx.user_id)
+        except ValueError:
+            pass  # Record not found — skip event and notification
+
         # Publish event to EventBus
         event_bus = getattr(http_request.app.state, "event_bus", None)
-        if event_bus is not None:
-            # Look up the audit record to get session_id
-            try:
-                record = store.get_by_call_id(request.call_id, user_id=ctx.user_id)
-                event_bus.publish(
-                    {
-                        "type": "decided",
-                        "call_id": request.call_id,
-                        "session_id": record.get("session_id"),
-                        "user_id": ctx.user_id,
-                        "user_decision": request.decision,
-                        "user_note": request.note,
-                    }
+        if event_bus is not None and record is not None:
+            event_bus.publish(
+                {
+                    "type": "decided",
+                    "call_id": request.call_id,
+                    "session_id": record.get("session_id"),
+                    "user_id": ctx.user_id,
+                    "user_decision": request.decision,
+                    "user_note": request.note,
+                }
+            )
+
+        # Fire-and-forget resolution notification to user's channels
+        dispatcher = getattr(http_request.app.state, "notification_dispatcher", None)
+        if dispatcher is not None and record is not None:
+            from intaris.notifications.providers import Notification
+
+            notification = Notification(
+                event_type="resolution",
+                call_id=request.call_id,
+                session_id=record.get("session_id", ""),
+                user_id=ctx.user_id,
+                agent_id=record.get("agent_id"),
+                tool=record.get("tool"),
+                args_redacted=None,
+                risk=record.get("risk"),
+                reasoning=None,
+                ui_url=None,
+                approve_url=None,
+                deny_url=None,
+                timestamp=datetime.now(tz.utc).isoformat(),
+                user_decision=request.decision,
+                user_note=request.note,
+            )
+            asyncio.create_task(
+                dispatcher.notify(
+                    user_id=ctx.user_id,
+                    notification=notification,
                 )
-            except ValueError:
-                pass  # Record not found — skip event
+            )
 
         return DecisionResponse(ok=True)
     except ValueError as e:

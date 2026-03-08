@@ -210,6 +210,28 @@ const IntarisAPI = {
     );
   },
 
+  // ── Notification Channels ──────────────────────────────────
+
+  listNotificationChannels() {
+    return this.get('/notifications/channels');
+  },
+
+  getNotificationChannel(name) {
+    return this.get(`/notifications/channels/${encodeURIComponent(name)}`);
+  },
+
+  upsertNotificationChannel(name, body) {
+    return this.put(`/notifications/channels/${encodeURIComponent(name)}`, body);
+  },
+
+  deleteNotificationChannel(name) {
+    return this.del(`/notifications/channels/${encodeURIComponent(name)}`);
+  },
+
+  testNotificationChannel(name) {
+    return this.post(`/notifications/channels/${encodeURIComponent(name)}/test`);
+  },
+
   // ── WebSocket ───────────────────────────────────────────────
 
   /**

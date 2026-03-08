@@ -180,6 +180,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `ANALYSIS_LLM_API_KEY` | LLM API key for analysis (falls back to `LLM_API_KEY`) |
 | `ANALYSIS_LLM_REASONING_EFFORT` | Reasoning effort for analysis LLM (default `low`) |
 | `ANALYSIS_LLM_TIMEOUT_MS` | Timeout for analysis LLM calls in milliseconds (default `30000`) |
+| `NOTIFICATION_ACTION_TTL_MINUTES` | TTL for notification action tokens in minutes (default `60`) |
 
 ## Build / Run / Test
 

@@ -1016,6 +1016,94 @@
             </template>
           </div>
         </template>
+
+        <!-- Notification Channels -->
+        <div class="mt-6">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-medium text-secondary">Notification Channels</h3>
+            <button @click="openAddChannel()" class="btn btn-sm btn-primary">Add Channel</button>
+          </div>
+
+          <div x-show="channelsLoading" class="text-center py-4 text-secondary text-sm">Loading channels...</div>
+
+          <!-- Channel List -->
+          <div x-show="!channelsLoading && channels.length === 0" class="card text-center text-sm text-muted py-6">
+            No notification channels configured. Add one to receive escalation alerts.
+          </div>
+
+          <div class="space-y-2">
+            <template x-for="ch in channels" :key="ch.name">
+              <div class="card flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                  <button @click="toggleChannel(ch)"
+                          :class="ch.enabled ? 'bg-green-600' : 'bg-gray-600'"
+                          class="relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full transition-colors">
+                    <span :class="ch.enabled ? 'translate-x-4' : 'translate-x-0'"
+                          class="inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform"></span>
+                  </button>
+                  <div>
+                    <div class="text-sm font-medium" x-text="ch.name"></div>
+                    <div class="text-xs text-muted">
+                      <span x-text="ch.provider" class="uppercase"></span>
+                      <span class="mx-1">&middot;</span>
+                      <span :class="channelHealthColor(ch)" x-text="channelHealthLabel(ch)"></span>
+                    </div>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button @click="testChannel(ch.name)"
+                          :disabled="testing === ch.name"
+                          class="btn btn-sm btn-secondary"
+                          x-text="testing === ch.name ? 'Sending...' : 'Test'"></button>
+                  <button @click="openEditChannel(ch)" class="btn btn-sm btn-secondary">Edit</button>
+                  <button @click="deleteChannel(ch.name)" class="btn btn-sm text-red-400 hover:text-red-300">Delete</button>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <!-- Channel Form (Add/Edit) -->
+          <template x-if="showChannelForm">
+            <div class="card mt-3">
+              <h4 class="text-sm font-medium text-secondary mb-3" x-text="editingChannel ? 'Edit Channel' : 'Add Channel'"></h4>
+              <div class="space-y-3">
+                <div x-show="!editingChannel">
+                  <label class="block text-xs text-muted mb-1">Name</label>
+                  <input type="text" x-model="channelForm.name" placeholder="my-pushover"
+                         class="w-full bg-slate-800 border border-slate-600 rounded px-3 py-1.5 text-sm">
+                </div>
+                <div>
+                  <label class="block text-xs text-muted mb-1">Provider</label>
+                  <select x-model="channelForm.provider"
+                          class="w-full bg-slate-800 border border-slate-600 rounded px-3 py-1.5 text-sm">
+                    <option value="pushover">Pushover</option>
+                    <option value="webhook">Webhook</option>
+                    <option value="slack">Slack</option>
+                  </select>
+                </div>
+                <template x-for="field in providerFields()" :key="field.key">
+                  <div>
+                    <label class="block text-xs text-muted mb-1">
+                      <span x-text="field.label"></span>
+                      <span x-show="field.required" class="text-red-400">*</span>
+                    </label>
+                    <input :type="field.type" x-model="channelForm.config[field.key]"
+                           :placeholder="editingChannel ? '(unchanged)' : ''"
+                           class="w-full bg-slate-800 border border-slate-600 rounded px-3 py-1.5 text-sm">
+                  </div>
+                </template>
+                <div class="flex items-center gap-2">
+                  <input type="checkbox" x-model="channelForm.enabled" id="ch-enabled">
+                  <label for="ch-enabled" class="text-sm text-secondary">Enabled</label>
+                </div>
+                <div class="flex gap-2 pt-1">
+                  <button @click="saveChannel()" class="btn btn-sm btn-primary">Save</button>
+                  <button @click="cancelChannelForm()" class="btn btn-sm btn-secondary">Cancel</button>
+                </div>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
 
     </main>

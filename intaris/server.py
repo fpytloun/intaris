@@ -159,7 +159,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         cfg = _get_config()
 
-        # Skip auth for health endpoint and static UI files
+        # Skip auth for health endpoint, static UI files, and action tokens
         if (
             request.url.path == "/health"
             or request.url.path
@@ -168,6 +168,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 "/ui/",
             )
             or request.url.path.startswith("/ui/")
+            or request.url.path.startswith("/api/v1/action/")
         ):
             return await call_next(request)
 
@@ -375,6 +376,37 @@ async def lifespan(app):
     else:
         logger.info("Background worker not started (analysis disabled)")
 
+    # Initialize notification dispatcher
+    from intaris.notifications.dispatcher import NotificationDispatcher
+
+    notification_dispatcher = NotificationDispatcher(
+        db=_get_db(),
+        encryption_key=cfg.mcp.encryption_key,
+        base_url=cfg.webhook.base_url,
+    )
+    app.state.notification_dispatcher = notification_dispatcher
+    logger.info("Notification dispatcher initialized")
+
+    # Warn if notification channels exist without encryption key
+    if not cfg.mcp.encryption_key:
+        try:
+            with _get_db().cursor() as cur:
+                cur.execute(
+                    "SELECT COUNT(*) FROM notification_channels "
+                    "WHERE config_encrypted IS NOT NULL"
+                )
+                count = cur.fetchone()[0]
+                if count > 0:
+                    logger.warning(
+                        "Found %d notification channel(s) with encrypted "
+                        "secrets but INTARIS_ENCRYPTION_KEY is not set. "
+                        "These channels will not be able to send "
+                        "notifications until the key is provided.",
+                        count,
+                    )
+        except Exception:
+            pass  # Table may not exist yet on first run.
+
     # Initialize MCP proxy
     global _mcp_proxy_ref
     mcp_proxy = _init_mcp_proxy(cfg)
@@ -391,6 +423,7 @@ async def lifespan(app):
         api_app.state.mcp_proxy = mcp_proxy
         api_app.state.background_worker = background_worker
         api_app.state.intention_barrier = app.state.intention_barrier
+        api_app.state.notification_dispatcher = notification_dispatcher
 
     if mcp_proxy is not None:
         await mcp_proxy.start()
@@ -408,6 +441,7 @@ async def lifespan(app):
     _mcp_proxy_ref = None
     await background_worker.stop()
     await app.state.webhook.close()
+    await notification_dispatcher.close()
     db = _get_db()
     db.close()
     logger.info("Intaris shutting down")
@@ -510,9 +544,16 @@ def create_app() -> Starlette:
     )
     logger.info("MCP proxy endpoint mounted at /mcp")
 
+    # Action token endpoints (unauthenticated — token is the auth).
+    # Mounted as Starlette routes before the FastAPI sub-app so they
+    # bypass the auth middleware and return HTML, not JSON.
+    from intaris.api.actions import action_get, action_post
+
     routes.extend(
         [
             Route("/health", health_check),
+            Route("/api/v1/action/{token:path}", action_get, methods=["GET"]),
+            Route("/api/v1/action/{token:path}", action_post, methods=["POST"]),
             WebSocketRoute("/api/v1/stream", stream_websocket),
             Mount("/api/v1", app=api_app),
         ]

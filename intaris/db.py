@@ -441,4 +441,21 @@ CREATE INDEX IF NOT EXISTS idx_tasks_pending
     ON analysis_tasks(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_user
     ON analysis_tasks(user_id, task_type, status);
+
+-- Per-user notification channels for escalation alerts
+CREATE TABLE IF NOT EXISTS notification_channels (
+    user_id          TEXT NOT NULL,
+    name             TEXT NOT NULL,
+    provider         TEXT NOT NULL,
+    config_encrypted TEXT,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    last_success_at  TEXT,
+    failure_count    INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (user_id, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_channels_user
+    ON notification_channels(user_id, enabled);
 """

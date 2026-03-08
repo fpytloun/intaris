@@ -69,7 +69,7 @@ async def evaluate(
             context=request.context,
         )
 
-        # Fire-and-forget webhook on escalation
+        # Fire-and-forget webhook on escalation (Cognis integration)
         webhook = getattr(http_request.app.state, "webhook", None)
         if (
             webhook is not None
@@ -86,6 +86,33 @@ async def evaluate(
                     args_redacted=result.get("args_redacted"),
                     risk=result.get("risk"),
                     reasoning=result.get("reasoning"),
+                )
+            )
+
+        # Fire-and-forget per-user notifications on escalation
+        dispatcher = getattr(http_request.app.state, "notification_dispatcher", None)
+        if dispatcher is not None and result.get("decision") == "escalate":
+            from intaris.notifications.providers import Notification
+
+            notification = Notification(
+                event_type="escalation",
+                call_id=result["call_id"],
+                session_id=request.session_id,
+                user_id=ctx.user_id,
+                agent_id=agent_id,
+                tool=request.tool,
+                args_redacted=result.get("args_redacted"),
+                risk=result.get("risk"),
+                reasoning=result.get("reasoning"),
+                ui_url=None,  # Set by dispatcher
+                approve_url=None,  # Set by dispatcher
+                deny_url=None,  # Set by dispatcher
+                timestamp=datetime.now(tz.utc).isoformat(),
+            )
+            asyncio.create_task(
+                dispatcher.notify(
+                    user_id=ctx.user_id,
+                    notification=notification,
                 )
             )
 
