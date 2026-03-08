@@ -44,7 +44,7 @@ def _validate_session_exists(request: Request, user_id: str, session_id: str) ->
 
     db = _get_db()
     store = SessionStore(db)
-    session = store.get(user_id, session_id)
+    session = store.get(session_id, user_id=user_id)
     if session is None:
         raise HTTPException(
             status_code=404,
