@@ -64,6 +64,8 @@ Approve or deny this call in the Intaris UI, then retry.
 - Search sessions should not filter child sessions. It should query among parents and childs but always show parent + all it's children if tree view. We could also highlight matched string.
 - Opencode plugin should put session into "Idle" when ended (waiting for user input) to make it clear it is not doing anything and resume right after user input when the work starts again.
 
+- Notifications should notify on escalate but also on deny and session suspend
+
 ## Major complex
 
 - there should be feedback-loop and self-learning from approve/deny actions. Evaluator should look for similar pattern already denied/approved especially if there is "Optional note" attached. But again we must not degrade performance.

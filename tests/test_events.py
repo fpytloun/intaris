@@ -706,6 +706,94 @@ class TestEventStore:
         seqs = store.append("alice", "sess1", [{"type": "message", "data": {}}])
         assert seqs == [1]
 
+    def test_read_with_source_filter(self, store):
+        """Source filter returns only events from matching sources."""
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {"type": "message", "data": {}},
+                {"type": "tool_call", "data": {}},
+            ],
+            source="opencode",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {"type": "evaluation", "data": {}},
+            ],
+            source="intaris",
+        )
+
+        # Filter to opencode only
+        events = store.read("alice", "sess1", sources={"opencode"})
+        assert len(events) == 2
+        assert all(e["source"] == "opencode" for e in events)
+
+        # Filter to intaris only
+        events = store.read("alice", "sess1", sources={"intaris"})
+        assert len(events) == 1
+        assert events[0]["source"] == "intaris"
+
+        # No filter returns all
+        events = store.read("alice", "sess1")
+        assert len(events) == 3
+
+    def test_read_with_multiple_source_filter(self, store):
+        """Multiple sources in filter returns events from any of them."""
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "message", "data": {}}],
+            source="opencode",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "evaluation", "data": {}}],
+            source="intaris",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "tool_call", "data": {}}],
+            source="client",
+        )
+
+        events = store.read("alice", "sess1", sources={"opencode", "client"})
+        assert len(events) == 2
+        sources = {e["source"] for e in events}
+        assert sources == {"opencode", "client"}
+
+    def test_read_with_source_and_type_filter(self, store):
+        """Source and type filters can be combined."""
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {"type": "message", "data": {}},
+                {"type": "tool_call", "data": {}},
+            ],
+            source="opencode",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {"type": "message", "data": {}},
+            ],
+            source="intaris",
+        )
+
+        # Filter to opencode messages only
+        events = store.read(
+            "alice", "sess1", event_types={"message"}, sources={"opencode"}
+        )
+        assert len(events) == 1
+        assert events[0]["source"] == "opencode"
+        assert events[0]["type"] == "message"
+
     def test_thread_safety(self, store):
         """Concurrent appends from multiple threads produce unique seqs."""
         results = []

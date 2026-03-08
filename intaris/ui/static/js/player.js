@@ -4,9 +4,11 @@
  * Provides a scrollable event list for session recordings with:
  * - Paginated loading (load more on scroll)
  * - Event type filtering
+ * - Event source filtering (default: agent-only, hides intaris events)
  * - Expandable event details
  * - Live tailing via WebSocket (auto-scroll to latest)
  * - Play/pause mode with configurable speed
+ * - Auto-scroll to bottom on new events
  */
 function sessionPlayer() {
   return {
@@ -20,7 +22,8 @@ function sessionPlayer() {
     visible: false,
 
     // Filtering
-    typeFilter: '',
+    typeFilter: '__all__',
+    sourceFilter: '__agent__',
 
     // Live tail
     liveTail: false,
@@ -38,6 +41,9 @@ function sessionPlayer() {
     // Pagination
     pageSize: 50,
 
+    // Auto-scroll
+    autoScroll: true,
+
     /**
      * Open the player for a session.
      */
@@ -49,9 +55,11 @@ function sessionPlayer() {
       this.error = null;
       this.expandedSeq = null;
       this.visible = true;
+      this.autoScroll = true;
       this.stopLiveTail();
       this.stopPlaying();
       await this.loadEvents();
+      this.scrollToBottom();
     },
 
     /**
@@ -78,7 +86,12 @@ function sessionPlayer() {
           after_seq: this.lastSeq,
           limit: this.pageSize,
         };
-        if (this.typeFilter) params.type = this.typeFilter;
+        if (this.typeFilter !== '__all__') params.type = this.typeFilter;
+        if (this.sourceFilter === '__agent__') {
+          params.source = 'opencode,claude-code,client';
+        } else if (this.sourceFilter !== '__all__') {
+          params.source = this.sourceFilter;
+        }
 
         const result = await IntarisAPI.getSessionEvents(this.sessionId, params);
         const newEvents = result.events || [];
@@ -99,6 +112,8 @@ function sessionPlayer() {
       } finally {
         this.loading = false;
       }
+
+      if (this.autoScroll) this.scrollToBottom();
     },
 
     /**
@@ -111,12 +126,13 @@ function sessionPlayer() {
     },
 
     /**
-     * Reload events with a new type filter.
+     * Reload events with a new filter.
      */
     async applyFilter() {
       this.events = [];
       this.lastSeq = 0;
       this.hasMore = false;
+      this.autoScroll = true;
       await this.loadEvents();
     },
 
@@ -135,10 +151,16 @@ function sessionPlayer() {
             // Deduplicate
             if (!this.events.some(e => e.seq === event.seq)) {
               // Apply type filter
-              if (!this.typeFilter || event.type === this.typeFilter) {
-                this.events.push(event);
-                if (event.seq > this.lastSeq) this.lastSeq = event.seq;
+              if (this.typeFilter !== '__all__' && event.type !== this.typeFilter) return;
+              // Apply source filter
+              if (this.sourceFilter === '__agent__') {
+                if (!['opencode', 'claude-code', 'client'].includes(event.source)) return;
+              } else if (this.sourceFilter !== '__all__') {
+                if (event.source !== this.sourceFilter) return;
               }
+              this.events.push(event);
+              if (event.seq > this.lastSeq) this.lastSeq = event.seq;
+              if (this.autoScroll) this.scrollToBottom();
             }
           }
         },
@@ -173,6 +195,23 @@ function sessionPlayer() {
       } else {
         this.startLiveTail();
       }
+    },
+
+    // ── Auto-scroll ─────────────────────────────────────────
+
+    scrollToBottom() {
+      this.$nextTick(() => {
+        const el = this.$refs.eventList;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+
+    handleScroll() {
+      const el = this.$refs.eventList;
+      if (!el) return;
+      // Consider "at bottom" if within 50px of the end
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+      this.autoScroll = atBottom;
     },
 
     // ── Player mode ──────────────────────────────────────────
@@ -224,6 +263,7 @@ function sessionPlayer() {
       this.playTimer = setTimeout(() => {
         this.expandedSeq = this.events[this.playIndex]?.seq;
         this.playIndex++;
+        if (this.autoScroll) this.scrollToBottom();
         this._scheduleNext();
       }, delayMs);
     },
@@ -263,16 +303,16 @@ function sessionPlayer() {
         case 'evaluation':
           return `${data.tool || '?'}: ${data.decision || '?'} (${data.risk || '?'})`;
         case 'message':
-          if (data.role === 'user') return 'User: ' + (data.text || '').substring(0, 80);
+          if (data.role === 'user') return 'User: ' + (data.text || '');
           return (data.role || 'message') + (data.model ? ` [${data.model}]` : '');
         case 'part':
-          return (data.part?.type || 'part') + (data.part?.text ? ': ' + data.part.text.substring(0, 60) : '');
+          return (data.part?.type || 'part') + (data.part?.text ? ': ' + data.part.text : '');
         case 'lifecycle':
           return data.event_type || data.status || 'lifecycle';
         case 'checkpoint':
-          return (data.content || '').substring(0, 80);
+          return data.content || '';
         case 'reasoning':
-          return (data.content || '').substring(0, 80);
+          return data.content || '';
         case 'transcript':
           return data.type || 'transcript entry';
         default:
@@ -295,9 +335,19 @@ function sessionPlayer() {
 
     get filteredTypes() {
       return [
-        '', 'message', 'tool_call', 'tool_result', 'evaluation',
+        '__all__', 'message', 'tool_call', 'tool_result', 'evaluation',
         'part', 'lifecycle', 'checkpoint', 'reasoning', 'transcript',
       ];
+    },
+
+    get filteredSources() {
+      return ['__all__', '__agent__', 'intaris', 'opencode', 'claude-code', 'client'];
+    },
+
+    sourceLabel(s) {
+      if (s === '__all__') return 'All sources';
+      if (s === '__agent__') return 'Agent only';
+      return s;
     },
   };
 }

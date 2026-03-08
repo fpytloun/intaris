@@ -131,6 +131,10 @@ async def read_events(
         None,
         description="Comma-separated event type filter (e.g., 'tool_call,evaluation')",
     ),
+    source: str | None = Query(
+        None,
+        description="Comma-separated source filter (e.g., 'opencode,client')",
+    ),
 ) -> EventReadResponse:
     """Read events from a session's event log."""
     event_store = _get_event_store(request)
@@ -149,6 +153,11 @@ async def read_events(
                 ),
             )
 
+    # Parse source filter
+    event_sources: set[str] | None = None
+    if source:
+        event_sources = set(source.split(","))
+
     # Validate session exists
     _validate_session_exists(request, ctx.user_id, session_id)
 
@@ -161,6 +170,7 @@ async def read_events(
             after_seq=after_seq,
             limit=fetch_limit,
             event_types=event_types,
+            sources=event_sources,
         )
     except Exception as e:
         logger.exception("Failed to read events for %s/%s", ctx.user_id, session_id)

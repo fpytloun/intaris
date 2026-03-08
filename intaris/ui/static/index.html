@@ -1413,7 +1413,7 @@
        @intaris:open-recording.window="open($event.detail.sessionId)"
        @keydown.escape.window="if (visible) close()"
        class="modal-overlay" @click.self="close()">
-    <div class="modal-content max-w-5xl" @click.stop>
+    <div class="modal-content max-w-[95vw]" @click.stop>
       <!-- Header -->
       <div class="flex items-center justify-between mb-4">
         <div class="flex items-center gap-3">
@@ -1430,7 +1430,15 @@
           <select x-model="typeFilter" @change="applyFilter()"
                   class="input text-xs py-1 px-2 w-auto">
             <template x-for="t in filteredTypes" :key="t">
-              <option :value="t" x-text="t || 'All types'"></option>
+              <option :value="t" x-text="t === '__all__' ? 'All types' : t"></option>
+            </template>
+          </select>
+
+          <!-- Source filter -->
+          <select x-model="sourceFilter" @change="applyFilter()"
+                  class="input text-xs py-1 px-2 w-auto">
+            <template x-for="s in filteredSources" :key="s">
+              <option :value="s" x-text="sourceLabel(s)"></option>
             </template>
           </select>
 
@@ -1470,7 +1478,7 @@
       <div x-show="!loading && events.length === 0 && !error" class="text-sm text-muted py-8 text-center">No recorded events</div>
 
       <!-- Event list -->
-      <div x-show="events.length > 0" class="space-y-0.5 max-h-[70vh] overflow-y-auto" x-ref="eventList">
+      <div x-show="events.length > 0" class="space-y-0.5 max-h-[80vh] overflow-y-auto" x-ref="eventList" @scroll="handleScroll()">
         <template x-for="event in events" :key="event.seq">
           <div>
             <div class="flex items-center justify-between py-1 text-xs cursor-pointer hover:bg-brand-bg/50 rounded px-2 -mx-1"
@@ -1479,7 +1487,7 @@
               <div class="flex items-center gap-1.5 min-w-0">
                 <span class="text-muted w-8 text-right flex-shrink-0" x-text="'#' + event.seq"></span>
                 <span :class="eventTypeBadge(event.type)" x-text="event.type" class="text-xs flex-shrink-0"></span>
-                <span class="truncate text-secondary" x-text="eventSummary(event)"></span>
+                <span class="break-words text-secondary" x-text="eventSummary(event)"></span>
               </div>
               <div class="flex items-center gap-2 flex-shrink-0 ml-2">
                 <span class="text-muted" x-text="event.source || ''"></span>
@@ -1490,7 +1498,7 @@
             <!-- Expanded event detail -->
             <div x-show="expandedSeq === event.seq" x-cloak
                  class="ml-10 mt-0.5 mb-1 p-2 bg-brand-bg rounded border border-brand-border">
-              <pre class="text-xs overflow-x-auto whitespace-pre-wrap break-all max-h-64 overflow-y-auto"
+              <pre class="text-xs overflow-x-auto whitespace-pre-wrap break-words max-h-[50vh] overflow-y-auto"
                    x-text="eventDetail(event)"></pre>
             </div>
           </div>
