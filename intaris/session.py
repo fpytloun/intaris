@@ -149,6 +149,7 @@ class SessionStore:
         user_id: str,
         intention: str | None = None,
         details: dict[str, Any] | None = None,
+        intention_source: str | None = None,
     ) -> dict[str, Any]:
         """Update session intention and/or details.
 
@@ -159,6 +160,9 @@ class SessionStore:
             user_id: Tenant identifier (must match session owner).
             intention: New intention text (optional).
             details: New details dict (optional, replaces existing).
+            intention_source: How the intention was set: "initial",
+                "user" (from user message), or "bootstrap" (one-time
+                refinement from tool patterns). Optional.
 
         Returns:
             Updated session as a dict.
@@ -166,7 +170,7 @@ class SessionStore:
         Raises:
             ValueError: If session not found.
         """
-        if intention is None and details is None:
+        if intention is None and details is None and intention_source is None:
             return self.get(session_id, user_id=user_id)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -179,6 +183,9 @@ class SessionStore:
         if details is not None:
             sets.append("details = ?")
             params.append(json.dumps(details))
+        if intention_source is not None:
+            sets.append("intention_source = ?")
+            params.append(intention_source)
 
         params.extend([session_id, user_id])
 

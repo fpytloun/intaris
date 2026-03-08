@@ -566,156 +566,44 @@ class BackgroundWorker:
     async def _execute_intention_update_task(
         self, task: dict[str, Any]
     ) -> dict[str, Any]:
-        """Generate a smarter intention from the audit trail.
+        """Execute an intention update task via the shared generate_intention().
 
-        Uses the analysis LLM to summarize what the session is about
-        based on tool calls and user messages. User messages are the
-        primary signal for intent — they are the user's own words
-        (not agent-generated text) and are sanitized on ingestion.
+        Used for one-time bootstrap updates for sessions without user
+        messages (Claude Code, MCP proxy). User-message-triggered updates
+        go through the IntentionBarrier instead.
         """
-        from intaris.audit import AuditStore
+        from intaris.config import load_config
+        from intaris.intention import generate_intention
+        from intaris.llm import LLMClient
 
         user_id = task.get("user_id", "")
         session_id = task.get("session_id", "")
         if not user_id or not session_id:
             return {"error": "Missing user_id or session_id"}
 
-        try:
-            session = self._session_store.get(session_id, user_id=user_id)
-        except ValueError:
-            return {"error": f"Session {session_id} not found"}
-
-        # Fetch tool calls and user messages separately to ensure
-        # balanced context regardless of record type distribution
-        audit_store = AuditStore(self._db)
-        recent_tools = audit_store.get_recent(
-            session_id, user_id=user_id, limit=10, record_type="tool_call"
-        )
-        recent_messages = audit_store.get_recent(
-            session_id, user_id=user_id, limit=5, record_type="reasoning"
-        )
-
-        if not recent_tools and not recent_messages:
-            return {"skipped": "No audit records yet"}
-
-        # Build tool call summary
-        tool_summary = []
-        for record in recent_tools:
-            tool = record.get("tool", "unknown")
-            decision = record.get("decision", "unknown")
-            args = record.get("args_redacted", {})
-            brief = ""
-            if isinstance(args, dict):
-                if "command" in args:
-                    brief = f": {str(args['command'])[:100]}"
-                elif "filePath" in args:
-                    brief = f": {args['filePath']}"
-                elif "path" in args:
-                    brief = f": {args['path']}"
-            tool_summary.append(f"  {tool}{brief} → {decision}")
-
-        # Extract user messages (chronological order — oldest first)
-        user_messages: list[str] = []
-        for record in reversed(recent_messages):
-            content = record.get("content", "")
-            if content:
-                if content.startswith("User message: "):
-                    content = content[len("User message: ") :]
-                user_messages.append(content[:200])
-
-        # Build prompt with user messages as primary signal
-        from intaris.config import load_config
-        from intaris.llm import LLMClient
+        payload = task.get("payload") or {}
+        trigger = payload.get("trigger", "unknown")
 
         cfg = load_config()
         analysis_llm = LLMClient(cfg.llm_analysis)
 
-        details = session.get("details") or {}
-        wd = details.get("working_directory", "unknown")
+        # Pass intention_source directly so the update is atomic —
+        # no double-update race between generate_intention and here.
+        source = "bootstrap" if trigger == "bootstrap" else "user"
 
-        prompt_parts = [
-            f"Current intention: {session.get('intention', 'unknown')}",
-            f"Working directory: {wd}",
-        ]
+        intention = generate_intention(
+            llm=analysis_llm,
+            db=self._db,
+            session_store=self._session_store,
+            user_id=user_id,
+            session_id=session_id,
+            event_bus=self._event_bus,
+            intention_source=source,
+        )
 
-        # For sub-sessions, include parent intention to keep the
-        # generated intention within the parent's scope
-        parent_session_id = session.get("parent_session_id")
-        if parent_session_id:
-            try:
-                parent_session = self._session_store.get(
-                    parent_session_id, user_id=user_id
-                )
-                parent_intention = parent_session.get("intention", "")
-                if parent_intention:
-                    prompt_parts.append(
-                        f"Parent session intention (this is a sub-session — "
-                        f"stay within scope): {parent_intention}"
-                    )
-            except ValueError:
-                logger.debug(
-                    "Parent session %s not found for intention update",
-                    parent_session_id,
-                )
-
-        if user_messages:
-            msgs_text = "\n".join(f"  - {m}" for m in user_messages)
-            prompt_parts.append(
-                f"User messages (primary signal — the user's own words):\n{msgs_text}"
-            )
-        if tool_summary:
-            tools_text = "\n".join(tool_summary)
-            prompt_parts.append(f"Recent tool calls:\n{tools_text}")
-        prompt_parts.append("Generate a concise session description:")
-
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a concise summarizer. Given context from a coding "
-                    "session (user messages and tool calls), generate a single "
-                    "sentence (max 100 words) describing what the user is working "
-                    "on. User messages are the most important signal — they "
-                    "capture the user's actual intent. Focus on the goal, not "
-                    "the tools."
-                ),
-            },
-            {
-                "role": "user",
-                "content": "\n".join(prompt_parts),
-            },
-        ]
-
-        try:
-            raw = analysis_llm.generate(messages, max_tokens=150)
-            intention = raw.strip().strip('"').strip("'")
-            if not intention or len(intention) < 5:
-                return {"skipped": "LLM returned empty intention"}
-
-            # Truncate to 500 chars
-            intention = intention[:500]
-
-            self._session_store.update_session(
-                session_id,
-                user_id=user_id,
-                intention=intention,
-            )
-
-            # Publish event
-            if self._event_bus is not None:
-                self._event_bus.publish(
-                    {
-                        "type": "session_updated",
-                        "session_id": session_id,
-                        "user_id": user_id,
-                        "intention": intention,
-                    }
-                )
-
+        if intention is not None:
             return {"intention": intention}
-        except Exception as e:
-            logger.warning("Failed to generate intention: %s", e)
-            return {"error": str(e)}
+        return {"skipped": "No update needed"}
 
     async def _idle_sweeper(self) -> None:
         """Periodically transition inactive sessions to idle.

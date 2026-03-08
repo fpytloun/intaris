@@ -41,7 +41,7 @@ class IntentionRequest(BaseModel):
     """Request to declare a session intention."""
 
     session_id: str = Field(..., description="Session identifier")
-    intention: str = Field(..., description="Declared session purpose")
+    intention: str = Field(..., max_length=500, description="Declared session purpose")
     details: dict[str, Any] | None = Field(
         None, description="Session details (repo, branch, constraints)"
     )

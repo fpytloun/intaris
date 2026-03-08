@@ -38,6 +38,7 @@ intaris/
 ├── llm.py                 # OpenAI-compatible LLM client with structured output
 ├── prompts.py             # Safety evaluation prompt templates + JSON schema
 ├── prompts_analysis.py    # L2/L3 analysis prompt templates + JSON schemas
+├── intention.py           # IntentionBarrier (user-driven intention updates) + generate_intention()
 ├── evaluator.py           # Evaluation pipeline orchestrator (ESCALATE branch, retry, behavioral context)
 ├── analyzer.py            # Stub: L2 summary generation + L3 behavioral analysis (Phase 2)
 ├── background.py          # TaskQueue (SQLite), BackgroundWorker (idle sweep, scheduler), Metrics
@@ -92,6 +93,7 @@ intaris/
 | **REST API** | `api/` | FastAPI endpoints with OpenAPI spec |
 | **Streaming** | `api/stream.py` | EventBus (pub/sub) + WebSocket endpoint with first-message auth |
 | **Info** | `api/info.py` | Identity (/whoami), stats (/stats), config (/config) for management UI |
+| **Intention** | `intention.py` | IntentionBarrier (user-driven intention updates) + generate_intention() |
 | **Orchestration** | `evaluator.py` | Full evaluation pipeline (classify → LLM → decide → audit), behavioral context injection |
 | **Classification** | `classifier.py` | Read-only allowlist, critical patterns, session policy |
 | **Decision** | `decision.py` | Priority-ordered decision matrix |
@@ -125,6 +127,8 @@ intaris/
 7. **Follows mnemory conventions**: Same build system (hatchling), config pattern (dataclasses + env vars), LLM client (OpenAI wrapper with structured output), error handling, and code style.
 
 8. **Multi-tenancy**: `user_id` is the tenant separator — scopes all sessions and audit records. `agent_id` is metadata only (not a visibility boundary). See [Multi-tenancy](#multi-tenancy) below.
+
+9. **User-driven intention model**: Session intention is immutable except by user action. Agent tool calls never redefine intention. The `IntentionBarrier` pattern ensures the evaluator sees the freshest user-stated intention by coordinating between `/reasoning` (trigger) and `/evaluate` (wait). See [Intention Model](#intention-model) below.
 
 ## Multi-tenancy
 
@@ -163,6 +167,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `MCP_CONFIG_FILE` | Path to JSON file defining MCP servers (optional, reconciled on startup) |
 | `MCP_ALLOW_STDIO` | Allow stdio transport for MCP servers (default `false`) |
 | `MCP_UPSTREAM_TIMEOUT_MS` | Timeout for upstream MCP server calls in milliseconds (default `30000`) |
+| `INTENTION_BARRIER_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for a pending intention update (default `1000`) |
 | `ANALYSIS_ENABLED` | Enable behavioral analysis pipeline (default `true`) |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | Minutes of inactivity before session transitions to idle (default `30`) |
 | `SUMMARY_VOLUME_THRESHOLD` | Evaluate calls per session before triggering a summary (default `50`) |
@@ -260,6 +265,38 @@ The `audit_log` table supports multiple record types via the `record_type` colum
 
 For `tool_call` records, `tool`, `args_redacted`, and `classification` are populated. For `reasoning`, `checkpoint`, and `summary` records, `content` holds the text and tool-specific fields are null. All record types share `decision`, `risk`, `reasoning`, `evaluation_path`, and `latency_ms`. The `profile_version` column records the behavioral profile version at time of evaluation.
 
+## Intention Model
+
+Session intention is **user-driven only** — only user messages, explicit declarations, and client-side title changes can update it. Agent tool calls never redefine intention.
+
+### IntentionBarrier pattern
+
+The `IntentionBarrier` (`intention.py`) coordinates between the `/reasoning` and `/evaluate` endpoints to ensure the evaluator always sees the freshest user-stated intention:
+
+1. **Trigger**: When `POST /reasoning` receives a user message (content starts with `"User message:"`), it calls `barrier.trigger()` which starts an async LLM task to regenerate the intention.
+2. **Wait**: When `POST /evaluate` runs, it calls `await barrier.wait()` before invoking the evaluator. If an intention update is pending, it blocks up to `INTENTION_BARRIER_TIMEOUT_MS` (default 1s).
+3. **Cancel-and-restart**: If a new user message arrives while an update is running, the old task is cancelled and a fresh one starts. Only the latest message's update runs to completion.
+
+Budget: 1s barrier + 4s LLM eval = 5s max (within the circuit breaker constraint).
+
+### Intention sources
+
+The `intention_source` column on sessions tracks how the intention was set:
+
+| Source | Description |
+|---|---|
+| `initial` | Set at session creation (default) |
+| `user` | Updated from a user message via the IntentionBarrier |
+| `bootstrap` | One-time refinement from tool patterns (see below) |
+
+### One-time bootstrap
+
+Sessions that never receive user messages (e.g., Claude Code, MCP proxy) keep their generic initial intention. At evaluate call 10, if `intention_source` is still `"initial"`, a single refinement fires via the background task queue. This is capped at exactly one update to prevent agent drift from rewriting the intention.
+
+### generate_intention()
+
+Shared function in `intention.py` used by both the IntentionBarrier (immediate path) and the background worker (bootstrap path). Uses the analysis LLM to summarize what the session is about based on user messages (primary signal) and recent tool calls (secondary). Accepts an injected `LLMClient` rather than creating one per call.
+
 ## Behavioral Analysis
 
 Three-layer behavioral guardrails system that evolves Intaris from a per-call firewall into a behavioral analysis platform.
@@ -315,6 +352,7 @@ L3: Cross-Session Analysis (per-user)
 - **`last_activity_at`**: Updated on every evaluate, reasoning, and checkpoint call.
 - **`parent_session_id`**: Optional field for session continuation chains.
 - **`summary_count`**: Tracks number of summaries generated for a session.
+- **`intention_source`**: Tracks how the intention was set (`initial`, `user`, `bootstrap`). See [Intention Model](#intention-model).
 
 ### Phase status
 

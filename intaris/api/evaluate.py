@@ -48,6 +48,14 @@ async def evaluate(
                 detail="Rate limit exceeded: max evaluations per session per minute",
             )
 
+    # Wait for any pending intention update (barrier pattern).
+    # If a user message triggered an intention update via POST /reasoning,
+    # we wait for it to complete before evaluating. This ensures the
+    # evaluator sees the freshest user-stated intention.
+    barrier = getattr(http_request.app.state, "intention_barrier", None)
+    if barrier is not None:
+        await barrier.wait(ctx.user_id, request.session_id)
+
     try:
         evaluator = _get_evaluator()
         # agent_id: request body overrides header if provided

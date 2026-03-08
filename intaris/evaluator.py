@@ -278,31 +278,37 @@ class Evaluator:
         except ValueError:
             logger.warning("Failed to update session counter for %s", session_id)
 
-        # Enqueue periodic intention update task
-        # Triggers every 20 calls starting at call 10 to refine intention
-        # as the session evolves. User messages also trigger updates
-        # via POST /reasoning (see api/analysis.py).
+        # One-time intention bootstrap for sessions without user messages.
+        # Sessions that never receive user messages (Claude Code, MCP proxy)
+        # keep their generic initial intention. At call 10, if no user
+        # messages have been received (intention_source is still "initial"),
+        # trigger a single refinement from tool patterns. Capped at exactly
+        # one update to prevent agent drift from rewriting the intention.
         total = session.get("total_calls", 0)
-        if total >= 9 and total % 20 == 9 and self._analysis_enabled:
+        intention_source = session.get("intention_source", "initial")
+        if (
+            total == 9
+            and intention_source == "initial"
+            and self._analysis_enabled
+            and self._db is not None
+        ):
             try:
                 from intaris.background import TaskQueue
 
-                if self._db is not None:
-                    tq = TaskQueue(self._db)
-                    if not tq.recently_completed(
-                        "intention_update", user_id, session_id, 60
-                    ) and not tq.cancel_duplicate(
-                        "intention_update", user_id, session_id
-                    ):
-                        tq.enqueue(
-                            "intention_update",
-                            user_id,
-                            session_id=session_id,
-                            payload={"trigger": "auto"},
-                            priority=2,
-                        )
+                tq = TaskQueue(self._db)
+                if not tq.cancel_duplicate("intention_update", user_id, session_id):
+                    tq.enqueue(
+                        "intention_update",
+                        user_id,
+                        session_id=session_id,
+                        payload={"trigger": "bootstrap"},
+                        priority=1,
+                    )
             except Exception:
-                logger.debug("Failed to enqueue intention update", exc_info=True)
+                logger.debug(
+                    "Failed to enqueue bootstrap intention update",
+                    exc_info=True,
+                )
 
         return {
             "call_id": call_id,
@@ -422,7 +428,9 @@ class Evaluator:
         # Assemble context
         session_id = session["session_id"]
         user_id = session["user_id"]
-        recent_history = self._audit.get_recent(session_id, user_id=user_id, limit=10)
+        recent_history = self._audit.get_recent(
+            session_id, user_id=user_id, limit=10, record_type="tool_call"
+        )
 
         user_prompt = build_evaluation_user_prompt(
             intention=session["intention"],

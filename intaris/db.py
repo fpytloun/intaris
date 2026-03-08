@@ -137,6 +137,15 @@ class Database:
             conn.execute("ALTER TABLE audit_log ADD COLUMN intention TEXT")
             logger.info("Migration: added intention column to audit_log")
 
+        # Migration: add intention_source to sessions (tracks how intention
+        # was set: "initial", "user", or "bootstrap")
+        if not self._column_exists(conn, "sessions", "intention_source"):
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN "
+                "intention_source TEXT DEFAULT 'initial'"
+            )
+            logger.info("Migration: added intention_source column to sessions")
+
         # Migration: update analysis_tasks CHECK constraint to include
         # 'intention_update'. SQLite doesn't support ALTER CHECK, so we
         # recreate the table. Task queue data is transient — completed

@@ -142,32 +142,20 @@ async def submit_reasoning(
         # Update session activity
         session_store.update_activity(request.session_id, user_id=ctx.user_id)
 
-        # Trigger intention update from user message (most important
-        # signal for intent). Only triggers for user messages, not agent
-        # reasoning. Uses cooldown to prevent flooding: skip if an
-        # intention_update completed within the last 60 seconds.
+        # Trigger immediate intention update from user message via the
+        # IntentionBarrier. The barrier runs the LLM call as an async
+        # task; the next POST /evaluate will wait for it to complete.
+        # Only triggers for user messages, not agent reasoning.
         if sanitized.startswith("User message:"):
-            try:
-                from intaris.background import TaskQueue
-
-                tq = TaskQueue(db)
-                if not tq.recently_completed(
-                    "intention_update", ctx.user_id, request.session_id, 60
-                ) and not tq.cancel_duplicate(
-                    "intention_update", ctx.user_id, request.session_id
-                ):
-                    tq.enqueue(
-                        "intention_update",
-                        ctx.user_id,
-                        session_id=request.session_id,
-                        payload={"trigger": "user_message"},
-                        priority=2,
+            barrier = getattr(http_request.app.state, "intention_barrier", None)
+            if barrier is not None:
+                try:
+                    await barrier.trigger(ctx.user_id, request.session_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to trigger intention barrier",
+                        exc_info=True,
                     )
-            except Exception:
-                logger.debug(
-                    "Failed to enqueue intention update from reasoning",
-                    exc_info=True,
-                )
 
         return ReasoningResponse(ok=True, call_id=call_id)
     except ValueError as e:
