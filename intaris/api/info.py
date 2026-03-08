@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -106,6 +107,59 @@ async def stats(
         else:
             users = [ctx.user_id]
 
+        # Risk distribution (for pie chart)
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT risk, COUNT(*) FROM audit_log "
+                "WHERE user_id = ? AND risk IS NOT NULL "
+                "GROUP BY risk",
+                (ctx.user_id,),
+            )
+            risk_distribution = dict(cur.fetchall())
+
+        # Evaluation path distribution (for pie chart)
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT evaluation_path, COUNT(*) FROM audit_log "
+                "WHERE user_id = ? GROUP BY evaluation_path",
+                (ctx.user_id,),
+            )
+            path_distribution = dict(cur.fetchall())
+
+        # Classification distribution (for pie chart)
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT classification, COUNT(*) FROM audit_log "
+                "WHERE user_id = ? AND classification IS NOT NULL "
+                "GROUP BY classification",
+                (ctx.user_id,),
+            )
+            classification_distribution = dict(cur.fetchall())
+
+        # Top tools (for bar chart, top 10)
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT tool, COUNT(*) as cnt FROM audit_log "
+                "WHERE user_id = ? AND tool IS NOT NULL "
+                "GROUP BY tool ORDER BY cnt DESC LIMIT 10",
+                (ctx.user_id,),
+            )
+            top_tools = [{"tool": row[0], "count": row[1]} for row in cur.fetchall()]
+
+        # Activity timeline (evaluations per hour, last 24h)
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT strftime('%Y-%m-%dT%H:00', timestamp) as hour, "
+                "COUNT(*) as cnt FROM audit_log "
+                "WHERE user_id = ? AND timestamp >= ? "
+                "GROUP BY hour ORDER BY hour",
+                (ctx.user_id, cutoff),
+            )
+            activity_timeline = [
+                {"hour": row[0], "count": row[1]} for row in cur.fetchall()
+            ]
+
         # MCP proxy stats
         mcp_stats = {}
         try:
@@ -144,6 +198,11 @@ async def stats(
             "approval_rate": approval_rate,
             "pending_approvals": pending_approvals,
             "avg_latency_ms": avg_latency_ms,
+            "risk_distribution": risk_distribution,
+            "path_distribution": path_distribution,
+            "classification_distribution": classification_distribution,
+            "top_tools": top_tools,
+            "activity_timeline": activity_timeline,
             "users": users,
             "mcp": mcp_stats,
         }

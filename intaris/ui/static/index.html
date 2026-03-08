@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>intaris</title>
   <link rel="stylesheet" href="/ui/css/app.css">
+  <script src="/ui/vendor/chart.min.js"></script>
   <script src="/ui/js/api.js"></script>
   <script src="/ui/js/app.js"></script>
   <script src="/ui/js/dashboard.js"></script>
@@ -146,28 +147,60 @@
               </div>
             </div>
 
-            <!-- Decision Distribution -->
+            <!-- Doughnut Charts Row -->
+            <div class="grid grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+              <div class="card chart-card">
+                <h3 class="chart-title">Decisions</h3>
+                <div class="chart-container-doughnut">
+                  <canvas id="decisionsChart"></canvas>
+                </div>
+              </div>
+              <div class="card chart-card">
+                <h3 class="chart-title">Risk Levels</h3>
+                <div class="chart-container-doughnut">
+                  <canvas id="risksChart"></canvas>
+                </div>
+              </div>
+              <div class="card chart-card">
+                <h3 class="chart-title">Eval Paths</h3>
+                <div class="chart-container-doughnut">
+                  <canvas id="pathsChart"></canvas>
+                </div>
+              </div>
+              <div class="card chart-card">
+                <h3 class="chart-title">Sessions</h3>
+                <div class="chart-container-doughnut">
+                  <canvas id="sessionsChart"></canvas>
+                </div>
+              </div>
+              <div class="card chart-card">
+                <h3 class="chart-title">Classification</h3>
+                <div class="chart-container-doughnut">
+                  <canvas id="classificationChart"></canvas>
+                </div>
+              </div>
+            </div>
+
+            <!-- Activity Timeline -->
+            <div class="card mb-6">
+              <h3 class="chart-title">Evaluations — Last 24 Hours</h3>
+              <div class="chart-container-timeline">
+                <canvas id="timelineChart"></canvas>
+              </div>
+            </div>
+
+            <!-- Top Tools + Performance -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
               <div class="card">
-                <h3 class="text-sm font-medium text-secondary mb-3">Decision Distribution</h3>
-                <div class="flex gap-4">
-                  <div class="flex items-center gap-2">
-                    <span class="badge badge-approve">approve</span>
-                    <span class="text-sm" x-text="stats.decisions.approve || 0"></span>
-                  </div>
-                  <div class="flex items-center gap-2">
-                    <span class="badge badge-deny">deny</span>
-                    <span class="text-sm" x-text="stats.decisions.deny || 0"></span>
-                  </div>
-                  <div class="flex items-center gap-2">
-                    <span class="badge badge-escalate">escalate</span>
-                    <span class="text-sm" x-text="stats.decisions.escalate || 0"></span>
-                  </div>
+                <h3 class="chart-title">Top Tools</h3>
+                <div class="chart-container-bar">
+                  <canvas id="topToolsChart"></canvas>
                 </div>
+                <div x-show="!(stats.top_tools && stats.top_tools.length)" class="text-sm text-muted py-8 text-center">No tool calls yet</div>
               </div>
               <div class="card">
                 <h3 class="text-sm font-medium text-secondary mb-3">Performance</h3>
-                <div class="flex gap-6">
+                <div class="flex gap-6 mb-4">
                   <div>
                     <div class="text-lg font-bold" x-text="avgLatency"></div>
                     <div class="text-xs text-muted">Avg Latency</div>
@@ -176,7 +209,27 @@
                     <div class="text-lg font-bold" x-text="(stats.sessions_by_status?.active || 0)"></div>
                     <div class="text-xs text-muted">Active Sessions</div>
                   </div>
+                  <div>
+                    <div class="text-lg font-bold" x-text="(stats.sessions_by_status?.idle || 0)"></div>
+                    <div class="text-xs text-muted">Idle Sessions</div>
+                  </div>
                 </div>
+                <!-- MCP Stats -->
+                <template x-if="stats.mcp && stats.mcp.total_servers > 0">
+                  <div>
+                    <div class="text-xs text-muted mb-2 mt-4 border-t border-brand-border pt-3">MCP Proxy</div>
+                    <div class="flex gap-6">
+                      <div>
+                        <div class="text-lg font-bold" x-text="stats.mcp.enabled_servers + '/' + stats.mcp.total_servers"></div>
+                        <div class="text-xs text-muted">Servers</div>
+                      </div>
+                      <div x-show="stats.mcp.active_connections !== undefined">
+                        <div class="text-lg font-bold" x-text="stats.mcp.active_connections || 0"></div>
+                        <div class="text-xs text-muted">Connections</div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </div>
             </div>
 

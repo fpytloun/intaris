@@ -184,6 +184,27 @@
   .tree-connector {
     @apply text-brand-border font-mono text-lg leading-none -ml-1;
   }
+
+  /* Chart containers */
+  .chart-card {
+    @apply flex flex-col items-center;
+  }
+
+  .chart-title {
+    @apply text-sm font-medium text-[#94A3B8] mb-3;
+  }
+
+  .chart-container-doughnut {
+    @apply w-full max-w-[200px] mx-auto;
+  }
+
+  .chart-container-timeline {
+    height: 180px;
+  }
+
+  .chart-container-bar {
+    height: 220px;
+  }
 }
 
 /* ── Utility additions ── */
