@@ -356,6 +356,7 @@ class SessionStore:
         status: str | None = None,
         search: str | None = None,
         agent_id: str | None = None,
+        parent_session_id: str | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -366,6 +367,8 @@ class SessionStore:
             status: Optional status filter (exact match).
             search: Optional text search on session_id and intention.
             agent_id: Optional agent_id filter (exact match).
+            parent_session_id: Optional filter for child sessions of a
+                given parent (exact match).
             page: Page number (1-indexed).
             limit: Max results per page.
 
@@ -385,6 +388,10 @@ class SessionStore:
         if agent_id:
             conditions.append("agent_id = ?")
             params.append(agent_id)
+
+        if parent_session_id:
+            conditions.append("parent_session_id = ?")
+            params.append(parent_session_id)
 
         if search:
             conditions.append("(session_id LIKE ? OR intention LIKE ?)")

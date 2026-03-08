@@ -336,6 +336,7 @@ function dashboardTab() {
                   return chart.data.labels.map((lbl, i) => ({
                     text: lbl + ' (' + ds.data[i] + ')',
                     fillStyle: ds.backgroundColor[i],
+                    fontColor: CHART_COLORS.text,
                     strokeStyle: 'transparent',
                     pointStyle: 'circle',
                     hidden: false,
@@ -365,8 +366,9 @@ function dashboardTab() {
       const chart = this._charts[canvasId];
       if (!chart || !data) return;
 
-      // Skip update if canvas is detached from the DOM (tab hidden)
-      if (!chart.canvas || !chart.canvas.isConnected) return;
+      // Skip update if canvas is hidden (display:none) or detached.
+      // offsetParent is null for display:none elements and their children.
+      if (!chart.canvas || !chart.canvas.isConnected || chart.canvas.offsetParent === null) return;
 
       const labels = Object.keys(data);
       const values = Object.values(data);
@@ -379,7 +381,12 @@ function dashboardTab() {
       if (chart.options?.plugins?.centerText) {
         chart.options.plugins.centerText.text = total.toString();
       }
-      chart.update('none'); // no animation for live updates
+      try {
+        chart.update('none'); // no animation for live updates
+      } catch (e) {
+        // Chart.js may throw if layout state is stale after tab switch;
+        // the next full load() will recreate the chart from scratch.
+      }
     },
 
     _renderTimeline() {

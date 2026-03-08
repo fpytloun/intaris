@@ -103,6 +103,9 @@ async def list_sessions(
     ctx: SessionContext = Depends(get_session_context),
     status: str | None = Query(None),
     agent_id: str | None = Query(None, description="Filter by agent_id"),
+    parent_session_id: str | None = Query(
+        None, description="Filter child sessions by parent"
+    ),
     q: str | None = Query(None, description="Search session_id and intention"),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
@@ -117,6 +120,7 @@ async def list_sessions(
             user_id=ctx.user_id,
             status=status,
             agent_id=agent_id,
+            parent_session_id=parent_session_id,
             search=q,
             page=page,
             limit=limit,

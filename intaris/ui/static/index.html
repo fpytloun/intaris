@@ -1273,6 +1273,31 @@
             </div>
           </template>
 
+          <!-- Child Sessions -->
+          <template x-if="$store.nav.sessionModalChildren.length > 0">
+            <div class="mb-3">
+              <div class="text-xs text-muted mb-1">Child Sessions <span class="text-muted/70" x-text="'(' + $store.nav.sessionModalChildren.length + ')'"></span></div>
+              <div class="space-y-1">
+                <template x-for="child in $store.nav.sessionModalChildren" :key="child.session_id">
+                  <div class="flex items-center justify-between py-1.5 px-2 -mx-2 rounded hover:bg-brand-elevated/50 cursor-pointer"
+                       @click="$store.nav.openSessionModal(child.session_id)">
+                    <div class="flex items-center gap-2">
+                      <span :class="'badge badge-' + (child.status || 'active')" x-text="child.status" class="text-xs"></span>
+                      <span class="font-mono text-xs text-brand-accent" x-text="child.session_id"></span>
+                      <template x-if="child.details?.agent_type">
+                        <span class="text-xs text-muted font-mono" x-text="child.details.agent_type"></span>
+                      </template>
+                    </div>
+                    <div class="flex items-center gap-2 text-xs text-muted">
+                      <span x-text="(child.total_calls || 0) + ' calls'"></span>
+                      <span x-text="new Date(child.last_activity_at || child.created_at).toLocaleString()"></span>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+
           <!-- Status Actions -->
           <div class="flex gap-2 mb-4">
             <template x-if="$store.nav.sessionModal.status === 'active' || $store.nav.sessionModal.status === 'idle'">

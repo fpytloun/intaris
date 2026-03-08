@@ -142,6 +142,7 @@ document.addEventListener('alpine:init', () => {
     // Session modal state
     sessionModal: null,
     sessionModalAudit: [],
+    sessionModalChildren: [],
     sessionModalLoading: false,
     sessionModalAuditExpandedId: null,
     sessionModalAuditRecord: null,
@@ -167,13 +168,18 @@ document.addEventListener('alpine:init', () => {
       this.sessionModalLoading = true;
       this.sessionModal = null;
       this.sessionModalAudit = [];
+      this.sessionModalChildren = [];
       this.sessionModalAuditExpandedId = null;
       this.sessionModalAuditRecord = null;
       try {
-        const session = await IntarisAPI.getSession(sessionId);
+        const [session, audit, children] = await Promise.all([
+          IntarisAPI.getSession(sessionId),
+          IntarisAPI.listAudit({ session_id: sessionId, limit: 20 }),
+          IntarisAPI.listSessions({ parent_session_id: sessionId, limit: 50 }),
+        ]);
         this.sessionModal = session;
-        const audit = await IntarisAPI.listAudit({ session_id: sessionId, limit: 20 });
         this.sessionModalAudit = audit.items || [];
+        this.sessionModalChildren = children.items || [];
       } catch (e) {
         Alpine.store('notify').error('Session not found: ' + sessionId);
         this.sessionModalLoading = false;
@@ -185,6 +191,7 @@ document.addEventListener('alpine:init', () => {
     closeSessionModal() {
       this.sessionModal = null;
       this.sessionModalAudit = [];
+      this.sessionModalChildren = [];
       this.sessionModalLoading = false;
       this.sessionModalAuditExpandedId = null;
       this.sessionModalAuditRecord = null;
