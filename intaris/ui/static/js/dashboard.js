@@ -225,10 +225,12 @@ function dashboardTab() {
           ].slice(0, 10);
         }
 
-        // Live-update charts
-        this._updateDoughnut('decisionsChart', this.stats.decisions, DECISION_COLORS);
-        this._updateDoughnut('risksChart', this.stats.risk_distribution, RISK_COLORS);
-        this._updateDoughnut('pathsChart', this.stats.path_distribution, PATH_COLORS);
+        // Live-update charts only when dashboard tab is visible
+        if (Alpine.store('nav').activeTab === 'dashboard') {
+          this._updateDoughnut('decisionsChart', this.stats.decisions, DECISION_COLORS);
+          this._updateDoughnut('risksChart', this.stats.risk_distribution, RISK_COLORS);
+          this._updateDoughnut('pathsChart', this.stats.path_distribution, PATH_COLORS);
+        }
       }
 
       if (data.type === 'decided') {
@@ -241,7 +243,9 @@ function dashboardTab() {
         this.stats.total_sessions = (this.stats.total_sessions || 0) + 1;
         if (!this.stats.sessions_by_status) this.stats.sessions_by_status = {};
         this.stats.sessions_by_status.active = (this.stats.sessions_by_status.active || 0) + 1;
-        this._updateDoughnut('sessionsChart', this.stats.sessions_by_status, SESSION_COLORS);
+        if (Alpine.store('nav').activeTab === 'dashboard') {
+          this._updateDoughnut('sessionsChart', this.stats.sessions_by_status, SESSION_COLORS);
+        }
       }
     },
 
@@ -361,6 +365,9 @@ function dashboardTab() {
       const chart = this._charts[canvasId];
       if (!chart || !data) return;
 
+      // Skip update if canvas is detached from the DOM (tab hidden)
+      if (!chart.canvas || !chart.canvas.isConnected) return;
+
       const labels = Object.keys(data);
       const values = Object.values(data);
       const total = values.reduce((a, b) => a + b, 0);
@@ -369,7 +376,9 @@ function dashboardTab() {
       chart.data.labels = labels;
       chart.data.datasets[0].data = values;
       chart.data.datasets[0].backgroundColor = colors;
-      chart.options.plugins.centerText.text = total.toString();
+      if (chart.options?.plugins?.centerText) {
+        chart.options.plugins.centerText.text = total.toString();
+      }
       chart.update('none'); // no animation for live updates
     },
 
