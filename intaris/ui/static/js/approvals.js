@@ -1,5 +1,6 @@
 /**
- * Approvals tab — pending escalations awaiting user decision.
+ * Approvals tab — pending escalations awaiting user decision,
+ * plus resolved approvals history with pagination.
  *
  * Uses the shared WebSocket store ($store.ws) for real-time updates
  * with 10s polling fallback when WebSocket is disconnected.
@@ -20,6 +21,13 @@ function approvalsTab() {
     noteText: {},       // call_id -> note text
     expandedArgs: null, // call_id of item with expanded args
 
+    // Resolved section state
+    resolved: [],
+    resolvedTotal: 0,
+    resolvedPage: 1,
+    resolvedPages: 1,
+    resolvedLoading: false,
+
     // Polling fallback state
     pollTimer: null,
     _loadDebounce: null,
@@ -34,6 +42,7 @@ function approvalsTab() {
             this.initialized = true;
           }
           this.load();
+          this.loadResolved();
           // Start polling fallback if WebSocket is not connected
           if (!Alpine.store('ws').connected) {
             this.startPolling();
@@ -47,6 +56,7 @@ function approvalsTab() {
       window.addEventListener('intaris:user-changed', () => {
         if (this.initialized && this._tabActive) {
           this.load();
+          this.loadResolved();
         }
       });
       window.addEventListener('intaris:logout', () => {
@@ -78,6 +88,8 @@ function approvalsTab() {
           this._markResolved(callId);
           this.pending = this.pending.filter(p => p.call_id !== callId);
           this.total = this.pending.length;
+          // Refresh resolved list to show the newly resolved item
+          this.loadResolved();
         }
       }
     },
@@ -124,6 +136,39 @@ function approvalsTab() {
       }
     },
 
+    async loadResolved() {
+      this.resolvedLoading = true;
+      try {
+        const result = await IntarisAPI.listAudit({
+          decision: 'escalate',
+          resolved: true,
+          page: this.resolvedPage,
+          limit: 20,
+        });
+        this.resolved = result.items || [];
+        this.resolvedTotal = result.total;
+        this.resolvedPages = result.pages;
+      } catch (e) {
+        Alpine.store('notify').error('Failed to load resolved approvals: ' + e.message);
+      } finally {
+        this.resolvedLoading = false;
+      }
+    },
+
+    prevResolvedPage() {
+      if (this.resolvedPage > 1) {
+        this.resolvedPage--;
+        this.loadResolved();
+      }
+    },
+
+    nextResolvedPage() {
+      if (this.resolvedPage < this.resolvedPages) {
+        this.resolvedPage++;
+        this.loadResolved();
+      }
+    },
+
     // ── Recently resolved tracking ───────────────────────────
 
     _markResolved(callId) {
@@ -159,6 +204,8 @@ function approvalsTab() {
         this.pending = this.pending.filter(p => p.call_id !== callId);
         this.total = this.pending.length;
         delete this.noteText[callId];
+        // Refresh resolved list to show the newly resolved item
+        this.loadResolved();
       } catch (e) {
         console.error('[intaris] resolve failed:', e);
         Alpine.store('notify').error('Failed to resolve: ' + (e.message || String(e)));
@@ -180,6 +227,10 @@ function approvalsTab() {
     },
 
     // ── Helpers ──────────────────────────────────────────────
+
+    decisionBadgeClass(decision) {
+      return 'badge badge-' + (decision || 'low');
+    },
 
     riskBadgeClass(risk) {
       return 'badge badge-' + (risk || 'low');

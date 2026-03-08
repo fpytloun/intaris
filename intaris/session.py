@@ -351,14 +351,16 @@ class SessionStore:
         *,
         user_id: str,
         status: str | None = None,
+        search: str | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """List sessions for a user with pagination and optional status filter.
+        """List sessions for a user with pagination and optional filters.
 
         Args:
             user_id: Tenant identifier.
-            status: Optional status filter.
+            status: Optional status filter (exact match).
+            search: Optional text search on session_id and intention.
             page: Page number (1-indexed).
             limit: Max results per page.
 
@@ -367,41 +369,36 @@ class SessionStore:
         """
         offset = (page - 1) * limit
 
+        # Build dynamic WHERE clause
+        conditions = ["user_id = ?"]
+        params: list[Any] = [user_id]
+
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+
+        if search:
+            conditions.append("(session_id LIKE ? OR intention LIKE ?)")
+            like_pattern = f"%{search}%"
+            params.extend([like_pattern, like_pattern])
+
+        where = " AND ".join(conditions)
+
         with self._db.cursor() as cur:
             # Count total matching sessions
-            if status:
-                cur.execute(
-                    "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND status = ?",
-                    (user_id, status),
-                )
-            else:
-                cur.execute(
-                    "SELECT COUNT(*) FROM sessions WHERE user_id = ?",
-                    (user_id,),
-                )
+            cur.execute(f"SELECT COUNT(*) FROM sessions WHERE {where}", params)
             total = cur.fetchone()[0]
 
             # Fetch page
-            if status:
-                cur.execute(
-                    """
-                    SELECT * FROM sessions
-                    WHERE user_id = ? AND status = ?
-                    ORDER BY created_at DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (user_id, status, limit, offset),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT * FROM sessions
-                    WHERE user_id = ?
-                    ORDER BY created_at DESC
-                    LIMIT ? OFFSET ?
-                    """,
-                    (user_id, limit, offset),
-                )
+            cur.execute(
+                f"""
+                SELECT * FROM sessions
+                WHERE {where}
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            )
             rows = cur.fetchall()
 
         pages = max(1, (total + limit - 1) // limit)

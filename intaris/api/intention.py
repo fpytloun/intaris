@@ -100,10 +100,11 @@ async def get_session(
 async def list_sessions(
     ctx: SessionContext = Depends(get_session_context),
     status: str | None = Query(None),
+    q: str | None = Query(None, description="Search session_id and intention"),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
 ) -> SessionListResponse:
-    """List sessions with optional status filter and pagination."""
+    """List sessions with optional status filter, search, and pagination."""
     from intaris.server import _get_db
     from intaris.session import SessionStore
 
@@ -112,6 +113,7 @@ async def list_sessions(
         result = store.list_sessions(
             user_id=ctx.user_id,
             status=status,
+            search=q,
             page=page,
             limit=limit,
         )

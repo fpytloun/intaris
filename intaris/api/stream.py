@@ -256,6 +256,10 @@ async def stream_websocket(websocket: WebSocket) -> None:
                 await websocket.send_json({"type": "ping"})
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected: user=%s session=%s", user_id, session_id)
+    except asyncio.CancelledError:
+        logger.info(
+            "WebSocket cancelled (shutdown): user=%s session=%s", user_id, session_id
+        )
     except Exception:
         logger.exception("WebSocket error: user=%s session=%s", user_id, session_id)
     finally:

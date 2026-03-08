@@ -2,7 +2,7 @@
  * Sessions tab — list, filter, and manage sessions.
  *
  * Supports session tree display (parent/child relationships),
- * WebSocket live updates, and expandable audit records.
+ * WebSocket live updates, search, and expandable audit records.
  */
 function sessionsTab() {
   return {
@@ -13,6 +13,7 @@ function sessionsTab() {
     page: 1,
     pages: 1,
     statusFilter: '',
+    searchQuery: '',
     expandedId: null,
     expandedSession: null,
     sessionAudit: [],
@@ -45,9 +46,10 @@ function sessionsTab() {
           this.initialized = true;
           await this.load();
         }
-        // Find session in current page, or fetch directly from API
+        // Try to find session in current page
         let session = this.sessions.find(s => s.session_id === sessionId);
         if (!session) {
+          // Try searching for it
           try {
             session = await IntarisAPI.getSession(sessionId);
           } catch (err) {
@@ -65,6 +67,10 @@ function sessionsTab() {
       if (data.type === 'session_created') {
         // Add new session to list if on page 1 and matching filter
         if (this.page === 1 && (!this.statusFilter || this.statusFilter === 'active')) {
+          // Skip if search is active and doesn't match
+          if (this.searchQuery) return;
+          // Deduplicate
+          if (this.sessions.some(s => s.session_id === data.session_id)) return;
           this.sessions.unshift({
             session_id: data.session_id,
             user_id: data.user_id,
@@ -149,8 +155,9 @@ function sessionsTab() {
       try {
         const params = { page: this.page, limit: 20 };
         if (this.statusFilter) params.status = this.statusFilter;
+        if (this.searchQuery) params.q = this.searchQuery;
         const result = await IntarisAPI.listSessions(params);
-        this.sessions = result.items || [];
+        this._mergeSessions(result.items || []);
         this.total = result.total;
         this.pages = result.pages;
       } catch (e) {
@@ -158,6 +165,39 @@ function sessionsTab() {
       } finally {
         this.loading = false;
       }
+    },
+
+    /**
+     * Merge new session data into existing array, preserving object identity
+     * for sessions that already exist. This prevents Alpine.js from
+     * re-rendering the entire list and causing visual "jumping".
+     */
+    _mergeSessions(newItems) {
+      const oldById = {};
+      for (const s of this.sessions) {
+        oldById[s.session_id] = s;
+      }
+
+      const merged = [];
+      for (const newSession of newItems) {
+        const existing = oldById[newSession.session_id];
+        if (existing) {
+          // Update existing object in-place to preserve identity
+          Object.assign(existing, newSession);
+          merged.push(existing);
+        } else {
+          merged.push(newSession);
+        }
+      }
+
+      this.sessions = merged;
+    },
+
+    // ── Search ────────────────────────────────────────────────
+
+    applySearch() {
+      this.page = 1;
+      this.load();
     },
 
     filterByStatus(status) {
@@ -184,35 +224,50 @@ function sessionsTab() {
      * Collapsed parents hide their children.
      */
     get sessionTree() {
-      if (!this.treeView) return this.sessions.map(s => ({ ...s, _depth: 0, _children: [] }));
+      if (!this.treeView) {
+        return this.sessions.map(s => {
+          s._depth = 0;
+          s._children = [];
+          return s;
+        });
+      }
 
       const byId = {};
       const roots = [];
 
-      // Index all sessions
+      // Index all sessions — reuse existing objects to preserve identity
       for (const s of this.sessions) {
-        byId[s.session_id] = { ...s, _depth: 0, _children: [] };
+        s._depth = 0;
+        s._children = [];
+        byId[s.session_id] = s;
       }
 
       // Separate roots and children
       for (const s of this.sessions) {
-        const node = byId[s.session_id];
         if (s.parent_session_id && byId[s.parent_session_id]) {
-          node._depth = 1;
-          byId[s.parent_session_id]._children.push(node);
+          s._depth = 1;
+          byId[s.parent_session_id]._children.push(s);
         } else {
-          roots.push(node);
+          roots.push(s);
         }
       }
 
-      // Sort roots by created_at DESC (newest first)
-      roots.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+      // Sort roots by last_activity_at DESC (newest first), fallback to created_at
+      roots.sort((a, b) => {
+        const aTime = a.last_activity_at || a.created_at || '';
+        const bTime = b.last_activity_at || b.created_at || '';
+        return bTime.localeCompare(aTime);
+      });
 
       // Flatten tree: parent followed by its children (unless collapsed)
       const result = [];
       for (const root of roots) {
-        // Sort children by created_at DESC (newest first)
-        root._children.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+        // Sort children by last_activity_at DESC (newest first)
+        root._children.sort((a, b) => {
+          const aTime = a.last_activity_at || a.created_at || '';
+          const bTime = b.last_activity_at || b.created_at || '';
+          return bTime.localeCompare(aTime);
+        });
         result.push(root);
         if (!this.collapsedSessions[root.session_id]) {
           for (const child of root._children) {

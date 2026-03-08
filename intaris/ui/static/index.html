@@ -186,11 +186,14 @@
               <div x-show="recentActivity.length === 0" class="text-sm text-muted py-4 text-center">No activity yet</div>
               <div class="space-y-2">
                 <template x-for="r in recentActivity" :key="r.call_id">
-                  <div class="flex items-center justify-between py-2 border-b border-brand-border last:border-0">
+                  <div class="flex items-center justify-between py-2 border-b border-brand-border last:border-0 cursor-pointer hover:bg-brand-elevated/50 rounded px-2 -mx-2"
+                       @click="goToSession(r.session_id)">
                     <div class="flex items-center gap-3">
                       <span :class="decisionBadgeClass(r.decision)" x-text="r.decision"></span>
+                      <span x-show="r.decision === 'escalate' && r.user_decision"
+                            :class="decisionBadgeClass(r.user_decision)" x-text="r.user_decision"></span>
                       <span class="text-sm font-mono" x-text="r.tool || r.record_type"></span>
-                      <span class="text-xs text-muted" x-text="r.session_id"></span>
+                      <span class="text-xs text-brand-accent" x-text="r.session_id"></span>
                     </div>
                     <div class="flex items-center gap-3">
                       <span :class="riskBadgeClass(r.risk)" x-text="r.risk" x-show="r.risk"></span>
@@ -206,7 +209,13 @@
 
       <!-- Sessions Tab -->
       <div x-show="$store.nav.activeTab === 'sessions'" x-data="sessionsTab()" x-init="init()">
-        <!-- Status Filter + Tree Toggle -->
+        <!-- Search + Status Filter + Tree Toggle -->
+        <div class="mb-3">
+          <input x-model="searchQuery" @input.debounce.400ms="applySearch()"
+                 @keydown.escape="searchQuery = ''; applySearch()"
+                 placeholder="Search sessions (ID, intention...)"
+                 class="input text-sm w-full md:w-80">
+        </div>
         <div class="flex items-center justify-between mb-4">
           <div class="flex items-center gap-2">
             <button @click="filterByStatus('')"
@@ -360,6 +369,8 @@
                              @click.stop="toggleAuditExpand(r)">
                           <div class="flex items-center gap-2">
                             <span :class="decisionBadgeClass(r.decision)" x-text="r.decision"></span>
+                            <span x-show="r.decision === 'escalate' && r.user_decision"
+                                  :class="decisionBadgeClass(r.user_decision)" x-text="r.user_decision"></span>
                             <span class="font-mono text-xs" x-text="r.tool || r.record_type"></span>
                             <span :class="riskBadgeClass(r.risk)" x-text="r.risk" x-show="r.risk" class="text-xs"></span>
                           </div>
@@ -381,11 +392,31 @@
                             </div>
                           </template>
 
+                          <!-- Intention -->
+                          <template x-if="expandedAuditRecord?.intention">
+                            <div class="mb-2">
+                              <div class="text-xs text-muted mb-1">Intention</div>
+                              <div class="text-sm" x-text="expandedAuditRecord.intention"></div>
+                            </div>
+                          </template>
+
                           <!-- Redacted Args -->
                           <template x-if="expandedAuditRecord?.args_redacted">
                             <div class="mb-2">
                               <div class="text-xs text-muted mb-1">Arguments (redacted)</div>
                               <pre class="text-xs bg-brand-bg rounded p-2 overflow-x-auto" x-text="formatArgs(expandedAuditRecord.args_redacted)"></pre>
+                            </div>
+                          </template>
+
+                          <!-- Resolution (if escalated) -->
+                          <template x-if="expandedAuditRecord?.user_decision">
+                            <div class="mb-2">
+                              <div class="text-xs text-muted mb-1">Resolution</div>
+                              <div class="flex items-center gap-2">
+                                <span :class="decisionBadgeClass(expandedAuditRecord.user_decision)" x-text="expandedAuditRecord.user_decision"></span>
+                                <span class="text-sm" x-text="expandedAuditRecord.user_note" x-show="expandedAuditRecord.user_note"></span>
+                                <span class="text-xs text-muted" x-text="formatTime(expandedAuditRecord.resolved_at)"></span>
+                              </div>
                             </div>
                           </template>
 
@@ -458,17 +489,23 @@
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-3">
                   <span :class="decisionBadgeClass(r.decision)" x-text="r.decision"></span>
+                  <span x-show="r.decision === 'escalate' && r.user_decision"
+                        :class="decisionBadgeClass(r.user_decision)" x-text="r.user_decision"></span>
                   <span class="font-mono text-sm" x-text="r.tool || r.record_type"></span>
                   <span :class="riskBadgeClass(r.risk)" x-text="r.risk" x-show="r.risk"></span>
                   <span :class="pathBadgeClass(r.evaluation_path)" x-text="r.evaluation_path"></span>
                 </div>
                 <div class="flex items-center gap-3 text-xs text-muted">
                   <span x-show="r.agent_id" class="font-mono" x-text="r.agent_id"></span>
-                  <span x-text="r.session_id"></span>
+                  <span class="text-brand-accent hover:underline cursor-pointer"
+                        @click.stop="goToSession(r.session_id)"
+                        x-text="r.session_id"></span>
                   <span x-text="formatTime(r.timestamp)"></span>
                   <span x-text="r.latency_ms + 'ms'"></span>
                 </div>
               </div>
+              <!-- Intention (if present) -->
+              <div x-show="r.intention" class="mt-1 text-xs text-muted truncate" x-text="r.intention"></div>
 
               <!-- Expanded Detail -->
               <div x-show="expandedId === r.call_id" x-cloak class="mt-4 pt-4 border-t border-brand-border">
@@ -477,6 +514,14 @@
                   <div class="mb-3">
                     <div class="text-xs text-muted mb-1">Reasoning</div>
                     <div class="text-sm bg-brand-elevated rounded p-3" x-text="expandedRecord.reasoning"></div>
+                  </div>
+                </template>
+
+                <!-- Intention -->
+                <template x-if="expandedRecord?.intention">
+                  <div class="mb-3">
+                    <div class="text-xs text-muted mb-1">Intention</div>
+                    <div class="text-sm bg-brand-elevated rounded p-3" x-text="expandedRecord.intention"></div>
                   </div>
                 </template>
 
@@ -590,6 +635,49 @@
               </div>
             </div>
           </template>
+        </div>
+
+        <!-- Resolved Approvals Section -->
+        <div class="mt-8">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-medium text-secondary">Resolved Approvals</h2>
+            <span class="text-sm text-muted" x-text="resolvedTotal + ' resolved'" x-show="resolvedTotal > 0"></span>
+          </div>
+
+          <div x-show="resolvedLoading && resolved.length === 0" class="text-center py-8 text-secondary">Loading resolved approvals...</div>
+          <div x-show="!resolvedLoading && resolved.length === 0" class="text-center py-8 text-muted">No resolved approvals</div>
+
+          <div class="space-y-2">
+            <template x-for="item in resolved" :key="item.call_id">
+              <div class="card opacity-80">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-3">
+                    <span class="badge badge-escalate">escalate</span>
+                    <span :class="decisionBadgeClass(item.user_decision)" x-text="item.user_decision"></span>
+                    <span class="font-mono text-sm" x-text="item.tool"></span>
+                    <span :class="riskBadgeClass(item.risk)" x-text="item.risk" x-show="item.risk"></span>
+                  </div>
+                  <div class="flex items-center gap-3 text-xs text-muted">
+                    <span class="text-brand-accent hover:underline cursor-pointer"
+                          @click.stop="goToSession(item.session_id)"
+                          x-text="item.session_id"></span>
+                    <span x-text="formatTime(item.resolved_at || item.timestamp)"></span>
+                  </div>
+                </div>
+                <div x-show="item.reasoning" class="mt-2 text-sm text-secondary truncate" x-text="truncate(item.reasoning, 150)"></div>
+                <div x-show="item.user_note" class="mt-1 text-xs text-muted">
+                  Note: <span x-text="item.user_note"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+
+          <!-- Resolved Pagination -->
+          <div x-show="resolvedPages > 1" class="flex items-center justify-center gap-4 mt-4">
+            <button @click="prevResolvedPage()" :disabled="resolvedPage <= 1" class="btn-secondary text-sm">Previous</button>
+            <span class="text-sm text-muted" x-text="`Page ${resolvedPage} of ${resolvedPages}`"></span>
+            <button @click="nextResolvedPage()" :disabled="resolvedPage >= resolvedPages" class="btn-secondary text-sm">Next</button>
+          </div>
         </div>
       </div>
 

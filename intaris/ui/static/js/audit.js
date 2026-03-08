@@ -171,5 +171,14 @@ function auditTab() {
       if (!str) return '';
       return str.length > len ? str.substring(0, len) + '...' : str;
     },
+
+    // ── Navigation ────────────────────────────────────────────
+
+    goToSession(sessionId) {
+      Alpine.store('nav').setTab('sessions');
+      window.dispatchEvent(new CustomEvent('intaris:navigate-session', {
+        detail: { sessionId },
+      }));
+    },
   };
 }
