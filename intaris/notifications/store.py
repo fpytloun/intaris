@@ -69,6 +69,7 @@ class NotificationStore:
         provider: str,
         config: dict[str, Any] | None = None,
         enabled: bool = True,
+        events: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create or update a notification channel.
 
@@ -78,6 +79,10 @@ class NotificationStore:
             provider: Provider type (e.g., 'webhook', 'pushover', 'slack').
             config: Provider-specific configuration (encrypted at rest).
             enabled: Whether the channel is active.
+            events: List of event types to receive (e.g.,
+                ``["escalation", "denial", "session_suspended", "resolution"]``).
+                When None, uses the default set (escalation, resolution,
+                session_suspended). Denial is opt-in.
 
         Returns:
             The created/updated channel (redacted view).
@@ -101,6 +106,21 @@ class NotificationStore:
         if config:
             provider_cls.validate_config(config)
 
+        # Validate event types
+        valid_events = {
+            "escalation",
+            "resolution",
+            "session_suspended",
+            "denial",
+        }
+        if events is not None:
+            invalid = set(events) - valid_events
+            if invalid:
+                raise ValueError(
+                    f"Invalid event types: {', '.join(sorted(invalid))}. "
+                    f"Valid: {', '.join(sorted(valid_events))}"
+                )
+
         # Encrypt config if provided
         config_encrypted = None
         if config:
@@ -111,6 +131,7 @@ class NotificationStore:
                 )
             config_encrypted = self._encrypt(json.dumps(config))
 
+        events_json = json.dumps(events) if events is not None else None
         now = datetime.now(timezone.utc).isoformat()
 
         with self._db.cursor() as cur:
@@ -118,8 +139,8 @@ class NotificationStore:
                 """
                 INSERT INTO notification_channels
                     (user_id, name, provider, config_encrypted, enabled,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     events, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (user_id, name) DO UPDATE SET
                     provider = excluded.provider,
                     config_encrypted = COALESCE(
@@ -127,6 +148,8 @@ class NotificationStore:
                         notification_channels.config_encrypted
                     ),
                     enabled = excluded.enabled,
+                    events = COALESCE(excluded.events,
+                        notification_channels.events),
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -135,6 +158,7 @@ class NotificationStore:
                     provider,
                     config_encrypted,
                     int(enabled),
+                    events_json,
                     now,
                     now,
                 ),
@@ -269,5 +293,12 @@ class NotificationStore:
 
         # Convert enabled from int to bool
         d["enabled"] = bool(d.get("enabled", 0))
+
+        # Parse events JSON array
+        if d.get("events"):
+            try:
+                d["events"] = json.loads(d["events"])
+            except (json.JSONDecodeError, TypeError):
+                d["events"] = None
 
         return d

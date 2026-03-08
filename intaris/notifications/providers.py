@@ -55,7 +55,7 @@ class Notification:
     Providers select which fields to include based on their platform.
     """
 
-    event_type: str  # "escalation", "resolution", or "session_suspended"
+    event_type: str  # "escalation", "resolution", "session_suspended", or "denial"
     call_id: str
     session_id: str
     user_id: str
@@ -206,19 +206,27 @@ class PushoverProvider:
         if notification.event_type == "resolution":
             title = "Intaris: Escalation Resolved"
             message = self._format_resolution_message(notification)
+            priority = config.get("priority", 1)
         elif notification.event_type == "session_suspended":
             title = "Intaris: Session Suspended"
             message = self._format_escalation_message(notification)
+            priority = config.get("priority", 1)
+        elif notification.event_type == "denial":
+            title = "Intaris: Tool Call Denied"
+            message = self._format_denial_message(notification)
+            # Denials are informational — use lower priority than escalations
+            priority = config.get("denial_priority", 0)
         else:
             title = "Intaris: Escalation Required"
             message = self._format_escalation_message(notification)
+            priority = config.get("priority", 1)
 
         data: dict[str, Any] = {
             "token": config["app_token"],
             "user": config["user_key"],
             "title": title,
             "message": message,
-            "priority": config.get("priority", 1),
+            "priority": priority,
             "html": 1,
         }
 
@@ -258,6 +266,22 @@ class PushoverProvider:
             parts.append(f'\n<a href="{html_escape(n.approve_url)}">Approve</a>')
         if n.deny_url:
             parts.append(f' | <a href="{html_escape(n.deny_url)}">Deny</a>')
+        return "\n".join(parts)
+
+    @staticmethod
+    def _format_denial_message(n: Notification) -> str:
+        """Format denial message for Pushover (HTML mode)."""
+        parts = []
+        if n.tool:
+            parts.append(f"<b>Tool:</b> {html_escape(n.tool)}")
+        if n.risk:
+            parts.append(f"<b>Risk:</b> {html_escape(n.risk)}")
+        parts.append(f"<b>Session:</b> {html_escape(n.session_id[:20])}")
+        if n.reasoning:
+            reason = n.reasoning[:200]
+            if len(n.reasoning) > 200:
+                reason += "..."
+            parts.append(f"\n{html_escape(reason)}")
         return "\n".join(parts)
 
     @staticmethod
@@ -311,8 +335,10 @@ class SlackProvider:
 
         if notification.event_type == "resolution":
             blocks = self._build_resolution_blocks(notification)
+        elif notification.event_type == "denial":
+            blocks = self._build_denial_blocks(notification)
         elif notification.event_type == "session_suspended":
-            blocks = self._build_escalation_blocks(notification)
+            blocks = self._build_suspension_blocks(notification)
         else:
             blocks = self._build_escalation_blocks(notification)
 
@@ -404,6 +430,131 @@ class SlackProvider:
             )
         if actions:
             blocks.append({"type": "actions", "elements": actions})
+
+        return blocks
+
+    @staticmethod
+    def _build_denial_blocks(n: Notification) -> list[dict[str, Any]]:
+        """Build Slack Block Kit blocks for denial (informational)."""
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "Intaris: Tool Call Denied",
+                },
+            },
+        ]
+
+        fields = []
+        if n.tool:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Tool:* `{_slack_escape(n.tool)}`"}
+            )
+        if n.risk:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Risk:* {_slack_escape(n.risk)}"}
+            )
+        if n.session_id:
+            fields.append(
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Session:* `{_slack_escape(n.session_id[:12])}...`",
+                }
+            )
+        if fields:
+            blocks.append({"type": "section", "fields": fields})
+
+        if n.reasoning:
+            reason = n.reasoning[:300]
+            if len(n.reasoning) > 300:
+                reason += "..."
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": _slack_escape(reason)},
+                }
+            )
+
+        # No action buttons — denials are informational
+        if n.ui_url:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Open in Intaris",
+                            },
+                            "url": n.ui_url,
+                        }
+                    ],
+                }
+            )
+
+        return blocks
+
+    @staticmethod
+    def _build_suspension_blocks(n: Notification) -> list[dict[str, Any]]:
+        """Build Slack Block Kit blocks for session suspension."""
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "Intaris: Session Suspended",
+                },
+            },
+        ]
+
+        fields = []
+        if n.tool:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Tool:* `{_slack_escape(n.tool)}`"}
+            )
+        if n.risk:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Risk:* {_slack_escape(n.risk)}"}
+            )
+        if n.session_id:
+            fields.append(
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Session:* `{_slack_escape(n.session_id[:12])}...`",
+                }
+            )
+        if fields:
+            blocks.append({"type": "section", "fields": fields})
+
+        if n.reasoning:
+            reason = n.reasoning[:300]
+            if len(n.reasoning) > 300:
+                reason += "..."
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": _slack_escape(reason)},
+                }
+            )
+
+        if n.ui_url:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Open in Intaris",
+                            },
+                            "url": n.ui_url,
+                        }
+                    ],
+                }
+            )
 
         return blocks
 

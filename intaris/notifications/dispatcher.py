@@ -8,6 +8,7 @@ All sends are fire-and-forget with single retry on failure.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
 
@@ -24,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 # Re-export Notification for convenience
 __all__ = ["Notification", "NotificationDispatcher"]
+
+# Default event types when channel has no explicit events config.
+# Denial is opt-in — users must explicitly add it to avoid noise.
+DEFAULT_CHANNEL_EVENTS = {"escalation", "resolution", "session_suspended"}
 
 
 class NotificationDispatcher:
@@ -102,9 +107,11 @@ class NotificationDispatcher:
                 f"#approvals?call_id={notification.call_id}"
             )
 
-        # Dispatch to each channel concurrently
+        # Dispatch to each channel concurrently (filtered by event type)
         tasks = []
         for channel in channels:
+            if not self._channel_accepts_event(channel, notification.event_type):
+                continue
             tasks.append(
                 self._send_to_channel(
                     user_id=user_id,
@@ -113,7 +120,34 @@ class NotificationDispatcher:
                 )
             )
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @staticmethod
+    def _channel_accepts_event(channel: dict[str, Any], event_type: str) -> bool:
+        """Check if a channel is configured to receive this event type.
+
+        Channels can specify an ``events`` field (JSON array of event type
+        strings). When absent or null, the channel uses the default set
+        which includes escalation, resolution, and session_suspended but
+        NOT denial (opt-in to avoid noise).
+        """
+        events_raw = channel.get("events")
+        if not events_raw:
+            return event_type in DEFAULT_CHANNEL_EVENTS
+
+        # Parse JSON array if stored as string
+        if isinstance(events_raw, str):
+            try:
+                events = set(json.loads(events_raw))
+            except (json.JSONDecodeError, TypeError):
+                return event_type in DEFAULT_CHANNEL_EVENTS
+        elif isinstance(events_raw, list):
+            events = set(events_raw)
+        else:
+            return event_type in DEFAULT_CHANNEL_EVENTS
+
+        return event_type in events
 
     async def _send_to_channel(
         self,

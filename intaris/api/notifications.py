@@ -31,6 +31,11 @@ class ChannelRequest(BaseModel):
         None, description="Provider-specific configuration"
     )
     enabled: bool = Field(True, description="Whether the channel is active")
+    events: list[str] | None = Field(
+        None,
+        description="Event types to receive: escalation, resolution, "
+        "session_suspended, denial. Null = default set (no denial).",
+    )
 
 
 class ChannelResponse(BaseModel):
@@ -40,6 +45,7 @@ class ChannelResponse(BaseModel):
     provider: str
     enabled: bool
     has_config: bool = False
+    events: list[str] | None = None
     last_success_at: str | None = None
     failure_count: int = 0
     created_at: str
@@ -126,6 +132,7 @@ async def upsert_channel(
             provider=request.provider,
             config=request.config,
             enabled=request.enabled,
+            events=request.events,
         )
         return ChannelResponse(**channel)
     except ValueError as e:

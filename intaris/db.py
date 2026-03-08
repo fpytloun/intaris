@@ -176,6 +176,12 @@ class Database:
             )
             logger.info("Migration: added agent_id column to sessions (backfilled)")
 
+        # Migration: add events column to notification_channels
+        # (configurable event types per channel, JSON array)
+        if not self._column_exists(conn, "notification_channels", "events"):
+            conn.execute("ALTER TABLE notification_channels ADD COLUMN events TEXT")
+            logger.info("Migration: added events column to notification_channels")
+
         # Index for idle session sweep (status + last_activity_at)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
@@ -455,6 +461,7 @@ CREATE TABLE IF NOT EXISTS notification_channels (
     provider         TEXT NOT NULL,
     config_encrypted TEXT,
     enabled          INTEGER NOT NULL DEFAULT 1,
+    events           TEXT,  -- JSON array of event types to receive (null = default set)
     last_success_at  TEXT,
     failure_count    INTEGER NOT NULL DEFAULT 0,
     created_at       TEXT NOT NULL,

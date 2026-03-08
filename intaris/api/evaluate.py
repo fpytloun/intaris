@@ -150,6 +150,32 @@ async def evaluate(
                 )
             )
 
+        # Fire-and-forget notification on denial
+        if dispatcher is not None and result.get("decision") == "deny":
+            from intaris.notifications.providers import Notification
+
+            notification = Notification(
+                event_type="denial",
+                call_id=result["call_id"],
+                session_id=request.session_id,
+                user_id=ctx.user_id,
+                agent_id=agent_id,
+                tool=request.tool,
+                args_redacted=result.get("args_redacted"),
+                risk=result.get("risk"),
+                reasoning=result.get("reasoning"),
+                ui_url=None,
+                approve_url=None,
+                deny_url=None,
+                timestamp=datetime.now(tz.utc).isoformat(),
+            )
+            asyncio.create_task(
+                dispatcher.notify(
+                    user_id=ctx.user_id,
+                    notification=notification,
+                )
+            )
+
         # Publish event to EventBus
         event_bus = getattr(http_request.app.state, "event_bus", None)
         if event_bus is not None:

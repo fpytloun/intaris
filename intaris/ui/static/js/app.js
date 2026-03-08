@@ -259,8 +259,11 @@ document.addEventListener('alpine:init', () => {
     _maxReconnectAttempts: 10,
     _maxReconnectDelay: 30000,
 
-    // Browser notifications
+    // Browser notifications — per-event-type preferences
     notificationsEnabled: localStorage.getItem('intaris_notifications') === 'true',
+    notifyOnEscalation: localStorage.getItem('intaris_notify_escalation') !== 'false',  // default on
+    notifyOnDeny: localStorage.getItem('intaris_notify_deny') === 'true',               // default off
+    notifyOnSuspend: localStorage.getItem('intaris_notify_suspend') !== 'false',         // default on
     notificationPermission: typeof Notification !== 'undefined' ? Notification.permission : 'denied',
 
     connect() {
@@ -278,9 +281,34 @@ document.addEventListener('alpine:init', () => {
           const nav = Alpine.store('nav');
           if (data.type === 'evaluated' && data.decision === 'escalate') {
             nav.pendingApprovals = Math.max(0, (nav.pendingApprovals || 0) + 1);
-            this._showBrowserNotification(data);
+            if (this.notifyOnEscalation) {
+              this._showBrowserNotification({
+                title: `Approval needed${data.risk ? ` [${data.risk}]` : ''}`,
+                body: `Tool: ${data.tool || 'unknown'}\nSession: ${data.session_id || ''}`,
+                tag: 'intaris-escalation-' + data.call_id,
+                tab: 'approvals',
+              });
+            }
+          } else if (data.type === 'evaluated' && data.decision === 'deny') {
+            if (this.notifyOnDeny) {
+              this._showBrowserNotification({
+                title: `Tool call denied${data.risk ? ` [${data.risk}]` : ''}`,
+                body: `Tool: ${data.tool || 'unknown'}\nSession: ${data.session_id || ''}`,
+                tag: 'intaris-denial-' + data.call_id,
+                tab: 'sessions',
+              });
+            }
           } else if (data.type === 'decided') {
             nav.pendingApprovals = Math.max(0, (nav.pendingApprovals || 0) - 1);
+          } else if (data.type === 'session_status_changed' && data.status === 'suspended') {
+            if (this.notifyOnSuspend) {
+              this._showBrowserNotification({
+                title: 'Session suspended',
+                body: `Session: ${data.session_id || ''}\n${data.status_reason || ''}`,
+                tag: 'intaris-suspend-' + data.session_id,
+                tab: 'sessions',
+              });
+            }
           }
 
           // Dispatch typed events for tabs to listen on
@@ -349,27 +377,33 @@ document.addEventListener('alpine:init', () => {
       }
     },
 
-    _showBrowserNotification(data) {
+    toggleNotifyPreference(key, enabled) {
+      this[key] = enabled;
+      const storageKey = {
+        notifyOnEscalation: 'intaris_notify_escalation',
+        notifyOnDeny: 'intaris_notify_deny',
+        notifyOnSuspend: 'intaris_notify_suspend',
+      }[key];
+      if (storageKey) localStorage.setItem(storageKey, enabled ? 'true' : 'false');
+    },
+
+    _showBrowserNotification({ title, body, tag, tab }) {
       if (!this.notificationsEnabled) return;
       if (typeof Notification === 'undefined') return;
       if (Notification.permission !== 'granted') return;
       // Don't notify if the tab is focused
       if (document.hasFocus()) return;
 
-      const risk = data.risk ? ` [${data.risk}]` : '';
-      const title = `Approval needed${risk}`;
-      const body = `Tool: ${data.tool || 'unknown'}\nSession: ${data.session_id || ''}`;
-
       try {
         const n = new Notification(title, {
           body,
           icon: '/ui/favicon.ico',
-          tag: 'intaris-escalation-' + data.call_id,
+          tag,
           requireInteraction: true,
         });
         n.onclick = () => {
           window.focus();
-          Alpine.store('nav').setTab('approvals');
+          if (tab) Alpine.store('nav').setTab(tab);
           n.close();
         };
         // Auto-close after 30s

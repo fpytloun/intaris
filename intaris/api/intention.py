@@ -163,6 +163,11 @@ async def list_sessions(
     q: str | None = Query(None, description="Search session_id and intention"),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
+    tree: bool = Query(
+        False,
+        description="Tree-aware filtering: status/search filter roots only, "
+        "include all children, paginate by root count",
+    ),
 ) -> SessionListResponse:
     """List sessions with optional status filter, search, and pagination."""
     from intaris.server import _get_db
@@ -178,6 +183,7 @@ async def list_sessions(
             search=q,
             page=page,
             limit=limit,
+            tree=tree,
         )
         return SessionListResponse(**result)
     except Exception:

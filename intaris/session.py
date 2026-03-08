@@ -373,6 +373,7 @@ class SessionStore:
         parent_session_id: str | None = None,
         page: int = 1,
         limit: int = 50,
+        tree: bool = False,
     ) -> dict[str, Any]:
         """List sessions for a user with pagination and optional filters.
 
@@ -385,10 +386,26 @@ class SessionStore:
                 given parent (exact match).
             page: Page number (1-indexed).
             limit: Max results per page.
+            tree: When True, enables tree-aware filtering:
+                - Status filter applies only to root sessions
+                - Search matches roots and children, but always returns
+                  the full tree (parent + all children) for any match
+                - Pagination counts only root sessions
+                - All children of paginated roots are included
 
         Returns:
             Dict with items, total, page, pages.
         """
+        if tree and not parent_session_id:
+            return self._list_sessions_tree(
+                user_id=user_id,
+                status=status,
+                search=search,
+                agent_id=agent_id,
+                page=page,
+                limit=limit,
+            )
+
         offset = (page - 1) * limit
 
         # Build dynamic WHERE clause
@@ -434,6 +451,117 @@ class SessionStore:
         pages = max(1, (total + limit - 1) // limit)
         return {
             "items": [_row_to_dict(row) for row in rows],
+            "total": total,
+            "page": page,
+            "pages": pages,
+        }
+
+    def _list_sessions_tree(
+        self,
+        *,
+        user_id: str,
+        status: str | None = None,
+        search: str | None = None,
+        agent_id: str | None = None,
+        page: int = 1,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Tree-aware session listing.
+
+        Filters and pagination apply to root sessions only. All children
+        of visible roots are included regardless of their status. When
+        search matches a child, its parent is also included.
+        """
+        offset = (page - 1) * limit
+
+        # Base conditions shared by all queries
+        base_cond = "user_id = ?"
+        base_params: list[Any] = [user_id]
+        if agent_id:
+            base_cond += " AND agent_id = ?"
+            base_params.append(agent_id)
+
+        with self._db.cursor() as cur:
+            # -- Step 1: Find root sessions matching status + search --------
+            root_conditions = [base_cond, "parent_session_id IS NULL"]
+            root_params: list[Any] = list(base_params)
+
+            if status:
+                root_conditions.append("status = ?")
+                root_params.append(status)
+
+            if search:
+                root_conditions.append("(session_id LIKE ? OR intention LIKE ?)")
+                like = f"%{search}%"
+                root_params.extend([like, like])
+
+            root_where = " AND ".join(root_conditions)
+
+            # -- Step 2: If searching, also find parents of matching
+            #    children (include parent even if it doesn't match filters)
+            if search:
+                like = f"%{search}%"
+                # Collect root IDs from both sources using UNION
+                root_id_sql = f"""
+                    SELECT session_id FROM sessions
+                    WHERE {root_where}
+                    UNION
+                    SELECT DISTINCT parent_session_id FROM sessions
+                    WHERE {base_cond}
+                      AND parent_session_id IS NOT NULL
+                      AND (session_id LIKE ? OR intention LIKE ?)
+                """
+                root_id_params = [
+                    *root_params,
+                    *base_params,
+                    like,
+                    like,
+                ]
+            else:
+                root_id_sql = f"SELECT session_id FROM sessions WHERE {root_where}"
+                root_id_params = list(root_params)
+
+            # -- Step 3: Count visible roots for pagination ----------------
+            cur.execute(
+                f"SELECT COUNT(*) FROM ({root_id_sql})",
+                root_id_params,
+            )
+            total = cur.fetchone()[0]
+
+            # -- Step 4: Paginate root IDs ---------------------------------
+            paginated_root_sql = f"""
+                SELECT s.* FROM sessions s
+                INNER JOIN ({root_id_sql}) AS roots
+                    ON s.session_id = roots.session_id
+                ORDER BY s.last_activity_at DESC, s.created_at DESC
+                LIMIT ? OFFSET ?
+            """
+            paginated_root_params = [*root_id_params, limit, offset]
+            cur.execute(paginated_root_sql, paginated_root_params)
+            root_rows = cur.fetchall()
+
+            # -- Step 5: Fetch ALL children of paginated roots -------------
+            root_ids = [dict(r)["session_id"] for r in root_rows]
+            child_rows: list[Any] = []
+            if root_ids:
+                placeholders = ",".join("?" * len(root_ids))
+                cur.execute(
+                    f"""
+                    SELECT * FROM sessions
+                    WHERE {base_cond}
+                      AND parent_session_id IN ({placeholders})
+                    ORDER BY created_at DESC
+                    """,
+                    [*base_params, *root_ids],
+                )
+                child_rows = cur.fetchall()
+
+        pages = max(1, (total + limit - 1) // limit)
+        items = [_row_to_dict(r) for r in root_rows] + [
+            _row_to_dict(r) for r in child_rows
+        ]
+        return {
+            "items": items,
             "total": total,
             "page": page,
             "pages": pages,

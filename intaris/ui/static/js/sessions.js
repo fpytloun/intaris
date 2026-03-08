@@ -74,6 +74,10 @@ function sessionsTab() {
           if (this.searchQuery) return;
           // Deduplicate
           if (this.sessions.some(s => s.session_id === data.session_id)) return;
+          const isChild = !!data.parent_session_id;
+          // In tree view, child sessions are fetched with their parent;
+          // don't add orphan children to the top level
+          if (this.treeView && isChild && !this.sessions.some(s => s.session_id === data.parent_session_id)) return;
           this.sessions.unshift({
             session_id: data.session_id,
             user_id: data.user_id,
@@ -89,7 +93,11 @@ function sessionsTab() {
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
           });
-          this.total++;
+          // Default new parent sessions to collapsed
+          if (!isChild) {
+            this.collapsedSessions = { ...this.collapsedSessions, [data.session_id]: true };
+          }
+          if (!isChild) this.total++;
         }
       }
 
@@ -161,8 +169,12 @@ function sessionsTab() {
         if (this.searchQuery) params.q = this.searchQuery;
         const agentFilter = Alpine.store('nav').selectedAgent;
         if (agentFilter) params.agent_id = agentFilter;
+        // Tree-aware filtering: status/search filter roots only,
+        // pagination counts roots only, all children included
+        if (this.treeView) params.tree = true;
         const result = await IntarisAPI.listSessions(params);
         this._mergeSessions(result.items || []);
+        this._autoCollapse();
         this.total = result.total;
         this.pages = result.pages;
       } catch (e) {
@@ -196,6 +208,45 @@ function sessionsTab() {
       }
 
       this.sessions = merged;
+    },
+
+    /**
+     * Auto-collapse parent sessions that haven't been explicitly
+     * expanded by the user. New parents default to collapsed.
+     */
+    _autoCollapse() {
+      const parents = this._parentIds;
+      if (parents.size === 0) return;
+      let changed = false;
+      for (const id of parents) {
+        // Only set collapsed if not already tracked (preserve user state)
+        if (!(id in this.collapsedSessions)) {
+          this.collapsedSessions[id] = true;
+          changed = true;
+        }
+      }
+      if (changed) {
+        this.collapsedSessions = { ...this.collapsedSessions };
+      }
+    },
+
+    /**
+     * Highlight search query matches in text by wrapping them in <mark>.
+     * Returns raw HTML — use with x-html in the template.
+     */
+    highlightMatch(text) {
+      if (!text || !this.searchQuery) return this._escapeHtml(text || '');
+      const escaped = this._escapeHtml(text);
+      const query = this._escapeHtml(this.searchQuery);
+      // Case-insensitive replacement
+      const regex = new RegExp('(' + query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+      return escaped.replace(regex, '<mark class="bg-yellow-200 dark:bg-yellow-700 rounded px-0.5">$1</mark>');
+    },
+
+    _escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
     },
 
     // ── Search ────────────────────────────────────────────────
@@ -329,7 +380,12 @@ function sessionsTab() {
     },
 
     expandAll() {
-      this.collapsedSessions = {};
+      // Explicitly set all parents to expanded (false = not collapsed)
+      const expanded = {};
+      for (const id of this._parentIds) {
+        expanded[id] = false;
+      }
+      this.collapsedSessions = expanded;
     },
 
     async toggleExpand(session) {

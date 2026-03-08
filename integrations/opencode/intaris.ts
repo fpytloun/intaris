@@ -54,6 +54,7 @@ interface SessionState {
   agentName: string | null
   sessionTitle: string | null
   intentionUpdated: boolean
+  isIdle: boolean
   // Recording buffer
   recordingBuffer: RecordingEvent[]
 }
@@ -248,6 +249,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         agentName: null,
         sessionTitle: null,
         intentionUpdated: false,
+        isIdle: false,
         recordingBuffer: [],
       }
       sessions.set(sessionId, state)
@@ -684,6 +686,19 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         }
       }
 
+      // Resume session from idle when user provides new input.
+      // This transitions the Intaris session back to active before any
+      // tool calls execute, making the UI reflect that work is starting.
+      if (state.isIdle && state.intarisSessionId) {
+        state.isIdle = false
+        callApi(
+          "PATCH",
+          `/api/v1/session/${state.intarisSessionId}/status`,
+          { status: "active" },
+          2000,
+        ).catch(() => {})
+      }
+
       // Extract user message text from parts and send as reasoning record.
       // This gives Intaris visibility into what the user is asking the agent
       // to do, enabling better intention tracking and safety evaluation.
@@ -784,9 +799,9 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         sessions.delete(sessionId)
       }
 
-      // Handle session.idle — complete child sessions that go idle.
-      // OpenCode fires this when a session becomes idle (no more activity).
-      // For child sessions (sub-agents), idle means the task is done.
+      // Handle session.idle — transition parent sessions to idle,
+      // complete child sessions. OpenCode fires this when a session
+      // becomes idle (waiting for user input, no more activity).
       if (event.type === "session.idle") {
         const sessionId: string = event.properties?.sessionID
         if (!sessionId) return
@@ -794,10 +809,22 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         const state = sessions.get(sessionId)
         if (!state?.intarisSessionId) return
 
-        // Only auto-complete child sessions on idle, not parent sessions
         if (state.parentSessionId) {
+          // Child sessions (sub-agents): idle means the task is done
           signalCompletion(state.intarisSessionId, state, sessionId)
           sessions.delete(sessionId)
+        } else {
+          // Parent sessions: transition to idle so the UI shows the
+          // session is waiting for user input, not actively working
+          if (!state.isIdle) {
+            state.isIdle = true
+            callApi(
+              "PATCH",
+              `/api/v1/session/${state.intarisSessionId}/status`,
+              { status: "idle" },
+              2000,
+            ).catch(() => {})
+          }
         }
       }
 
