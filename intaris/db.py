@@ -36,6 +36,24 @@ def _translate_placeholders(sql: str) -> str:
     return sql.replace("?", "%s")
 
 
+# ── Row Wrapper ───────────────────────────────────────────────────────
+
+
+class _DualAccessRow(dict):
+    """Dict subclass that also supports integer indexing.
+
+    ``sqlite3.Row`` supports both ``row["col"]`` and ``row[0]``.
+    ``psycopg2.extras.RealDictRow`` only supports dict access.  This
+    wrapper bridges the gap so all existing ``row[0]`` call sites work
+    unchanged on PostgreSQL.
+    """
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
 # ── Cursor Wrapper ────────────────────────────────────────────────────
 
 
@@ -45,6 +63,11 @@ class _PgCursorWrapper:
     This makes PostgreSQL cursors behave identically to SQLite cursors
     with ``sqlite3.Row`` factory — callers can use ``dict(row)`` and
     ``row[index]`` interchangeably.
+
+    Additionally normalises rows so that ``datetime`` values (returned
+    by psycopg2 for ``TIMESTAMPTZ`` columns) are converted to ISO 8601
+    strings, matching the SQLite ``TEXT`` timestamp convention used
+    throughout the codebase.
     """
 
     def __init__(self, cursor: Any) -> None:
@@ -63,11 +86,28 @@ class _PgCursorWrapper:
         """Execute multiple SQL statements (PostgreSQL version)."""
         self._cursor.execute(sql)
 
-    def fetchone(self) -> Any:
-        return self._cursor.fetchone()
+    @staticmethod
+    def _normalize_row(row: Any) -> _DualAccessRow | None:
+        """Convert a RealDictRow into a _DualAccessRow with ISO timestamps.
 
-    def fetchall(self) -> list[Any]:
-        return self._cursor.fetchall()
+        - Wraps the row so it supports both ``row["col"]`` and ``row[0]``.
+        - Converts ``datetime`` values to ISO 8601 strings so the rest of
+          the codebase (Pydantic models, ``fromisoformat()`` calls, JSON
+          serialisation) works identically to the SQLite backend.
+        """
+        if row is None:
+            return None
+        from datetime import datetime
+
+        return _DualAccessRow(
+            (k, v.isoformat() if isinstance(v, datetime) else v) for k, v in row.items()
+        )
+
+    def fetchone(self) -> _DualAccessRow | None:
+        return self._normalize_row(self._cursor.fetchone())
+
+    def fetchall(self) -> list[_DualAccessRow]:
+        return [self._normalize_row(r) for r in self._cursor.fetchall()]
 
     @property
     def rowcount(self) -> int:
