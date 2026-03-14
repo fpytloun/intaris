@@ -214,9 +214,9 @@ class MCPServerStore:
             if enabled_only:
                 cur.execute(
                     "SELECT * FROM mcp_servers "
-                    "WHERE user_id = ? AND enabled = 1 "
+                    "WHERE user_id = ? AND enabled = ? "
                     "ORDER BY name",
-                    (user_id,),
+                    (user_id, True),
                 )
             else:
                 cur.execute(

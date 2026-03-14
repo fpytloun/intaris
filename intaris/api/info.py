@@ -202,8 +202,8 @@ async def stats(
             with db.cursor() as cur:
                 cur.execute(
                     "SELECT COUNT(*) FROM mcp_servers "
-                    "WHERE user_id = ? AND enabled = 1",
-                    (ctx.user_id,),
+                    "WHERE user_id = ? AND enabled = ?",
+                    (ctx.user_id, True),
                 )
                 mcp_stats["enabled_servers"] = cur.fetchone()[0]
 

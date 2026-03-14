@@ -392,7 +392,7 @@ class SessionStore:
                 SET alignment_overridden = ?, updated_at = ?
                 WHERE session_id = ? AND user_id = ?
                 """,
-                (1 if overridden else 0, now, session_id, user_id),
+                (overridden, now, session_id, user_id),
             )
 
     def get_active_child_sessions(
@@ -415,9 +415,9 @@ class SessionStore:
         conditions = [
             "parent_session_id IS NOT NULL",
             "status = 'active'",
-            "COALESCE(alignment_overridden, 0) = 0",
+            "(alignment_overridden IS NULL OR alignment_overridden = ?)",
         ]
-        params: list[Any] = []
+        params: list[Any] = [False]
 
         if user_id is not None:
             conditions.append("user_id = ?")

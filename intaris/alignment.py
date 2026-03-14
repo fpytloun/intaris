@@ -171,8 +171,9 @@ class AlignmentBarrier:
                     SELECT user_id, session_id FROM sessions
                     WHERE parent_session_id IS NOT NULL
                       AND status IN ('active', 'idle')
-                      AND COALESCE(alignment_overridden, 0) = 1
-                    """
+                      AND alignment_overridden = ?
+                    """,
+                    (True,),
                 )
                 rows = cur.fetchall()
 
