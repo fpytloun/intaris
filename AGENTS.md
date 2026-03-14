@@ -180,6 +180,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `MCP_ALLOW_STDIO` | Allow stdio transport for MCP servers (default `false`) |
 | `MCP_UPSTREAM_TIMEOUT_MS` | Timeout for upstream MCP server calls in milliseconds (default `30000`) |
 | `INTENTION_BARRIER_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for a pending intention update (default `1000`) |
+| `INTENTION_BARRIER_POLL_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for `/reasoning` to arrive when `intention_pending=true` (default `2000`) |
 | `ALIGNMENT_BARRIER_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for a pending alignment check (default `15000`) |
 | `ANALYSIS_ENABLED` | Enable behavioral analysis pipeline (default `true`) |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | Minutes of inactivity before session transitions to idle (default `30`) |
@@ -300,9 +301,11 @@ The `IntentionBarrier` (`intention.py`) coordinates between the `/reasoning` and
 
 1. **Trigger**: When `POST /reasoning` receives a user message (content starts with `"User message:"`), it calls `barrier.trigger()` which starts an async LLM task to regenerate the intention.
 2. **Wait**: When `POST /evaluate` runs, it calls `await barrier.wait()` before invoking the evaluator. If an intention update is pending, it blocks up to `INTENTION_BARRIER_TIMEOUT_MS` (default 1s).
-3. **Cancel-and-restart**: If a new user message arrives while an update is running, the old task is cancelled and a fresh one starts. Only the latest message's update runs to completion.
+3. **Arrival wait**: When the client sends `intention_pending=true` in the evaluate request but `/reasoning` hasn't arrived yet (race condition), the barrier waits up to `INTENTION_BARRIER_POLL_TIMEOUT_MS` (default 2s) for `trigger()` to be called. Uses `asyncio.Event` for zero-latency wakeup — no polling.
+4. **Cancel-and-restart**: If a new user message arrives while an update is running, the old task is cancelled and a fresh one starts. Only the latest message's update runs to completion.
 
-Budget: 1s barrier + 4s LLM eval = 5s max (within the circuit breaker constraint).
+Budget (Claude Code hooks): 1s barrier + 4s LLM eval = 5s max (within the circuit breaker constraint).
+Budget (OpenCode plugin): 2s arrival wait + 1s barrier + 4s LLM eval = 7s max (within 30s plugin timeout).
 
 ### Intention sources
 

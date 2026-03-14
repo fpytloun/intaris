@@ -356,6 +356,9 @@ async def lifespan(app):
     from intaris.llm import LLMClient
 
     barrier_timeout_ms = int(os.environ.get("INTENTION_BARRIER_TIMEOUT_MS", "1000"))
+    barrier_poll_timeout_ms = int(
+        os.environ.get("INTENTION_BARRIER_POLL_TIMEOUT_MS", "2000")
+    )
     analysis_llm: LLMClient | None = None
     if cfg.analysis.enabled and cfg.llm_analysis.api_key:
         analysis_llm = LLMClient(cfg.llm_analysis)
@@ -363,9 +366,14 @@ async def lifespan(app):
             db=_get_db(),
             llm=analysis_llm,
             timeout_ms=barrier_timeout_ms,
+            poll_timeout_ms=barrier_poll_timeout_ms,
         )
         app.state.intention_barrier.set_event_bus(app.state.event_bus)
-        logger.info("Intention barrier initialized (timeout=%dms)", barrier_timeout_ms)
+        logger.info(
+            "Intention barrier initialized (timeout=%dms, poll_timeout=%dms)",
+            barrier_timeout_ms,
+            barrier_poll_timeout_ms,
+        )
     else:
         app.state.intention_barrier = None
         logger.info("Intention barrier not initialized (analysis disabled)")

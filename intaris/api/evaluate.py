@@ -52,9 +52,18 @@ async def evaluate(
     # If a user message triggered an intention update via POST /reasoning,
     # we wait for it to complete before evaluating. This ensures the
     # evaluator sees the freshest user-stated intention.
+    #
+    # When intention_pending=True, the client signals that a user message
+    # was just sent to /reasoning. If the /reasoning call hasn't arrived
+    # yet (race condition), the barrier waits for it using an asyncio.Event
+    # before proceeding with the standard barrier wait.
     barrier = getattr(http_request.app.state, "intention_barrier", None)
     if barrier is not None:
-        await barrier.wait(ctx.user_id, request.session_id)
+        await barrier.wait(
+            ctx.user_id,
+            request.session_id,
+            intention_pending=request.intention_pending,
+        )
 
     # Wait for any pending alignment check (barrier pattern).
     # If a child session was just created or its intention was updated,

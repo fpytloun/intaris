@@ -54,6 +54,7 @@ interface SessionState {
   agentName: string | null
   sessionTitle: string | null
   intentionUpdated: boolean
+  intentionPending: boolean
   isIdle: boolean
   // Recording buffer
   recordingBuffer: RecordingEvent[]
@@ -272,6 +273,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         agentName: null,
         sessionTitle: null,
         intentionUpdated: false,
+        intentionPending: false,
         isIdle: false,
         recordingBuffer: [],
       }
@@ -743,6 +745,13 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
             2000,
           ).catch(() => {})
 
+          // Signal that an intention update is in flight. The next
+          // tool.execute.before will include intention_pending=true in
+          // the evaluate request so the server waits for the /reasoning
+          // call to arrive and the intention to be updated before
+          // evaluating. Cleared after the first evaluate call returns.
+          state.intentionPending = true
+
           // Record user message for session recording
           recordEvent(input.sessionID, {
             type: "message",
@@ -934,7 +943,10 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         },
       })
 
-      // Evaluate the tool call (30s timeout, retries with backoff)
+      // Evaluate the tool call (30s timeout, retries with backoff).
+      // When intentionPending is true, the server waits for the
+      // /reasoning call to arrive before evaluating (race condition fix).
+      const intentionPending = state.intentionPending
       const { data: result, error: evalError, status: evalStatus } = await callApiWithRetry(
         "POST",
         "/api/v1/evaluate",
@@ -942,10 +954,17 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           session_id: intarisSessionId,
           tool,
           args: _output.args || {},
+          ...(intentionPending && { intention_pending: true }),
         },
         30000, // 30s timeout for evaluation (large tool calls can be slow)
         2,     // 2 retries (3 total attempts, worst case ~90s)
       )
+
+      // Clear the flag after the first evaluate call — subsequent tool
+      // calls in this turn benefit from the already-updated intention.
+      if (intentionPending) {
+        state.intentionPending = false
+      }
 
       if (!result) {
         // Distinguish config errors (4xx) from transient failures (5xx/network)

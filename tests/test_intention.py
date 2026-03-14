@@ -41,9 +41,11 @@ def mock_llm():
     return llm
 
 
-def _make_barrier(db, llm, timeout_ms=500):
+def _make_barrier(db, llm, timeout_ms=500, poll_timeout_ms=500):
     """Create an IntentionBarrier with given params."""
-    return IntentionBarrier(db=db, llm=llm, timeout_ms=timeout_ms)
+    return IntentionBarrier(
+        db=db, llm=llm, timeout_ms=timeout_ms, poll_timeout_ms=poll_timeout_ms
+    )
 
 
 def _insert_tool_call(db, user_id, session_id, call_id="call-1"):
@@ -501,6 +503,162 @@ class TestIntentionBarrier:
             assert result is True
 
         asyncio.run(_test())
+
+
+# ── IntentionBarrier Arrival Wait ─────────────────────────────────────
+
+
+class TestIntentionBarrierArrivalWait:
+    """Tests for the arrival-wait mechanism (intention_pending race fix).
+
+    When /evaluate arrives before /reasoning, the barrier uses an
+    asyncio.Event to wait for trigger() to be called, avoiding the
+    race condition where the evaluator proceeds with a stale intention.
+    """
+
+    def test_arrival_hit_trigger_arrives_in_time(self, db, session_store, mock_llm):
+        """intention_pending=True + trigger arrives → waits for completion."""
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_tool_call(db, "user-1", "sess-1")
+
+        barrier = _make_barrier(db, mock_llm, poll_timeout_ms=2000)
+
+        async def _test():
+            # Simulate: /evaluate arrives first with intention_pending=True,
+            # then /reasoning arrives 100ms later and triggers the barrier.
+            async def delayed_trigger():
+                await asyncio.sleep(0.1)
+                await barrier.trigger("user-1", "sess-1")
+
+            asyncio.create_task(delayed_trigger())
+
+            result = await barrier.wait("user-1", "sess-1", intention_pending=True)
+            assert result is True
+            assert barrier.arrival_wait_count == 1
+            assert barrier.arrival_hit_count == 1
+            assert barrier.arrival_timeout_count == 0
+            assert barrier.wait_count == 1  # Also waited for completion
+
+        asyncio.run(_test())
+
+    def test_arrival_timeout_reasoning_never_arrives(self, db, mock_llm):
+        """intention_pending=True + /reasoning never arrives → timeout."""
+        barrier = _make_barrier(db, mock_llm, poll_timeout_ms=200)
+
+        async def _test():
+            result = await barrier.wait("user-1", "sess-1", intention_pending=True)
+            # Should return False — no entry was ever created
+            assert result is False
+            assert barrier.arrival_wait_count == 1
+            assert barrier.arrival_timeout_count == 1
+            assert barrier.arrival_hit_count == 0
+            assert barrier.wait_count == 0  # Never reached barrier wait
+
+        asyncio.run(_test())
+
+    def test_no_flag_unchanged_behavior(self, db, mock_llm):
+        """intention_pending=False (default) → existing behavior unchanged."""
+        barrier = _make_barrier(db, mock_llm)
+
+        async def _test():
+            # No trigger, no flag → returns False immediately
+            result = await barrier.wait("user-1", "sess-1")
+            assert result is False
+            assert barrier.arrival_wait_count == 0
+            assert barrier.wait_count == 0
+
+        asyncio.run(_test())
+
+    def test_concurrent_waiters_share_arrival_event(self, db, session_store, mock_llm):
+        """Multiple evaluate calls with intention_pending share one arrival event."""
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_tool_call(db, "user-1", "sess-1")
+
+        barrier = _make_barrier(db, mock_llm, poll_timeout_ms=2000)
+
+        async def _test():
+            # Both evaluate calls arrive before /reasoning
+            async def delayed_trigger():
+                await asyncio.sleep(0.1)
+                await barrier.trigger("user-1", "sess-1")
+
+            asyncio.create_task(delayed_trigger())
+
+            # First waiter creates the arrival event, second reuses it
+            # (or creates a new one if the first already consumed it).
+            # Both should eventually succeed.
+            results = await asyncio.gather(
+                barrier.wait("user-1", "sess-1", intention_pending=True),
+                barrier.wait("user-1", "sess-1", intention_pending=True),
+            )
+            # At least one should have waited and succeeded
+            assert any(r is True for r in results)
+            assert barrier.arrival_wait_count >= 1
+
+        asyncio.run(_test())
+
+    def test_arrival_event_cleanup_on_timeout(self, db, mock_llm):
+        """Arrival event is cleaned up after timeout."""
+        barrier = _make_barrier(db, mock_llm, poll_timeout_ms=100)
+
+        async def _test():
+            await barrier.wait("user-1", "sess-1", intention_pending=True)
+            # Arrival event should be cleaned up
+            assert ("user-1", "sess-1") not in barrier._arrival_events
+
+        asyncio.run(_test())
+
+    def test_arrival_event_cleanup_on_hit(self, db, session_store, mock_llm):
+        """Arrival event is cleaned up after trigger arrives."""
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_tool_call(db, "user-1", "sess-1")
+
+        barrier = _make_barrier(db, mock_llm, poll_timeout_ms=2000)
+
+        async def _test():
+            async def delayed_trigger():
+                await asyncio.sleep(0.05)
+                await barrier.trigger("user-1", "sess-1")
+
+            asyncio.create_task(delayed_trigger())
+
+            await barrier.wait("user-1", "sess-1", intention_pending=True)
+            # Arrival event should be cleaned up
+            assert ("user-1", "sess-1") not in barrier._arrival_events
+
+        asyncio.run(_test())
+
+    def test_trigger_already_arrived_skips_arrival_wait(
+        self, db, session_store, mock_llm
+    ):
+        """If trigger() already ran before wait(), no arrival wait needed."""
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_tool_call(db, "user-1", "sess-1")
+
+        barrier = _make_barrier(db, mock_llm, poll_timeout_ms=2000)
+
+        async def _test():
+            # /reasoning arrives first (normal case)
+            await barrier.trigger("user-1", "sess-1")
+            # /evaluate arrives with intention_pending=True
+            result = await barrier.wait("user-1", "sess-1", intention_pending=True)
+            assert result is True
+            # Should NOT have entered arrival wait (entry already existed)
+            assert barrier.arrival_wait_count == 0
+            assert barrier.wait_count == 1
+
+        asyncio.run(_test())
+
+    def test_metrics_include_arrival_counters(self, db, mock_llm):
+        """metrics() includes the new arrival-wait counters."""
+        barrier = _make_barrier(db, mock_llm)
+        metrics = barrier.metrics()
+        assert "arrival_wait_count" in metrics
+        assert "arrival_hit_count" in metrics
+        assert "arrival_timeout_count" in metrics
+        assert metrics["arrival_wait_count"] == 0
+        assert metrics["arrival_hit_count"] == 0
+        assert metrics["arrival_timeout_count"] == 0
 
 
 # ── Evaluator Bootstrap ───────────────────────────────────────────────

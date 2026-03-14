@@ -30,8 +30,16 @@ from intaris.session import SessionStore
 logger = logging.getLogger(__name__)
 
 # Default barrier timeout in milliseconds.
-# Budget: 1s barrier + 4s LLM eval = 5s max (within circuit breaker).
+# Budget (hooks): 1s barrier + 4s LLM eval = 5s max (within circuit breaker).
+# Budget (plugin): 2s arrival + 1s barrier + 4s LLM eval = 7s (within 30s timeout).
 _DEFAULT_TIMEOUT_MS = 1000
+
+# Default arrival poll timeout in milliseconds.
+# When the client signals intention_pending=True but the /reasoning call
+# hasn't arrived yet, the barrier waits up to this long for trigger() to
+# be called. Uses asyncio.Event for zero-latency wakeup (no polling).
+# Budget: 2s arrival + 1s barrier + 4s LLM eval = 7s (within 30s plugin timeout).
+_DEFAULT_POLL_TIMEOUT_MS = 2000
 
 
 def generate_intention(
@@ -224,19 +232,29 @@ class IntentionBarrier:
         db: Database,
         llm: LLMClient,
         timeout_ms: int = _DEFAULT_TIMEOUT_MS,
+        poll_timeout_ms: int = _DEFAULT_POLL_TIMEOUT_MS,
     ) -> None:
         self._db = db
         self._llm = llm
         self._timeout = timeout_ms / 1000.0
+        self._poll_timeout = poll_timeout_ms / 1000.0
         self._event_bus: Any | None = None
         self._alignment_barrier: Any | None = None
         self._pending: dict[tuple[str, str], tuple[asyncio.Event, asyncio.Task]] = {}
+
+        # Arrival events: when evaluate arrives before /reasoning, the
+        # evaluate endpoint creates an event here and waits for trigger()
+        # to set it. This avoids polling — trigger() wakes waiters instantly.
+        self._arrival_events: dict[tuple[str, str], asyncio.Event] = {}
 
         # Metrics
         self.wait_count: int = 0
         self.timeout_count: int = 0
         self.update_count: int = 0
         self.update_errors: int = 0
+        self.arrival_wait_count: int = 0
+        self.arrival_hit_count: int = 0
+        self.arrival_timeout_count: int = 0
 
     def set_event_bus(self, event_bus: Any) -> None:
         """Set the EventBus reference for publishing events.
@@ -262,6 +280,9 @@ class IntentionBarrier:
             "update_count": self.update_count,
             "update_errors": self.update_errors,
             "pending": len(self._pending),
+            "arrival_wait_count": self.arrival_wait_count,
+            "arrival_hit_count": self.arrival_hit_count,
+            "arrival_timeout_count": self.arrival_timeout_count,
         }
 
     async def trigger(self, user_id: str, session_id: str) -> None:
@@ -272,11 +293,20 @@ class IntentionBarrier:
         user message turns — only the latest message's update runs to
         completion.
 
+        Also wakes any evaluate endpoint that is waiting for this trigger
+        via an arrival event (intention_pending=True race condition fix).
+
         Args:
             user_id: Tenant identifier.
             session_id: Session to update.
         """
         key = (user_id, session_id)
+
+        # Wake any evaluate endpoint waiting for this trigger to arrive.
+        # This handles the race where /evaluate arrives before /reasoning.
+        arrival_event = self._arrival_events.pop(key, None)
+        if arrival_event is not None:
+            arrival_event.set()
 
         # Cancel any existing pending update (cancel-and-restart)
         old = self._pending.get(key)
@@ -290,15 +320,31 @@ class IntentionBarrier:
         task = asyncio.create_task(self._run(key, event))
         self._pending[key] = (event, task)
 
-    async def wait(self, user_id: str, session_id: str) -> bool:
+    async def wait(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        intention_pending: bool = False,
+    ) -> bool:
         """Wait for a pending intention update to complete.
 
         Called from the evaluate endpoint before running the evaluator.
-        If no update is pending, returns immediately.
+        If no update is pending, returns immediately — unless
+        ``intention_pending`` is True, in which case we wait for the
+        /reasoning call to arrive and trigger the barrier first.
+
+        The arrival wait uses an asyncio.Event for zero-latency wakeup:
+        trigger() sets the event as soon as /reasoning arrives, so there
+        is no polling overhead.
 
         Args:
             user_id: Tenant identifier.
             session_id: Session to check.
+            intention_pending: Client hint that a user message was just
+                sent via POST /reasoning and an intention update is
+                expected. When True and no barrier entry exists yet,
+                waits for trigger() to be called.
 
         Returns:
             True if an update was awaited (or timed out), False if
@@ -306,6 +352,13 @@ class IntentionBarrier:
         """
         key = (user_id, session_id)
         entry = self._pending.get(key)
+
+        # When the client signals intention_pending but /reasoning hasn't
+        # arrived yet (no barrier entry), wait for trigger() to be called.
+        # Uses asyncio.Event for instant wakeup — no polling loop.
+        if entry is None and intention_pending:
+            entry = await self._wait_for_arrival(key)
+
         if entry is None:
             return False
 
@@ -332,6 +385,68 @@ class IntentionBarrier:
                 session_id,
             )
             return True
+
+    async def _wait_for_arrival(
+        self,
+        key: tuple[str, str],
+    ) -> tuple[asyncio.Event, asyncio.Task] | None:
+        """Wait for trigger() to create a barrier entry.
+
+        Called when the client signals intention_pending=True but the
+        /reasoning call hasn't arrived yet. Creates an asyncio.Event
+        that trigger() will set, providing zero-latency wakeup.
+
+        Args:
+            key: (user_id, session_id) tuple.
+
+        Returns:
+            The barrier entry (event, task) if trigger() arrived in time,
+            or None if the arrival timed out.
+        """
+        self.arrival_wait_count += 1
+        user_id, session_id = key
+
+        logger.debug(
+            "Arrival wait: /evaluate arrived before /reasoning, "
+            "waiting for trigger user=%s session=%s (timeout=%.1fs)",
+            user_id,
+            session_id,
+            self._poll_timeout,
+        )
+
+        # Create an arrival event that trigger() will set
+        arrival_event = asyncio.Event()
+        self._arrival_events[key] = arrival_event
+
+        try:
+            await asyncio.wait_for(arrival_event.wait(), timeout=self._poll_timeout)
+        except asyncio.TimeoutError:
+            self.arrival_timeout_count += 1
+            logger.warning(
+                "Arrival wait timeout (%.1fs): /reasoning never arrived "
+                "for user=%s session=%s — proceeding with current intention",
+                self._poll_timeout,
+                user_id,
+                session_id,
+            )
+            return None
+        finally:
+            # Clean up the arrival event (trigger() may have already
+            # popped it, so use pop with default)
+            self._arrival_events.pop(key, None)
+
+        # trigger() arrived — the barrier entry should now exist
+        self.arrival_hit_count += 1
+        entry = self._pending.get(key)
+        if entry is None:
+            # Shouldn't happen: trigger() sets arrival event and creates
+            # the pending entry atomically. Log and proceed.
+            logger.warning(
+                "Arrival event set but no pending entry for user=%s session=%s",
+                user_id,
+                session_id,
+            )
+        return entry
 
     async def _run(
         self,

@@ -19,6 +19,15 @@ class EvaluateRequest(BaseModel):
     context: dict[str, Any] | None = Field(
         None, description="Optional additional context"
     )
+    intention_pending: bool = Field(
+        False,
+        description=(
+            "Hint from the client that a user message was just sent via "
+            "POST /reasoning and an intention update is in flight. When "
+            "true, the server waits for the intention barrier to be "
+            "triggered before evaluating."
+        ),
+    )
 
 
 class EvaluateResponse(BaseModel):
