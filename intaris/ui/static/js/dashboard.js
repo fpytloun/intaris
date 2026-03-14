@@ -138,7 +138,6 @@ function dashboardTab() {
           this._startPeriodicRefresh();
         } else {
           this._stopPeriodicRefresh();
-          this._destroyAllCharts();
         }
       });
       window.addEventListener('intaris:user-changed', () => {
@@ -298,12 +297,20 @@ function dashboardTab() {
     },
 
     _renderDoughnut(canvasId, label, data, colorMap) {
+      // Update existing chart in-place if possible (avoids destroy/create cycle)
+      const existing = this._charts[canvasId];
+      if (existing && existing.canvas && existing.canvas.isConnected) {
+        this._updateDoughnut(canvasId, data, colorMap);
+        return;
+      }
+
       const canvas = document.getElementById(canvasId);
       if (!canvas || !canvas.getContext('2d')) return;
 
-      // Destroy existing chart
-      if (this._charts[canvasId]) {
-        this._charts[canvasId].destroy();
+      // Destroy stale chart (canvas was replaced or detached)
+      if (existing) {
+        existing.destroy();
+        delete this._charts[canvasId];
       }
 
       const labels = Object.keys(data);
@@ -394,13 +401,6 @@ function dashboardTab() {
     },
 
     _renderTimeline() {
-      const canvas = document.getElementById('timelineChart');
-      if (!canvas || !canvas.getContext('2d')) return;
-
-      if (this._charts.timelineChart) {
-        this._charts.timelineChart.destroy();
-      }
-
       const timeline = this.stats.activity_timeline || [];
 
       // Build full 24h label set (fill gaps with 0)
@@ -420,6 +420,23 @@ function dashboardTab() {
           key: key,
           count: countMap[key] || 0,
         });
+      }
+
+      // Update existing chart in-place if possible
+      const existing = this._charts.timelineChart;
+      if (existing && existing.canvas && existing.canvas.isConnected) {
+        existing.data.labels = hours.map(h => h.label);
+        existing.data.datasets[0].data = hours.map(h => h.count);
+        try { existing.update('none'); } catch (e) { /* stale layout, next load retries */ }
+        return;
+      }
+
+      const canvas = document.getElementById('timelineChart');
+      if (!canvas || !canvas.getContext('2d')) return;
+
+      if (existing) {
+        existing.destroy();
+        delete this._charts.timelineChart;
       }
 
       this._charts.timelineChart = new Chart(canvas, {
@@ -473,13 +490,6 @@ function dashboardTab() {
     },
 
     _renderTopTools() {
-      const canvas = document.getElementById('topToolsChart');
-      if (!canvas || !canvas.getContext('2d')) return;
-
-      if (this._charts.topToolsChart) {
-        this._charts.topToolsChart.destroy();
-      }
-
       const tools = (this.stats.top_tools || []).slice(0, 8);
       if (tools.length === 0) return;
 
@@ -491,6 +501,24 @@ function dashboardTab() {
         const ratio = i / Math.max(reversed.length - 1, 1);
         return ratio > 0.5 ? CHART_COLORS.cyan : CHART_COLORS.teal;
       });
+
+      // Update existing chart in-place if possible
+      const existing = this._charts.topToolsChart;
+      if (existing && existing.canvas && existing.canvas.isConnected) {
+        existing.data.labels = reversed.map(t => t.tool);
+        existing.data.datasets[0].data = reversed.map(t => t.count);
+        existing.data.datasets[0].backgroundColor = barColors;
+        try { existing.update('none'); } catch (e) { /* stale layout, next load retries */ }
+        return;
+      }
+
+      const canvas = document.getElementById('topToolsChart');
+      if (!canvas || !canvas.getContext('2d')) return;
+
+      if (existing) {
+        existing.destroy();
+        delete this._charts.topToolsChart;
+      }
 
       this._charts.topToolsChart = new Chart(canvas, {
         type: 'bar',
