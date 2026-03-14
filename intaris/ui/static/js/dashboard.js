@@ -274,8 +274,8 @@ function dashboardTab() {
           Alpine.store('nav').agents = stats.agents;
         }
 
-        // Render charts after data is loaded (next tick for DOM readiness)
-        this.$nextTick(() => this._renderAllCharts());
+        // Render charts after layout completes (rAF ensures canvas is renderable)
+        requestAnimationFrame(() => this._renderAllCharts());
       } catch (e) {
         Alpine.store('notify').error('Failed to load dashboard: ' + e.message);
       } finally {
@@ -299,7 +299,7 @@ function dashboardTab() {
 
     _renderDoughnut(canvasId, label, data, colorMap) {
       const canvas = document.getElementById(canvasId);
-      if (!canvas) return;
+      if (!canvas || !canvas.getContext('2d')) return;
 
       // Destroy existing chart
       if (this._charts[canvasId]) {
@@ -395,7 +395,7 @@ function dashboardTab() {
 
     _renderTimeline() {
       const canvas = document.getElementById('timelineChart');
-      if (!canvas) return;
+      if (!canvas || !canvas.getContext('2d')) return;
 
       if (this._charts.timelineChart) {
         this._charts.timelineChart.destroy();
@@ -474,7 +474,7 @@ function dashboardTab() {
 
     _renderTopTools() {
       const canvas = document.getElementById('topToolsChart');
-      if (!canvas) return;
+      if (!canvas || !canvas.getContext('2d')) return;
 
       if (this._charts.topToolsChart) {
         this._charts.topToolsChart.destroy();
