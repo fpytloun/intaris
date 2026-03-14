@@ -71,7 +71,7 @@ async def stats(
                 f"WHERE user_id = ?{session_agent_cond} GROUP BY status",
                 (ctx.user_id, *session_agent_params),
             )
-            status_counts = dict(cur.fetchall())
+            status_counts = {row[0]: row[1] for row in cur.fetchall()}
 
         total_sessions = sum(status_counts.values())
 
@@ -82,7 +82,7 @@ async def stats(
                 f"WHERE user_id = ?{audit_agent_cond} GROUP BY decision",
                 (ctx.user_id, *audit_agent_params),
             )
-            decision_counts = dict(cur.fetchall())
+            decision_counts = {row[0]: row[1] for row in cur.fetchall()}
 
         total_evaluations = sum(decision_counts.values())
         approved = decision_counts.get("approve", 0)
@@ -138,7 +138,7 @@ async def stats(
                 "GROUP BY risk",
                 (ctx.user_id, *audit_agent_params),
             )
-            risk_distribution = dict(cur.fetchall())
+            risk_distribution = {row[0]: row[1] for row in cur.fetchall()}
 
         # Evaluation path distribution (for pie chart)
         with db.cursor() as cur:
@@ -147,7 +147,7 @@ async def stats(
                 f"WHERE user_id = ?{audit_agent_cond} GROUP BY evaluation_path",
                 (ctx.user_id, *audit_agent_params),
             )
-            path_distribution = dict(cur.fetchall())
+            path_distribution = {row[0]: row[1] for row in cur.fetchall()}
 
         # Classification distribution (for pie chart)
         with db.cursor() as cur:
@@ -158,7 +158,7 @@ async def stats(
                 "GROUP BY classification",
                 (ctx.user_id, *audit_agent_params),
             )
-            classification_distribution = dict(cur.fetchall())
+            classification_distribution = {row[0]: row[1] for row in cur.fetchall()}
 
         # Top tools (for bar chart, top 10)
         with db.cursor() as cur:

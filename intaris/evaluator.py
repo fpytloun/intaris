@@ -88,11 +88,12 @@ class Evaluator:
         self._alignment_barrier = alignment_barrier
 
         # Approved path prefixes per session.
-        # Key: (user_id, session_id) → set of normalized directory prefixes.
-        # When the LLM approves a read-only tool call that was reclassified
-        # to WRITE due to path policy, the evaluator caches the approved
-        # directory prefix. Subsequent reads under that prefix are fast-pathed
-        # as READ without LLM evaluation.
+        # Key: (user_id, session_id) → list of normalized directory prefixes.
+        # When a read-only tool call that was reclassified to WRITE due to
+        # path policy is approved (by LLM or by user via escalation), the
+        # evaluator caches the approved directory prefix. Subsequent reads
+        # under that prefix are fast-pathed as READ without LLM evaluation.
+        # Prefixes are merged when they share a deep common ancestor.
         self._approved_paths: dict[tuple[str, str], list[str]] = {}
         self._approved_paths_lock = threading.Lock()
 
@@ -652,19 +653,90 @@ class Evaluator:
         Thread-safe. Enforces a maximum number of prefixes per session
         with FIFO eviction (oldest prefix removed first).
 
+        When a new prefix shares a deep common ancestor with an existing
+        prefix (>= ``_MIN_MERGE_DEPTH`` components), the two are merged
+        into the common ancestor. This naturally broadens the cache as
+        the agent explores related paths (e.g., different npm packages
+        under the same scope directory).
+
         Args:
             user_id: Tenant identifier.
             session_id: Session identifier.
             prefix: Normalized directory prefix to approve.
         """
         key = (user_id, session_id)
+        norm_prefix = os.path.normpath(prefix)
         with self._approved_paths_lock:
             prefixes = self._approved_paths.setdefault(key, [])
-            if prefix not in prefixes:
-                prefixes.append(prefix)
-                # FIFO eviction if over limit
-                while len(prefixes) > _MAX_APPROVED_PATHS_PER_SESSION:
-                    prefixes.pop(0)
+
+            # Check if already covered by an existing prefix
+            if any(is_path_within(norm_prefix, p) for p in prefixes):
+                return
+
+            # Try to merge with an existing prefix
+            merged = _try_merge_prefix(norm_prefix, prefixes)
+            if merged:
+                return
+
+            prefixes.append(norm_prefix)
+            # FIFO eviction if over limit
+            while len(prefixes) > _MAX_APPROVED_PATHS_PER_SESSION:
+                prefixes.pop(0)
+
+    def learn_from_approved_escalation(self, record: dict[str, Any]) -> None:
+        """Cache path prefix when a user approves an escalated read.
+
+        Called from ``POST /decision`` when a user approves an escalation.
+        Extracts file paths from the audit record, computes the directory
+        prefix, and caches it so subsequent reads under the same prefix
+        are fast-pathed as READ.
+
+        Also works for non-path escalations — the method is a no-op when
+        the tool call doesn't involve out-of-project file paths.
+
+        Args:
+            record: Audit record dict from the resolved escalation.
+        """
+        tool = record.get("tool", "")
+        args_redacted = record.get("args_redacted")
+        user_id = record.get("user_id", "")
+        session_id = record.get("session_id", "")
+
+        if not args_redacted or not isinstance(args_redacted, dict):
+            return
+
+        # Only for read-only tools
+        if not is_read_only(tool, args_redacted):
+            return
+
+        # Get session's working_directory
+        session = self._sessions.get(session_id, user_id=user_id)
+        if not session:
+            return
+        details = session.get("details") or {}
+        working_directory = details.get("working_directory")
+        if not working_directory:
+            return
+
+        # Extract and resolve paths
+        raw_paths = extract_paths(args_redacted)
+        if tool == "bash" or tool == "Bash":
+            command = args_redacted.get("command", "") or args_redacted.get("cmd", "")
+            if command:
+                raw_paths.extend(extract_bash_paths(str(command)))
+        if not raw_paths:
+            return
+
+        for p in raw_paths:
+            resolved = resolve_path(p, working_directory)
+            if not is_path_within(resolved, working_directory):
+                prefix = _compute_path_prefix(resolved, working_directory)
+                self._approve_path_prefix(user_id, session_id, prefix)
+                logger.info(
+                    "Learned path prefix from user approval: %s (session %s)",
+                    prefix,
+                    session_id,
+                )
 
     def clear_approved_paths(self, user_id: str, session_id: str) -> None:
         """Clear approved path prefixes for a session.

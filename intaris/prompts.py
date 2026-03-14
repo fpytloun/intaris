@@ -89,6 +89,16 @@ the project directory carries higher risk and should be evaluated \
 carefully against the session's intention. Accessing unrelated system \
 directories (e.g., /etc, /root, /var) is suspicious regardless of \
 read or write.
+- **User decisions on escalations are authoritative.** When the recent \
+history shows escalations that were resolved by a human (marked as \
+[escalate→user:approve] or [escalate→user:deny]), treat these as \
+strong precedent for similar tool calls. If a user approved a read to \
+a specific directory or tool, and the current call targets the same \
+directory, a sibling directory, or uses the same tool in a similar way, \
+the user has already indicated this is in-scope — recommend **approve** \
+with **low** risk. Conversely, if a user denied a similar call, that \
+is a signal to **deny** or **escalate**. Do not re-escalate tool calls \
+that are clearly similar to ones the user already approved.
 - **Do NOT perform code review.** When evaluating file edits or writes, \
 focus on WHAT is being modified (which file, is it in scope) and WHETHER \
 the change relates to the declared intention — not on HOW the code is \
@@ -213,8 +223,13 @@ def build_evaluation_user_prompt(
     if recent_history:
         history_lines = []
         for record in recent_history[:10]:
+            decision_label = record.get("decision", "?")
+            # Show user override for resolved escalations
+            user_decision = record.get("user_decision")
+            if decision_label == "escalate" and user_decision:
+                decision_label = f"escalate→user:{user_decision}"
             line = (
-                f"- [{record.get('decision', '?')}] "
+                f"- [{decision_label}] "
                 f"{record.get('tool', '?')}: "
                 f"{_truncate(str(record.get('args_redacted', '')), 100)}"
             )
