@@ -161,6 +161,15 @@ function auditTab() {
       return 'badge badge-' + (path || 'fast');
     },
 
+    recordTypeBadgeClass(type) {
+      const classes = {
+        reasoning: 'badge badge-reasoning',
+        checkpoint: 'badge badge-checkpoint',
+        summary: 'badge badge-summary',
+      };
+      return classes[type] || 'badge badge-low';
+    },
+
     formatTime(ts) {
       if (!ts) return '';
       return new Date(ts).toLocaleString();

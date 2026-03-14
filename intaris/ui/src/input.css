@@ -136,6 +136,11 @@
   .badge-suspended { @apply bg-amber-500/15 text-amber-400; }
   .badge-terminated { @apply bg-red-500/15 text-red-400; }
 
+  /* Record type badges */
+  .badge-reasoning { @apply bg-cyan-500/15 text-cyan-400; }
+  .badge-checkpoint { @apply bg-purple-500/15 text-purple-400; }
+  .badge-summary { @apply bg-emerald-500/15 text-emerald-400; }
+
   .stat-card {
     @apply bg-brand-surface border border-brand-border rounded-xl p-5 flex flex-col items-center justify-center text-center min-h-[100px];
   }

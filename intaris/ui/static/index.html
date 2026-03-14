@@ -465,6 +465,8 @@
                             <span x-show="r.decision === 'escalate' && r.user_decision"
                                   :class="decisionBadgeClass(r.user_decision)" x-text="r.user_decision"></span>
                             <span class="font-mono text-xs" x-text="r.tool || r.record_type"></span>
+                            <span x-show="r.record_type && r.record_type !== 'tool_call'"
+                                  :class="recordTypeBadgeClass(r.record_type)" x-text="r.record_type" class="text-xs"></span>
                             <span :class="riskBadgeClass(r.risk)" x-text="r.risk" x-show="r.risk" class="text-xs"></span>
                           </div>
                           <div class="flex items-center gap-2">
@@ -477,6 +479,14 @@
                         <!-- Expanded Audit Detail -->
                         <div x-show="expandedAuditId === r.call_id" x-cloak
                              class="ml-4 mt-1 mb-2 p-3 bg-brand-elevated rounded-lg border border-brand-border text-sm">
+                          <!-- Content (for reasoning/checkpoint/summary records) -->
+                          <template x-if="expandedAuditRecord?.content">
+                            <div class="mb-2">
+                              <div class="text-xs text-muted mb-1" x-text="expandedAuditRecord.record_type === 'reasoning' ? 'Agent Reasoning' : expandedAuditRecord.record_type === 'checkpoint' ? 'Checkpoint' : expandedAuditRecord.record_type === 'summary' ? 'Summary' : 'Content'"></div>
+                              <div class="text-sm bg-brand-bg rounded p-2 whitespace-pre-wrap max-h-64 overflow-y-auto" x-text="expandedAuditRecord.content"></div>
+                            </div>
+                          </template>
+
                           <!-- Reasoning -->
                           <template x-if="expandedAuditRecord?.reasoning">
                             <div class="mb-2">
@@ -590,6 +600,8 @@
                   <span x-show="r.decision === 'escalate' && r.user_decision"
                         :class="decisionBadgeClass(r.user_decision)" x-text="r.user_decision"></span>
                   <span class="font-mono text-sm" x-text="r.tool || r.record_type"></span>
+                  <span x-show="r.record_type && r.record_type !== 'tool_call'"
+                        :class="recordTypeBadgeClass(r.record_type)" x-text="r.record_type"></span>
                   <span :class="riskBadgeClass(r.risk)" x-text="r.risk" x-show="r.risk"></span>
                   <span :class="pathBadgeClass(r.evaluation_path)" x-text="r.evaluation_path"></span>
                 </div>
@@ -605,8 +617,16 @@
               <!-- Intention (if present) -->
               <div x-show="r.intention" class="mt-1 text-xs text-muted truncate" x-text="r.intention"></div>
 
-              <!-- Expanded Detail -->
+                <!-- Expanded Detail -->
               <div x-show="expandedId === r.call_id" x-cloak class="mt-4 pt-4 border-t border-brand-border">
+                <!-- Content (for reasoning/checkpoint/summary records) -->
+                <template x-if="expandedRecord?.content">
+                  <div class="mb-3">
+                    <div class="text-xs text-muted mb-1" x-text="expandedRecord.record_type === 'reasoning' ? 'Agent Reasoning' : expandedRecord.record_type === 'checkpoint' ? 'Checkpoint' : expandedRecord.record_type === 'summary' ? 'Summary' : 'Content'"></div>
+                    <div class="text-sm bg-brand-elevated rounded p-3 whitespace-pre-wrap max-h-96 overflow-y-auto" x-text="expandedRecord.content"></div>
+                  </div>
+                </template>
+
                 <!-- Reasoning -->
                 <template x-if="expandedRecord?.reasoning">
                   <div class="mb-3">

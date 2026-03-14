@@ -617,7 +617,7 @@ class SessionStore:
                 SELECT s.* FROM sessions s
                 INNER JOIN ({root_id_sql}) AS roots
                     ON s.session_id = roots.session_id
-                ORDER BY s.last_activity_at DESC, s.created_at DESC
+                ORDER BY s.created_at DESC
                 LIMIT ? OFFSET ?
             """
             paginated_root_params = [*root_id_params, limit, offset]

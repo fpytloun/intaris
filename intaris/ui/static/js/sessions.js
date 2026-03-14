@@ -312,20 +312,21 @@ function sessionsTab() {
         }
       }
 
-      // Sort roots by last_activity_at DESC (newest first), fallback to created_at
+      // Sort roots by created_at DESC (newest first) — stable sort that
+      // doesn't cause visual jumping when last_activity_at updates via WebSocket
       roots.sort((a, b) => {
-        const aTime = a.last_activity_at || a.created_at || '';
-        const bTime = b.last_activity_at || b.created_at || '';
+        const aTime = a.created_at || '';
+        const bTime = b.created_at || '';
         return bTime.localeCompare(aTime);
       });
 
       // Flatten tree: parent followed by its children (unless collapsed)
       const result = [];
       for (const root of roots) {
-        // Sort children by last_activity_at DESC (newest first)
+        // Sort children by created_at DESC (newest first)
         root._children.sort((a, b) => {
-          const aTime = a.last_activity_at || a.created_at || '';
-          const bTime = b.last_activity_at || b.created_at || '';
+          const aTime = a.created_at || '';
+          const bTime = b.created_at || '';
           return bTime.localeCompare(aTime);
         });
         result.push(root);
@@ -485,6 +486,15 @@ function sessionsTab() {
     pathBadgeClass(path) {
       if (path === 'critical') return 'badge badge-deny';
       return 'badge badge-' + (path || 'fast');
+    },
+
+    recordTypeBadgeClass(type) {
+      const classes = {
+        reasoning: 'badge badge-reasoning',
+        checkpoint: 'badge badge-checkpoint',
+        summary: 'badge badge-summary',
+      };
+      return classes[type] || 'badge badge-low';
     },
 
     formatTime(ts) {
