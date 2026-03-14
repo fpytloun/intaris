@@ -321,6 +321,10 @@
   .console-lifecycle {
     @apply text-xs text-muted text-center my-2 opacity-60;
   }
+
+  .console-ts {
+    @apply text-[10px] text-muted/50 whitespace-nowrap flex-shrink-0 tabular-nums;
+  }
 }
 
 /* ── Utility additions ── */

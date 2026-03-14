@@ -44,7 +44,10 @@ if (typeof marked !== 'undefined') {
 function renderMarkdown(text) {
   if (!text || typeof marked === 'undefined') return escapeHtml(text || '');
   try {
-    return marked.parse(text);
+    const html = marked.parse(text);
+    // Sanitize to prevent XSS from user-controlled content in assistant messages
+    if (typeof DOMPurify !== 'undefined') return DOMPurify.sanitize(html);
+    return html;
   } catch (_) {
     return escapeHtml(text);
   }
@@ -151,7 +154,10 @@ function formatOutput(output, maxLines) {
 function highlightCode(code) {
   if (!code || typeof hljs === 'undefined') return escapeHtml(code || '');
   try {
-    return hljs.highlightAuto(code).value;
+    const html = hljs.highlightAuto(code).value;
+    // Sanitize to prevent XSS from user-controlled content in tool output
+    if (typeof DOMPurify !== 'undefined') return DOMPurify.sanitize(html);
+    return html;
   } catch (_) {
     return escapeHtml(code);
   }
@@ -847,6 +853,11 @@ function consolePlayer() {
     },
 
     // ── Display helpers ──
+
+    formatTime(ts) {
+      if (!ts) return '';
+      return new Date(ts).toLocaleTimeString();
+    },
 
     decisionClass(decision) {
       if (decision === 'approve') return 'badge badge-approve';

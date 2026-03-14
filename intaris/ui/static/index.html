@@ -9,6 +9,7 @@
   <script src="/ui/vendor/chart.min.js"></script>
   <script src="/ui/vendor/marked.min.js"></script>
   <script src="/ui/vendor/highlight.min.js"></script>
+  <script src="/ui/vendor/purify.min.js"></script>
   <script src="/ui/js/api.js"></script>
   <script src="/ui/js/app.js"></script>
   <script src="/ui/js/dashboard.js"></script>
@@ -1493,23 +1494,32 @@
             <!-- User message -->
             <template x-if="block.type === 'user-message'">
               <div class="console-user-msg">
-                <div class="console-role-label">User</div>
+                <div class="flex items-center justify-between">
+                  <div class="console-role-label">User</div>
+                  <span class="console-ts" x-text="formatTime(block.ts)"></span>
+                </div>
                 <div class="console-user-text" x-text="block.text"></div>
               </div>
             </template>
 
             <!-- Assistant text (markdown) -->
             <template x-if="block.type === 'assistant-text'">
-              <div class="console-assistant-text" x-html="block.html"></div>
+              <div class="console-assistant-text">
+                <div class="flex justify-end mb-1"><span class="console-ts" x-text="formatTime(block.ts)"></span></div>
+                <div x-html="block.html"></div>
+              </div>
             </template>
 
             <!-- Reasoning (collapsible) -->
             <template x-if="block.type === 'reasoning'">
               <div class="console-reasoning">
-                <button @click="toggleReasoning(block.id)" class="console-reasoning-toggle">
-                  <span x-text="isReasoningExpanded(block.id) ? '▼' : '▶'" class="text-[10px]"></span>
-                  <span class="italic">Thinking...</span>
-                </button>
+                <div class="flex items-center justify-between">
+                  <button @click="toggleReasoning(block.id)" class="console-reasoning-toggle">
+                    <span x-text="isReasoningExpanded(block.id) ? '▼' : '▶'" class="text-[10px]"></span>
+                    <span class="italic">Thinking...</span>
+                  </button>
+                  <span class="console-ts" x-text="formatTime(block.ts)"></span>
+                </div>
                 <div x-show="isReasoningExpanded(block.id)" x-cloak
                      class="console-reasoning-text" x-text="block.text"></div>
               </div>
@@ -1522,11 +1532,16 @@
                   <span x-text="isToolExpanded(block.id) ? '▼' : '▶'" class="console-chevron"></span>
                   <span class="console-tool-name" x-text="block.tool"></span>
                   <span class="console-tool-subtitle" x-text="block.subtitle"></span>
-                  <span class="ml-auto flex items-center gap-1.5 flex-shrink-0" x-show="block.decision">
-                    <span :class="decisionClass(block.decision)"
-                          class="text-xs" x-text="block.decision"></span>
-                    <span class="text-muted text-xs" x-text="'(' + (block.risk || '?') + ')'"></span>
-                    <span class="text-muted text-xs" x-show="block.latency" x-text="block.latency"></span>
+                  <span class="ml-auto flex items-center gap-1.5 flex-shrink-0">
+                    <template x-if="block.decision">
+                      <span class="flex items-center gap-1.5">
+                        <span :class="decisionClass(block.decision)"
+                              class="text-xs" x-text="block.decision"></span>
+                        <span class="text-muted text-xs" x-text="'(' + (block.risk || '?') + ')'"></span>
+                        <span class="text-muted text-xs" x-show="block.latency" x-text="block.latency"></span>
+                      </span>
+                    </template>
+                    <span class="console-ts" x-text="formatTime(block.ts)"></span>
                   </span>
                 </div>
                 <div x-show="isToolExpanded(block.id)" x-cloak class="console-tool-body">
@@ -1544,26 +1559,36 @@
 
             <!-- Step finish -->
             <template x-if="block.type === 'step-finish'">
-              <div class="console-step-finish" x-text="block.summary"></div>
+              <div class="console-step-finish flex items-center justify-between">
+                <span></span>
+                <span x-text="block.summary"></span>
+                <span class="console-ts" x-text="formatTime(block.ts)"></span>
+              </div>
             </template>
 
             <!-- Subtask -->
             <template x-if="block.type === 'subtask'">
-              <div class="console-subtask">
-                <span class="console-subtask-label">Subtask:</span>
-                <span x-text="block.description"></span>
-                <span class="text-muted" x-show="block.agent" x-text="'(' + block.agent + ')'"></span>
-                <button x-show="block.childSessionId"
-                        @click="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: block.childSessionId } }))"
-                        class="text-brand-accent hover:underline text-xs ml-1">&rarr; Open Console</button>
+              <div class="console-subtask flex items-center justify-between">
+                <div>
+                  <span class="console-subtask-label">Subtask:</span>
+                  <span x-text="block.description"></span>
+                  <span class="text-muted" x-show="block.agent" x-text="'(' + block.agent + ')'"></span>
+                  <button x-show="block.childSessionId"
+                          @click="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: block.childSessionId } }))"
+                          class="text-brand-accent hover:underline text-xs ml-1">&rarr; Open Console</button>
+                </div>
+                <span class="console-ts" x-text="formatTime(block.ts)"></span>
               </div>
             </template>
 
             <!-- Lifecycle -->
             <template x-if="block.type === 'lifecycle'">
-              <div class="console-lifecycle">
-                <span x-text="block.event"></span>
-                <span x-show="block.status" x-text="'→ ' + block.status"></span>
+              <div class="console-lifecycle flex items-center justify-center gap-2">
+                <span>
+                  <span x-text="block.event"></span>
+                  <span x-show="block.status" x-text="'→ ' + block.status"></span>
+                </span>
+                <span class="console-ts" x-text="formatTime(block.ts)"></span>
               </div>
             </template>
           </div>
