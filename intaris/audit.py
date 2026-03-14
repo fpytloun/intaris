@@ -118,7 +118,7 @@ class AuditStore:
                     args_hash,
                     profile_version,
                     intention,
-                    1 if injection_detected else 0,
+                    injection_detected,
                 ),
             )
 
