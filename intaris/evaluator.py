@@ -11,8 +11,10 @@ For MCP proxy calls, the evaluator also supports:
 - Escalation retry: reuses a prior approval if the same tool+args
   combination was approved within the last 10 minutes.
 - args_hash storage for escalation retry lookups.
-- Approved path prefix cache: learns from LLM approvals to fast-path
-  subsequent reads to the same out-of-project directory.
+- Approved path prefix cache: learns from both LLM approvals and
+  user-approved escalations to fast-path subsequent reads to the same
+  out-of-project directory. Prefixes are merged when they share a deep
+  common ancestor (e.g., different npm packages under the same scope).
 """
 
 from __future__ import annotations
@@ -56,8 +58,13 @@ from intaris.session import SessionStore
 # Escalation retry: reuse approval if same tool+args approved within this window.
 _ESCALATION_RETRY_TTL_MINUTES = 10
 
-# Maximum number of approved path prefixes per session (LRU eviction).
+# Maximum number of approved path prefixes per session (FIFO eviction).
 _MAX_APPROVED_PATHS_PER_SESSION = 50
+
+# Minimum common ancestor depth (in path components) for prefix merging.
+# Prevents merging to overly broad prefixes like /Users or /home.
+# Example: /Users/foo/.cache/opencode = 4 components (excluding root).
+_MIN_MERGE_DEPTH = 4
 
 logger = logging.getLogger(__name__)
 
@@ -443,6 +450,8 @@ class Evaluator:
 
         # Learn from LLM approvals: cache path prefixes for path-reclassified
         # calls so subsequent reads to the same directory are fast-pathed.
+        # User-approved escalations are handled separately via
+        # learn_from_approved_escalation() called from POST /decision.
         if path_reclassified and decision.decision == "approve" and working_directory:
             for rp in resolved_paths:
                 if not is_path_within(rp, working_directory):
@@ -902,6 +911,56 @@ def _compute_path_prefix(resolved_path: str, working_directory: str) -> str:
         return os.path.normpath(parent)
 
     return os.sep.join(prefix_parts)
+
+
+def _try_merge_prefix(new_prefix: str, prefixes: list[str]) -> bool:
+    """Try to merge a new prefix with an existing one in the list.
+
+    If the new prefix shares a deep common ancestor (>= ``_MIN_MERGE_DEPTH``
+    path components) with an existing prefix, replaces the existing prefix
+    with the common ancestor. This naturally broadens the cache as the agent
+    explores related paths.
+
+    Example:
+        existing: ``/Users/foo/.cache/opencode/node_modules/@opencode-ai/sdk/dist``
+        new:      ``/Users/foo/.cache/opencode/node_modules/@opencode-ai/plugin/dist``
+        common:   ``/Users/foo/.cache/opencode/node_modules/@opencode-ai`` (depth 7)
+        → merges to ``/Users/foo/.cache/opencode/node_modules/@opencode-ai``
+
+    Modifies ``prefixes`` in place.
+
+    Args:
+        new_prefix: Normalized new prefix to add.
+        prefixes: Existing prefix list (modified in place if merged).
+
+    Returns:
+        True if merged (caller should not add the new prefix separately).
+    """
+    new_parts = os.path.normpath(new_prefix).split(os.sep)
+
+    for i, existing in enumerate(prefixes):
+        existing_parts = os.path.normpath(existing).split(os.sep)
+
+        # Find common prefix length
+        common_len = 0
+        for a, b in zip(new_parts, existing_parts):
+            if a != b:
+                break
+            common_len += 1
+
+        if common_len >= _MIN_MERGE_DEPTH:
+            merged = os.sep.join(new_parts[:common_len])
+            if merged != existing:
+                logger.info(
+                    "Merging path prefixes: %s + %s → %s",
+                    existing,
+                    new_prefix,
+                    merged,
+                )
+            prefixes[i] = merged
+            return True
+
+    return False
 
 
 def _compute_args_hash(args: dict[str, Any]) -> str:

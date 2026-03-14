@@ -138,6 +138,17 @@ async def resolve_decision(
                 if session_id:
                     alignment_barrier.acknowledge(ctx.user_id, session_id)
 
+        # Learn path prefixes from user-approved escalations so subsequent
+        # reads to the same or sibling directories are fast-pathed.
+        if record is not None and request.decision == "approve":
+            try:
+                from intaris.server import _get_evaluator
+
+                evaluator = _get_evaluator()
+                evaluator.learn_from_approved_escalation(record)
+            except Exception:
+                logger.debug("Could not learn path prefix from approval", exc_info=True)
+
         # Publish event to EventBus
         event_bus = getattr(http_request.app.state, "event_bus", None)
         if event_bus is not None and record is not None:

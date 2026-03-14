@@ -467,11 +467,17 @@ Relative paths are resolved against `working_directory` using `os.path.normpath(
 
 ### Approved path prefix cache (learning from approvals)
 
-The evaluator maintains an in-memory cache of approved path prefixes per session. When the LLM approves a read-only tool call that was reclassified to WRITE due to path policy, the evaluator caches the approved directory prefix. Subsequent reads under that prefix are fast-pathed as READ without LLM evaluation.
+The evaluator maintains an in-memory cache of approved path prefixes per session. When a read-only tool call that was reclassified to WRITE due to path policy is approved — either by the LLM directly or by a user resolving an escalation — the evaluator caches the approved directory prefix. Subsequent reads under that prefix are fast-pathed as READ without LLM evaluation.
+
+**Two learning paths:**
+- **LLM approval**: When the LLM approves a path-reclassified read, the prefix is cached immediately in the evaluate pipeline.
+- **User-approved escalation**: When a user approves an escalated read via `POST /decision`, the endpoint calls `evaluator.learn_from_approved_escalation()` which extracts file paths from the audit record, looks up the session's `working_directory`, and caches the prefix.
 
 **Prefix computation** uses a depth-aware heuristic:
 - **Sibling projects** (deep common ancestor with `working_directory`): prefix is one level deeper than the common ancestor. E.g., working in `/src/mnemory`, reading `/src/intaris/file.py` → prefix `/src/intaris`.
 - **Distant paths** (shallow common ancestor): prefix is the exact parent directory of the target file. E.g., reading `/var/log/app.log` → prefix `/var/log` (NOT `/var/`).
+
+**Prefix merging**: When a new prefix shares a deep common ancestor (≥ 4 path components) with an existing cached prefix, the two are merged into the common ancestor. This naturally broadens the cache as the agent explores related paths. E.g., approving `.../@opencode-ai/sdk/dist` then `.../@opencode-ai/plugin/dist` → merged to `.../@opencode-ai`.
 
 **Cache properties:**
 - In-memory, session-scoped (keyed by `(user_id, session_id)`)
@@ -481,10 +487,13 @@ The evaluator maintains an in-memory cache of approved path prefixes per session
 - Thread-safe via `threading.Lock()`
 - `deny_paths` always checked BEFORE the cache (deny wins over approval)
 - Periodic sweep removes entries for dead sessions
+- New prefixes already covered by a broader cached prefix are skipped
 
 ### LLM context injection
 
 When a WRITE-classified tool call goes to LLM evaluation and `working_directory` is set, the evaluator injects `project_path` into the evaluation context. The LLM system prompt instructs it to consider whether file operations are within the expected project scope.
+
+**User decision history**: The recent tool call history shown to the LLM includes user decisions on resolved escalations. Instead of just `[escalate]`, the LLM sees `[escalate→user:approve]` or `[escalate→user:deny]`. The system prompt instructs the LLM to treat user-approved escalations as strong precedent — if a user approved a read to a specific directory, similar reads to the same or sibling directories should be approved rather than re-escalated.
 
 ### Backward compatibility
 
