@@ -226,6 +226,9 @@ async def evaluate(
                                 "reasoning": result.get("reasoning"),
                                 "path": result["path"],
                                 "latency_ms": result["latency_ms"],
+                                "injection_detected": result.get(
+                                    "injection_detected", False
+                                ),
                                 "agent_id": agent_id,
                             },
                         }

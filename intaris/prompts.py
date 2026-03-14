@@ -1,13 +1,19 @@
 """Safety evaluation prompt templates for intaris.
 
 Contains the system prompt and JSON schema for LLM-based safety
-evaluation of tool calls.
+evaluation of tool calls. All untrusted data is wrapped in Unicode
+boundary tags and sanitized to prevent prompt injection.
 """
 
 from __future__ import annotations
 
 import json
 from typing import Any
+
+from intaris.sanitize import (
+    sanitize_for_prompt,
+    wrap_with_boundary,
+)
 
 # ── Safety Evaluation System Prompt ───────────────────────────────────
 
@@ -114,6 +120,10 @@ whether changes to these files introduce operational risks (e.g., \
 disabling authentication, exposing ports, removing approval gates) — \
 this is operational safety, not code review.
 
+## Anti-Injection
+
+{anti_injection}
+
 Respond with a JSON object matching the required schema.
 """
 
@@ -191,9 +201,12 @@ def build_evaluation_user_prompt(
     sections = []
 
     # Parent session intention (for sub-sessions — must be checked first)
+    # Wrapped in boundary tags to prevent injection via parent intention.
     if parent_intention:
+        safe_parent = sanitize_for_prompt(parent_intention)
         sections.append(
-            f"## Parent Session Intention\n{parent_intention}\n\n"
+            f"## Parent Session Intention\n"
+            f"{wrap_with_boundary(safe_parent, 'parent_intention')}\n\n"
             f"**This is a sub-session.** The tool call must be aligned "
             f"with BOTH the parent intention above AND the sub-session "
             f"intention below. If the tool call violates the parent "
@@ -201,16 +214,20 @@ def build_evaluation_user_prompt(
             f"aligns with the sub-session intention."
         )
 
-    # Session intention
-    sections.append(f"## Session Intention\n{intention}")
+    # Session intention — wrapped in boundary tags.
+    safe_intention = sanitize_for_prompt(intention)
+    sections.append(
+        f"## Session Intention\n{wrap_with_boundary(safe_intention, 'intention')}"
+    )
 
-    # Session policy (if any)
+    # Session policy (if any) — wrapped in boundary tags.
     if policy:
+        policy_str = sanitize_for_prompt(json.dumps(policy, indent=2))
         sections.append(
-            f"## Session Policy\n```json\n{json.dumps(policy, indent=2)}\n```"
+            f"## Session Policy\n{wrap_with_boundary(policy_str, 'policy')}"
         )
 
-    # Session statistics
+    # Session statistics (trusted data — no wrapping needed)
     stats_text = (
         f"Total calls: {session_stats.get('total_calls', 0)}, "
         f"Approved: {session_stats.get('approved_count', 0)}, "
@@ -219,7 +236,9 @@ def build_evaluation_user_prompt(
     )
     sections.append(f"## Session Statistics\n{stats_text}")
 
-    # Recent history
+    # Recent history — wrapped in boundary tags.
+    # History includes prior LLM reasoning which could be poisoned
+    # (feedback loop), so we sanitize and wrap the entire block.
     if recent_history:
         history_lines = []
         for record in recent_history[:10]:
@@ -234,27 +253,38 @@ def build_evaluation_user_prompt(
                 f"{_truncate(str(record.get('args_redacted', '')), 100)}"
             )
             if record.get("reasoning"):
-                line += f" — {_truncate(record['reasoning'], 80)}"
+                line += f" — {_truncate(record['reasoning'], 50)}"
             history_lines.append(line)
-        sections.append("## Recent Tool Call History\n" + "\n".join(history_lines))
+        history_text = "\n".join(history_lines)
+        safe_history = sanitize_for_prompt(history_text)
+        sections.append(
+            f"## Recent Tool Call History\n"
+            f"{wrap_with_boundary(safe_history, 'history')}"
+        )
     else:
         sections.append("## Recent Tool Call History\nNo previous calls.")
 
-    # Agent identity
+    # Agent identity — wrapped in boundary tags.
     if agent_id:
-        sections.append(f"## Agent Identity\n{agent_id}")
+        safe_agent = sanitize_for_prompt(agent_id)
+        sections.append(
+            f"## Agent Identity\n{wrap_with_boundary(safe_agent, 'agent_id')}"
+        )
 
-    # Additional context
+    # Additional context — wrapped in boundary tags.
     if context:
-        ctx_str = json.dumps(context, indent=2, default=str)
-        sections.append(f"## Additional Context\n```json\n{ctx_str}\n```")
+        ctx_str = sanitize_for_prompt(json.dumps(context, indent=2, default=str))
+        sections.append(
+            f"## Additional Context\n{wrap_with_boundary(ctx_str, 'context')}"
+        )
 
-    # Current tool call
-    args_str = json.dumps(args, indent=2, default=str)
+    # Current tool call — tool name and args wrapped in boundary tags.
+    safe_tool = sanitize_for_prompt(tool)
+    args_str = sanitize_for_prompt(json.dumps(args, indent=2, default=str))
     sections.append(
         f"## Current Tool Call\n"
-        f"**Tool**: {tool}\n"
-        f"**Arguments**:\n```json\n{args_str}\n```"
+        f"**Tool**: {wrap_with_boundary(safe_tool, 'tool_name')}\n"
+        f"**Arguments**:\n{wrap_with_boundary(args_str, 'tool_args')}"
     )
 
     return "\n\n".join(sections)
@@ -289,6 +319,10 @@ scope violations. Ambiguous cases should be considered aligned.
 (e.g., parent: "Build web app", child: "Write CSS styles").
 - A child session that explores related topics is fine \
 (e.g., parent: "Implement auth", child: "Research OAuth2 libraries").
+
+## Anti-Injection
+
+{anti_injection}
 
 Respond with a JSON object matching the required schema.
 """
@@ -333,9 +367,13 @@ def build_alignment_check_prompt(
     Returns:
         Formatted user prompt string.
     """
+    safe_parent = sanitize_for_prompt(parent_intention)
+    safe_child = sanitize_for_prompt(child_intention)
     return (
-        f"## Parent Session Intention\n{parent_intention}\n\n"
-        f"## Child Session Intention\n{child_intention}\n\n"
+        f"## Parent Session Intention\n"
+        f"{wrap_with_boundary(safe_parent, 'parent_intention')}\n\n"
+        f"## Child Session Intention\n"
+        f"{wrap_with_boundary(safe_child, 'intention')}\n\n"
         f"Is the child session's intention compatible with the parent's?"
     )
 

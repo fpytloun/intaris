@@ -53,6 +53,7 @@ from intaris.prompts import (
     build_evaluation_user_prompt,
 )
 from intaris.redactor import redact
+from intaris.sanitize import ANTI_INJECTION_PREAMBLE
 from intaris.session import SessionStore
 
 # Escalation retry: reuse approval if same tool+args approved within this window.
@@ -270,6 +271,27 @@ class Evaluator:
         # Redact secrets from args
         args_redacted = redact(args)
 
+        # Scan for prompt injection patterns in tool args (log-only).
+        # This runs AFTER redaction so we scan what the LLM will see.
+        from intaris.sanitize import (
+            detect_injection_patterns,
+            log_injection_warning,
+        )
+
+        _injection_detected = False
+        args_text = json.dumps(args_redacted, default=str)
+        findings = detect_injection_patterns(args_text)
+        if findings:
+            log_injection_warning("tool_args", args_text, findings)
+            _injection_detected = True
+
+        # Also scan the session intention
+        intention_text = session.get("intention", "")
+        intention_findings = detect_injection_patterns(intention_text)
+        if intention_findings:
+            log_injection_warning("intention", intention_text, intention_findings)
+            _injection_detected = True
+
         # Compute args_hash for escalation retry lookups
         args_hash = _compute_args_hash(args)
 
@@ -483,6 +505,7 @@ class Evaluator:
             args_hash=args_hash,
             profile_version=profile_version,
             intention=session.get("intention"),
+            injection_detected=_injection_detected,
         )
 
         # Step 8: Update session counters
@@ -534,6 +557,7 @@ class Evaluator:
             "latency_ms": latency_ms,
             "args_redacted": args_redacted,
             "classification": classification.value,
+            "injection_detected": _injection_detected,
         }
 
     def _get_behavioral_context(self, user_id: str) -> dict[str, Any] | None:
@@ -828,7 +852,12 @@ class Evaluator:
         )
 
         messages = [
-            {"role": "system", "content": SAFETY_EVALUATION_SYSTEM_PROMPT},
+            {
+                "role": "system",
+                "content": SAFETY_EVALUATION_SYSTEM_PROMPT.format(
+                    anti_injection=ANTI_INJECTION_PREAMBLE,
+                ),
+            },
             {"role": "user", "content": user_prompt},
         ]
 
@@ -838,7 +867,10 @@ class Evaluator:
                 json_schema=SAFETY_EVALUATION_SCHEMA,
                 max_tokens=1024,
             )
-            result = parse_json_response(raw)
+            result = parse_json_response(
+                raw,
+                expected_keys={"aligned", "risk", "reasoning", "decision"},
+            )
 
             evaluation = EvaluationResult(
                 aligned=bool(result.get("aligned", False)),

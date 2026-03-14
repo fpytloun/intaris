@@ -15,6 +15,8 @@ from typing import Any
 # ── L2 Session Summary ────────────────────────────────────────────────
 
 SESSION_SUMMARY_SYSTEM_PROMPT = """\
+{anti_injection}
+
 You are analyzing a completed activity window of an AI agent session.
 Given the session's declared intention and the audit trail of tool calls,
 generate a structured summary.
@@ -87,6 +89,8 @@ SESSION_SUMMARY_SCHEMA: dict[str, Any] = {
 # ── L3 Cross-Session Behavioral Analysis ──────────────────────────────
 
 BEHAVIORAL_ANALYSIS_SYSTEM_PROMPT = """\
+{anti_injection}
+
 You are a behavioral analyst reviewing multiple AI agent sessions for
 the same user. Your task is to identify patterns that are invisible at
 the individual session level.

@@ -25,6 +25,11 @@ from typing import Any
 from intaris.audit import AuditStore
 from intaris.db import Database
 from intaris.llm import LLMClient
+from intaris.sanitize import (
+    ANTI_INJECTION_PREAMBLE,
+    sanitize_for_prompt,
+    wrap_with_boundary,
+)
 from intaris.session import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -119,12 +124,13 @@ def generate_intention(
                 content = content[len("User message: ") :]
             user_messages.append(content[:200])
 
-    # Build prompt with user messages as primary signal
+    # Build prompt with user messages as primary signal.
+    # All untrusted data is sanitized and wrapped in boundary tags.
     details = session.get("details") or {}
     wd = details.get("working_directory", "unknown")
 
     prompt_parts = [
-        f"Current intention: {session.get('intention', 'unknown')}",
+        f"Current intention: {sanitize_for_prompt(session.get('intention', 'unknown'))}",
         f"Working directory: {wd}",
     ]
 
@@ -136,9 +142,11 @@ def generate_intention(
             parent_session = session_store.get(parent_session_id, user_id=user_id)
             parent_intention = parent_session.get("intention", "")
             if parent_intention:
+                safe_parent = sanitize_for_prompt(parent_intention)
                 prompt_parts.append(
                     f"Parent session intention (this is a sub-session — "
-                    f"stay within scope): {parent_intention}"
+                    f"stay within scope):\n"
+                    f"{wrap_with_boundary(safe_parent, 'parent_intention')}"
                 )
         except ValueError:
             logger.debug(
@@ -147,13 +155,16 @@ def generate_intention(
             )
 
     if user_messages:
-        msgs_text = "\n".join(f"  - {m}" for m in user_messages)
+        safe_msgs = "\n".join(f"  - {sanitize_for_prompt(m)}" for m in user_messages)
         prompt_parts.append(
-            f"User messages (primary signal — the user's own words):\n{msgs_text}"
+            f"User messages (primary signal — the user's own words):\n"
+            f"{wrap_with_boundary(safe_msgs, 'user_messages')}"
         )
     if tool_summary:
-        tools_text = "\n".join(tool_summary)
-        prompt_parts.append(f"Recent tool calls:\n{tools_text}")
+        safe_tools = sanitize_for_prompt("\n".join(tool_summary))
+        prompt_parts.append(
+            f"Recent tool calls:\n{wrap_with_boundary(safe_tools, 'tool_summary')}"
+        )
     prompt_parts.append("Generate a concise session description:")
 
     messages = [
@@ -165,7 +176,7 @@ def generate_intention(
                 "sentence (max 100 words) describing what the user is working "
                 "on. User messages are the most important signal — they "
                 "capture the user's actual intent. Focus on the goal, not "
-                "the tools."
+                f"the tools.\n\n{ANTI_INJECTION_PREAMBLE}"
             ),
         },
         {

@@ -218,8 +218,12 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 # No auth configured (dev mode) — read identity from headers
                 _set_user_from_header(request)
 
-            # Always read agent_id from header
-            agent_id = request.headers.get("x-agent-id", "").strip() or None
+            # Always read agent_id from header — validated against a
+            # strict pattern to prevent prompt injection via the header.
+            from intaris.sanitize import validate_agent_id
+
+            raw_agent_id = request.headers.get("x-agent-id", "").strip() or None
+            agent_id = validate_agent_id(raw_agent_id) if raw_agent_id else None
             _session_agent_id.set(agent_id)
 
             # Read optional intention hint for MCP proxy sessions

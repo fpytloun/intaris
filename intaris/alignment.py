@@ -41,6 +41,7 @@ from intaris.prompts import (
     ALIGNMENT_CHECK_SYSTEM_PROMPT,
     build_alignment_check_prompt,
 )
+from intaris.sanitize import ANTI_INJECTION_PREAMBLE
 from intaris.session import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -79,14 +80,22 @@ def check_intention_alignment(
 
         raw = llm.generate(
             [
-                {"role": "system", "content": ALIGNMENT_CHECK_SYSTEM_PROMPT},
+                {
+                    "role": "system",
+                    "content": ALIGNMENT_CHECK_SYSTEM_PROMPT.format(
+                        anti_injection=ANTI_INJECTION_PREAMBLE,
+                    ),
+                },
                 {"role": "user", "content": user_prompt},
             ],
             json_schema=ALIGNMENT_CHECK_SCHEMA,
             temperature=0.1,
         )
 
-        result = parse_json_response(raw)
+        result = parse_json_response(
+            raw,
+            expected_keys={"aligned", "reasoning"},
+        )
         aligned = bool(result.get("aligned", True))
         reasoning = str(result.get("reasoning", ""))
         return aligned, reasoning

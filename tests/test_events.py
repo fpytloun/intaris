@@ -9,7 +9,6 @@ Tests cover:
 
 from __future__ import annotations
 
-import json
 import threading
 
 import pytest
@@ -24,7 +23,6 @@ from intaris.events.backend import (
     _validate_path_component,
 )
 from intaris.events.store import VALID_EVENT_TYPES, EventStore
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 

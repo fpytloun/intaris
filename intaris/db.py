@@ -362,6 +362,12 @@ class Database:
             )
             logger.info("Migration: added alignment_overridden column to sessions")
 
+        if not self._sqlite_column_exists(conn, "audit_log", "injection_detected"):
+            conn.execute(
+                "ALTER TABLE audit_log ADD COLUMN injection_detected INTEGER DEFAULT 0"
+            )
+            logger.info("Migration: added injection_detected column to audit_log")
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
             "ON sessions(status, last_activity_at)"
@@ -451,6 +457,7 @@ class Database:
                 ("sessions", "agent_id", "TEXT"),
                 ("notification_channels", "events", "TEXT"),
                 ("sessions", "alignment_overridden", "BOOLEAN DEFAULT FALSE"),
+                ("audit_log", "injection_detected", "BOOLEAN DEFAULT FALSE"),
             ]
             for table, column, col_type in migrations:
                 cur.execute(
@@ -561,6 +568,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     user_note TEXT,
     resolved_at TEXT,
     args_hash TEXT,
+    injection_detected INTEGER DEFAULT 0,
     FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
 );
 
@@ -776,6 +784,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     args_hash TEXT,
     profile_version INTEGER,
     intention TEXT,
+    injection_detected BOOLEAN DEFAULT FALSE,
     FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
 );
 

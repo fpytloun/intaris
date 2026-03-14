@@ -50,6 +50,7 @@ class AuditStore:
         args_hash: str | None = None,
         profile_version: int | None = None,
         intention: str | None = None,
+        injection_detected: bool = False,
     ) -> dict[str, Any]:
         """Insert an audit record.
 
@@ -72,6 +73,8 @@ class AuditStore:
             args_hash: SHA-256 hash of canonical args for escalation retry.
             profile_version: Behavioral profile version at time of evaluation.
             intention: Session intention at time of evaluation (for tracking).
+            injection_detected: Whether prompt injection patterns were detected
+                in the tool args or session intention.
 
         Returns:
             The created audit record as a dict.
@@ -92,8 +95,8 @@ class AuditStore:
                     (id, call_id, record_type, user_id, session_id, agent_id,
                      timestamp, tool, args_redacted, content, classification,
                      evaluation_path, decision, risk, reasoning, latency_ms,
-                     args_hash, profile_version, intention)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     args_hash, profile_version, intention, injection_detected)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record_id,
@@ -115,6 +118,7 @@ class AuditStore:
                     args_hash,
                     profile_version,
                     intention,
+                    1 if injection_detected else 0,
                 ),
             )
 

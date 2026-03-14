@@ -29,6 +29,25 @@ class EvaluateRequest(BaseModel):
         ),
     )
 
+    @model_validator(mode="after")
+    def _validate_payload_sizes(self) -> EvaluateRequest:
+        """Reject oversized args and context dicts to limit injection surface."""
+        import json
+
+        if self.args:
+            raw_args = json.dumps(self.args, separators=(",", ":"), default=str)
+            if len(raw_args) > 65536:
+                raise ValueError(
+                    f"args dict exceeds 64 KB limit ({len(raw_args)} bytes)"
+                )
+        if self.context is not None:
+            raw_ctx = json.dumps(self.context, separators=(",", ":"), default=str)
+            if len(raw_ctx) > 8192:
+                raise ValueError(
+                    f"context dict exceeds 8 KB limit ({len(raw_ctx)} bytes)"
+                )
+        return self
+
 
 class EvaluateResponse(BaseModel):
     """Response from tool call evaluation."""
@@ -41,6 +60,13 @@ class EvaluateResponse(BaseModel):
     risk: str | None = Field(None, description="Risk level")
     path: str = Field(..., description="Evaluation path: fast, critical, or llm")
     latency_ms: int = Field(..., description="Evaluation latency in ms")
+    injection_detected: bool = Field(
+        False,
+        description=(
+            "Whether prompt injection patterns were detected in the tool "
+            "arguments or session intention during evaluation."
+        ),
+    )
     session_status: str | None = Field(
         None,
         description=(
@@ -58,6 +84,35 @@ class EvaluateResponse(BaseModel):
 # ── Intention / Session ───────────────────────────────────────────────
 
 
+class SessionPolicy(BaseModel):
+    """Typed session policy with known keys only.
+
+    Prevents arbitrary JSON keys from being serialized into LLM prompts,
+    which could be used for prompt injection attacks.
+    """
+
+    allow_tools: list[str] | None = Field(
+        None, description="Glob patterns for tools to auto-allow"
+    )
+    deny_tools: list[str] | None = Field(
+        None, description="Glob patterns for tools to auto-deny"
+    )
+    allow_commands: list[str] | None = Field(
+        None, description="Glob patterns for bash commands to auto-allow"
+    )
+    deny_commands: list[str] | None = Field(
+        None, description="Glob patterns for bash commands to auto-deny"
+    )
+    allow_paths: list[str] | None = Field(
+        None, description="Glob patterns for filesystem paths to allow"
+    )
+    deny_paths: list[str] | None = Field(
+        None, description="Glob patterns for filesystem paths to deny"
+    )
+
+    model_config = {"extra": "ignore"}
+
+
 class IntentionRequest(BaseModel):
     """Request to declare a session intention."""
 
@@ -66,12 +121,28 @@ class IntentionRequest(BaseModel):
     details: dict[str, Any] | None = Field(
         None, description="Session details (repo, branch, constraints)"
     )
-    policy: dict[str, Any] | None = Field(
+    policy: SessionPolicy | dict[str, Any] | None = Field(
         None, description="Session policy (custom rules)"
     )
     parent_session_id: str | None = Field(
         None, description="Parent session ID for continuation chains"
     )
+
+    @model_validator(mode="after")
+    def _normalize_policy(self) -> IntentionRequest:
+        """Validate and normalize policy to a plain dict with known keys.
+
+        Accepts either a SessionPolicy or a raw dict. Unknown keys are
+        silently dropped (SessionPolicy has ``extra="ignore"``). The
+        result is always stored as a plain dict for downstream
+        compatibility with the classifier and evaluator.
+        """
+        if isinstance(self.policy, dict):
+            validated = SessionPolicy(**self.policy)
+            self.policy = validated.model_dump(exclude_none=True)
+        elif isinstance(self.policy, SessionPolicy):
+            self.policy = self.policy.model_dump(exclude_none=True)
+        return self
 
 
 class IntentionResponse(BaseModel):
@@ -148,6 +219,7 @@ class AuditRecord(BaseModel):
     reasoning: str | None = None
     latency_ms: int
     intention: str | None = None
+    injection_detected: bool = False
     user_decision: str | None = None
     user_note: str | None = None
     resolved_at: str | None = None

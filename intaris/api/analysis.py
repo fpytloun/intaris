@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -32,6 +31,7 @@ from intaris.api.schemas import (
     SessionSummaryRecord,
     SummaryTriggerResponse,
 )
+from intaris.sanitize import _INJECTION_PATTERNS as _SANITIZE_PATTERNS
 
 logger = logging.getLogger(__name__)
 
@@ -39,21 +39,10 @@ router = APIRouter()
 
 # ── Text Sanitization ─────────────────────────────────────────────────
 
-# Patterns that could be prompt injection attempts in agent-reported text.
-_INJECTION_PATTERNS = [
-    re.compile(r"<\|im_start\|>", re.IGNORECASE),
-    re.compile(r"<\|im_end\|>", re.IGNORECASE),
-    re.compile(r"\[INST\]", re.IGNORECASE),
-    re.compile(r"\[/INST\]", re.IGNORECASE),
-    re.compile(r"<<SYS>>", re.IGNORECASE),
-    re.compile(r"<</SYS>>", re.IGNORECASE),
-    re.compile(r"^system\s*:", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^assistant\s*:", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^user\s*:", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"<\|system\|>", re.IGNORECASE),
-    re.compile(r"<\|user\|>", re.IGNORECASE),
-    re.compile(r"<\|assistant\|>", re.IGNORECASE),
-]
+# Injection patterns used for stripping. Reuses the comprehensive
+# pattern set from sanitize.py (which covers chat templates, role
+# impersonation, instruction overrides, boundary tag escapes, etc.)
+# rather than maintaining a separate subset here.
 
 
 def _sanitize_agent_text(text: str) -> str:
@@ -62,6 +51,9 @@ def _sanitize_agent_text(text: str) -> str:
     Defense-in-depth: agent text is never included in analysis prompts,
     but we sanitize on storage as an additional safety layer.
 
+    Uses the comprehensive pattern set from ``intaris.sanitize`` to
+    detect and strip injection attempts.
+
     Args:
         text: Raw agent-reported text.
 
@@ -69,11 +61,12 @@ def _sanitize_agent_text(text: str) -> str:
         Sanitized text with injection patterns removed.
     """
     sanitized = text
-    for pattern in _INJECTION_PATTERNS:
+    for category, pattern in _SANITIZE_PATTERNS:
         if pattern.search(sanitized):
             logger.warning(
-                "Sanitized injection pattern from agent text: %s",
+                "Sanitized injection pattern from agent text: %s (%s)",
                 pattern.pattern,
+                category,
             )
             sanitized = pattern.sub("", sanitized)
     return sanitized.strip()

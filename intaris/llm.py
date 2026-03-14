@@ -83,9 +83,11 @@ class LLMClient:
                 return result
             except Exception:
                 if self._supports_structured is None:
-                    logger.debug(
+                    logger.warning(
                         "Structured outputs not supported by provider, "
-                        "falling back to JSON mode"
+                        "falling back to JSON mode. Schema enum constraints "
+                        "will NOT be enforced — prompt injection resistance "
+                        "is reduced."
                     )
                     self._supports_structured = False
                 else:
@@ -281,8 +283,18 @@ def _clean_response(text: str) -> str:
     return text.strip()
 
 
-def parse_json_response(text: str) -> dict[str, Any]:
+def parse_json_response(
+    text: str,
+    *,
+    expected_keys: set[str] | None = None,
+) -> dict[str, Any]:
     """Parse a JSON response from the LLM, with fallback extraction.
+
+    Args:
+        text: Raw LLM response text.
+        expected_keys: If provided, validates that the parsed dict contains
+            only these keys. Extra keys are logged and stripped as a
+            defense against prompt injection that adds unexpected fields.
 
     Raises:
         ValueError: If no valid JSON can be extracted.
@@ -292,7 +304,7 @@ def parse_json_response(text: str) -> dict[str, Any]:
     try:
         result = json.loads(text)
         if isinstance(result, dict):
-            return result
+            return _validate_keys(result, expected_keys)
     except json.JSONDecodeError:
         pass
 
@@ -301,8 +313,30 @@ def parse_json_response(text: str) -> dict[str, Any]:
         try:
             result = json.loads(match.group())
             if isinstance(result, dict):
-                return result
+                return _validate_keys(result, expected_keys)
         except json.JSONDecodeError:
             pass
 
     raise ValueError(f"Could not parse JSON from LLM response: {text[:200]}")
+
+
+def _validate_keys(
+    result: dict[str, Any],
+    expected_keys: set[str] | None,
+) -> dict[str, Any]:
+    """Strip unexpected keys from parsed JSON response.
+
+    Defense-in-depth: when the LLM is in JSON mode fallback (no schema
+    enforcement), prompt injection could cause extra keys to appear.
+    """
+    if expected_keys is None:
+        return result
+
+    extra = set(result.keys()) - expected_keys
+    if extra:
+        logger.warning(
+            "Stripped unexpected keys from LLM JSON response: %s",
+            extra,
+        )
+        return {k: v for k, v in result.items() if k in expected_keys}
+    return result
