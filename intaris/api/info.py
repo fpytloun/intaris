@@ -172,9 +172,14 @@ async def stats(
 
         # Activity timeline (evaluations per hour, last 24h)
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        # SQLite uses strftime(); PostgreSQL uses to_char().
+        if db.backend == "postgresql":
+            hour_expr = "to_char(timestamp, 'YYYY-MM-DD\"T\"HH24:00')"
+        else:
+            hour_expr = "strftime('%Y-%m-%dT%H:00', timestamp)"
         with db.cursor() as cur:
             cur.execute(
-                "SELECT strftime('%Y-%m-%dT%H:00', timestamp) as hour, "
+                f"SELECT {hour_expr} as hour, "
                 "COUNT(*) as cnt FROM audit_log "
                 f"WHERE user_id = ? AND timestamp >= ?{audit_agent_cond} "
                 "GROUP BY hour ORDER BY hour",

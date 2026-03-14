@@ -35,6 +35,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+postgresql = [
+    "psycopg2-binary>=2.9.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-timeout>=2.3.0",

@@ -8,7 +8,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Stage 1: Install dependencies only (cached layer).
 COPY pyproject.toml README.md ./
 COPY intaris/__init__.py intaris/__init__.py
-RUN uv pip install --system --no-cache "." \
+RUN uv pip install --system --no-cache ".[postgresql]" \
     && uv pip uninstall --system intaris
 
 # Stage 2: Copy full source and install the package (no deps needed).

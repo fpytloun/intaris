@@ -84,7 +84,10 @@ class SessionStore:
                     ),
                 )
             except Exception as e:
-                if "UNIQUE constraint" in str(e):
+                err_str = str(e)
+                # SQLite: "UNIQUE constraint failed: ..."
+                # PostgreSQL: psycopg2.errors.UniqueViolation (class 23505)
+                if "UNIQUE constraint" in err_str or "duplicate key" in err_str:
                     raise ValueError(f"Session {session_id} already exists") from e
                 raise
 

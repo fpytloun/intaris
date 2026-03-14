@@ -52,8 +52,6 @@ Approve or deny this call in the Intaris UI, then retry.
 - Session links does not work, it should show session details. We can use modal to open session details if linking to Sessions properly is an issue
 - There is online green dot on Approvals (Pending Approvals) but it is redundant as whole app now uses websockets and there is online status on intaris.
 
-## In progress
-
 - Sessions filters (All, Active, Idle) should only filter parent session if in tree view, child sessions when parent is expanded should be shown no matter of state.
 - Search sessions should not filter child sessions. It should query among parents and childs but always show parent + all it's children if tree view. We could also highlight matched string.
 - By default parent sessions should be collapsed and pagination limit should only affect parent sessions (in tree view)

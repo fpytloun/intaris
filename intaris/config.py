@@ -100,16 +100,27 @@ class LLMConfig:
 class DBConfig:
     """Database configuration.
 
-    Uses a plain file path for SQLite (dev). PostgreSQL support (prod)
-    will be added in a future phase.
+    Supports SQLite (dev) and PostgreSQL (prod) backends. The backend
+    is selected via DB_BACKEND env var. SQLite is the default for local
+    development — just run ``intaris`` with no database config.
+
+    For PostgreSQL, set DB_BACKEND=postgresql and DATABASE_URL to a
+    connection string like ``postgresql://user:pass@host:5432/intaris``.
     """
 
-    # Plain path for SQLite database file.
+    # Backend: "sqlite" (default) or "postgresql".
+    backend: str = field(default_factory=lambda: _env("DB_BACKEND", "sqlite"))
+
+    # SQLite: plain path for database file.
     path: str = field(
         default_factory=lambda: (
             _env("DB_PATH") or os.path.join(_data_dir(), "intaris.db")
         )
     )
+
+    # PostgreSQL: connection URL.
+    # Format: postgresql://user:password@host:port/dbname
+    database_url: str = field(default_factory=lambda: _env("DATABASE_URL"))
 
 
 @dataclass
@@ -316,6 +327,18 @@ class Config:
 
     def validate(self) -> None:
         """Validate that required configuration is present."""
+        # Database backend validation.
+        if self.db.backend not in ("sqlite", "postgresql"):
+            raise ValueError(
+                f"DB_BACKEND={self.db.backend} is not supported. "
+                "Use 'sqlite' or 'postgresql'."
+            )
+        if self.db.backend == "postgresql" and not self.db.database_url:
+            raise ValueError(
+                "DATABASE_URL is required when DB_BACKEND=postgresql. "
+                "Format: postgresql://user:password@host:port/dbname"
+            )
+
         if not self.llm.api_key:
             raise ValueError(
                 "LLM API key is required. Set LLM_API_KEY or OPENAI_API_KEY."
