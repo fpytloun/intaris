@@ -87,7 +87,10 @@ const centerTextPlugin = {
     const centerText = chart.options.plugins?.centerText;
     if (!centerText?.text) return;
 
-    const { ctx, chartArea: { left, right, top, bottom } } = chart;
+    const { ctx, chartArea } = chart;
+    if (!ctx || !chartArea) return;
+
+    const { left, right, top, bottom } = chartArea;
     const cx = (left + right) / 2;
     const cy = (top + bottom) / 2;
 
@@ -135,6 +138,7 @@ function dashboardTab() {
           this._startPeriodicRefresh();
         } else {
           this._stopPeriodicRefresh();
+          this._destroyAllCharts();
         }
       });
       window.addEventListener('intaris:user-changed', () => {
