@@ -77,6 +77,7 @@ class Evaluator:
         audit_store: AuditStore,
         db: Database | None = None,
         analysis_config: AnalysisConfig | None = None,
+        alignment_barrier: Any | None = None,
     ):
         self._llm = llm
         self._sessions = session_store
@@ -84,6 +85,7 @@ class Evaluator:
         self._db = db
         self._analysis_config = analysis_config
         self._analysis_enabled = analysis_config is not None and analysis_config.enabled
+        self._alignment_barrier = alignment_barrier
 
         # Approved path prefixes per session.
         # Key: (user_id, session_id) → set of normalized directory prefixes.
@@ -153,8 +155,10 @@ class Evaluator:
                 pass
 
         if session_status in ("completed", "suspended", "terminated"):
-            # Clean up approved paths cache for inactive sessions
+            # Clean up caches for inactive sessions
             self.clear_approved_paths(user_id, session_id)
+            if self._alignment_barrier is not None:
+                self._alignment_barrier.clear_session(user_id, session_id)
 
             status_reason = session.get("status_reason")
             reasoning = f"Session is {session_status} — evaluation denied"
@@ -198,6 +202,51 @@ class Evaluator:
             self._sessions.update_activity(session_id, user_id=user_id)
         except Exception:
             logger.debug("Failed to update session activity", exc_info=True)
+
+        # Check alignment misalignment (escalation-style, not suspension).
+        # If the alignment barrier detected a misalignment and the user
+        # has not yet acknowledged it, return escalate so the client can
+        # poll for user approval — same flow as tool escalation.
+        if self._alignment_barrier is not None:
+            misalignment_reason = self._alignment_barrier.is_misaligned(
+                user_id, session_id
+            )
+            if misalignment_reason:
+                latency_ms = int((time.monotonic() - start_time) * 1000)
+                args_redacted = redact(args)
+                args_hash = _compute_args_hash(args)
+                self._audit.insert(
+                    call_id=call_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    tool=tool,
+                    args_redacted=args_redacted,
+                    classification="write",
+                    evaluation_path="alignment",
+                    decision="escalate",
+                    risk="high",
+                    reasoning=misalignment_reason,
+                    latency_ms=latency_ms,
+                    args_hash=args_hash,
+                    intention=session.get("intention"),
+                )
+                try:
+                    self._sessions.increment_counter(
+                        session_id, "escalate", user_id=user_id
+                    )
+                except ValueError:
+                    pass
+                return {
+                    "call_id": call_id,
+                    "decision": "escalate",
+                    "reasoning": misalignment_reason,
+                    "risk": "high",
+                    "path": "alignment",
+                    "latency_ms": latency_ms,
+                    "args_redacted": args_redacted,
+                    "classification": "write",
+                }
 
         # Lookup behavioral profile for context injection
         profile_version: int | None = None

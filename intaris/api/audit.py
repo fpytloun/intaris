@@ -121,6 +121,23 @@ async def resolve_decision(
         except ValueError:
             pass  # Record not found — skip event and notification
 
+        # Acknowledge alignment override when user approves an alignment
+        # escalation. This prevents re-escalation for subsequent tool calls
+        # in the same session. The per-call LLM evaluation still injects
+        # parent_intention as defense-in-depth.
+        if (
+            record is not None
+            and request.decision == "approve"
+            and record.get("evaluation_path") == "alignment"
+        ):
+            alignment_barrier = getattr(
+                http_request.app.state, "alignment_barrier", None
+            )
+            if alignment_barrier is not None:
+                session_id = record.get("session_id")
+                if session_id:
+                    alignment_barrier.acknowledge(ctx.user_id, session_id)
+
         # Publish event to EventBus
         event_bus = getattr(http_request.app.state, "event_bus", None)
         if event_bus is not None and record is not None:

@@ -378,9 +378,12 @@ class IntentionBarrier:
                 # Chain alignment re-check for child sessions.
                 # When a child session's intention is updated (from user
                 # message), re-verify it's still aligned with the parent.
+                # Clear any prior alignment override so the barrier
+                # re-checks with the new intention.
                 if self._alignment_barrier is not None:
                     session = session_store.get(session_id, user_id=user_id)
                     if session.get("parent_session_id"):
+                        self._alignment_barrier.clear_override(user_id, session_id)
                         await self._alignment_barrier.trigger(user_id, session_id)
         except asyncio.CancelledError:
             logger.debug(

@@ -64,6 +64,9 @@ _READ_ONLY_TOOLS: set[str] = {
     "status",
     "whoami",
     "version",
+    # Task management tools (metadata only, no side effects)
+    "todoread",
+    "todowrite",
 }
 
 # Bash commands that are read-only (no arguments needed for classification).
@@ -594,8 +597,9 @@ def is_read_only(tool: str, args: dict[str, Any]) -> bool:
     Returns:
         True if the tool call is read-only by its nature.
     """
-    # Built-in read-only tools
-    if tool in _READ_ONLY_TOOLS:
+    # Built-in read-only tools (case-insensitive to handle both
+    # OpenCode lowercase and Claude Code capitalized conventions)
+    if tool.lower() in _READ_ONLY_TOOLS:
         return True
 
     # MCP tools (may be prefixed with server name)
@@ -609,7 +613,7 @@ def is_read_only(tool: str, args: dict[str, Any]) -> bool:
         if tool_name in _READ_ONLY_MCP_TOOLS:
             return True
 
-    # Bash commands
+    # Bash commands (case-sensitive — "bash" is always lowercase)
     if tool == "bash":
         return _is_read_only_bash(args)
 

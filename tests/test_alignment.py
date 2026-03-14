@@ -167,10 +167,10 @@ class TestAlignmentBarrier:
         assert barrier.check_count == 1
         assert barrier.misaligned_count == 0
 
-    def test_trigger_and_wait_misaligned_suspends(
+    def test_trigger_and_wait_misaligned_stores_in_memory(
         self, db, mock_llm_misaligned, session_store
     ):
-        """Trigger + wait for misaligned → session auto-suspended."""
+        """Trigger + wait for misaligned → misalignment stored in memory, session stays active."""
         session_store.create(
             user_id="user-1",
             session_id="parent-2",
@@ -192,11 +192,14 @@ class TestAlignmentBarrier:
 
         asyncio.run(_test())
 
-        # Session should be suspended with reason
+        # Session should still be active (not suspended)
         session = session_store.get("child-2", user_id="user-1")
-        assert session["status"] == "suspended"
-        assert session["status_reason"] is not None
-        assert "conflicts" in session["status_reason"].lower()
+        assert session["status"] == "active"
+
+        # Misalignment should be stored in barrier memory
+        reason = barrier.is_misaligned("user-1", "child-2")
+        assert reason is not None
+        assert "misaligned" in reason.lower() or "contradicts" in reason.lower()
         assert barrier.check_count == 1
         assert barrier.misaligned_count == 1
 
@@ -281,10 +284,10 @@ class TestAlignmentBarrier:
         # background task completed before we checked. The key assertion
         # is that the barrier timed out and returned True.
 
-    def test_event_bus_publishes_on_suspend(
+    def test_event_bus_publishes_on_misalignment(
         self, db, mock_llm_misaligned, session_store
     ):
-        """Auto-suspend publishes session_status_changed event."""
+        """Misalignment publishes session_alignment_failed event."""
         session_store.create(
             user_id="user-1",
             session_id="parent-ev",
@@ -307,13 +310,14 @@ class TestAlignmentBarrier:
 
         asyncio.run(_test())
 
-        # EventBus should have been called with session_status_changed
+        # EventBus should have been called with session_alignment_failed
         mock_bus.publish.assert_called_once()
         event = mock_bus.publish.call_args[0][0]
-        assert event["type"] == "session_status_changed"
+        assert event["type"] == "session_alignment_failed"
         assert event["session_id"] == "child-ev"
-        assert event["status"] == "suspended"
-        assert "status_reason" in event
+        assert event["user_id"] == "user-1"
+        assert event["parent_session_id"] == "parent-ev"
+        assert "reasoning" in event
 
     def test_metrics(self, db, mock_llm):
         """metrics() returns the expected keys."""
@@ -325,6 +329,334 @@ class TestAlignmentBarrier:
         assert "misaligned_count" in m
         assert "check_errors" in m
         assert "pending" in m
+
+
+class TestAlignmentBarrierAcknowledge:
+    """Tests for acknowledge(), clear_override(), clear_session(), restore_overrides()."""
+
+    def test_acknowledge_clears_misalignment(
+        self, db, mock_llm_misaligned, session_store
+    ):
+        """acknowledge() clears misalignment and prevents re-escalation."""
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-ack",
+            intention="Build a web app",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-ack",
+            intention="Delete everything",
+            parent_session_id="parent-ack",
+        )
+
+        barrier = _make_barrier(db, mock_llm_misaligned)
+
+        async def _test():
+            await barrier.trigger("user-1", "child-ack")
+            await barrier.wait("user-1", "child-ack")
+
+        asyncio.run(_test())
+
+        # Misalignment should be stored
+        assert barrier.is_misaligned("user-1", "child-ack") is not None
+
+        # Acknowledge the misalignment
+        barrier.acknowledge("user-1", "child-ack")
+
+        # Misalignment should be cleared
+        assert barrier.is_misaligned("user-1", "child-ack") is None
+
+        # Verify DB persistence
+        session = session_store.get("child-ack", user_id="user-1")
+        assert session.get("alignment_overridden") == 1
+
+    def test_acknowledge_prevents_re_escalation_after_recheck(
+        self, db, mock_llm_misaligned, session_store
+    ):
+        """After acknowledge, a re-triggered misalignment check does not re-escalate."""
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-reack",
+            intention="Build a web app",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-reack",
+            intention="Delete everything",
+            parent_session_id="parent-reack",
+        )
+
+        barrier = _make_barrier(db, mock_llm_misaligned)
+
+        async def _test():
+            await barrier.trigger("user-1", "child-reack")
+            await barrier.wait("user-1", "child-reack")
+
+        asyncio.run(_test())
+
+        # Acknowledge
+        barrier.acknowledge("user-1", "child-reack")
+
+        # Re-trigger alignment check (e.g., from intention update)
+        async def _recheck():
+            await barrier.trigger("user-1", "child-reack")
+            await barrier.wait("user-1", "child-reack")
+
+        asyncio.run(_recheck())
+
+        # Should still be overridden — no re-escalation
+        assert barrier.is_misaligned("user-1", "child-reack") is None
+
+    def test_clear_override_allows_re_escalation(
+        self, db, mock_llm_misaligned, session_store
+    ):
+        """clear_override() removes the override so re-check can re-escalate."""
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-clr",
+            intention="Build a web app",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-clr",
+            intention="Delete everything",
+            parent_session_id="parent-clr",
+        )
+
+        barrier = _make_barrier(db, mock_llm_misaligned)
+
+        async def _test():
+            await barrier.trigger("user-1", "child-clr")
+            await barrier.wait("user-1", "child-clr")
+
+        asyncio.run(_test())
+
+        # Acknowledge, then clear override
+        barrier.acknowledge("user-1", "child-clr")
+        assert barrier.is_misaligned("user-1", "child-clr") is None
+
+        barrier.clear_override("user-1", "child-clr")
+
+        # Verify DB persistence cleared
+        session = session_store.get("child-clr", user_id="user-1")
+        assert session.get("alignment_overridden") == 0
+
+        # Re-trigger — should re-escalate since override is cleared
+        async def _recheck():
+            await barrier.trigger("user-1", "child-clr")
+            await barrier.wait("user-1", "child-clr")
+
+        asyncio.run(_recheck())
+
+        assert barrier.is_misaligned("user-1", "child-clr") is not None
+
+    def test_clear_session_removes_all_state(
+        self, db, mock_llm_misaligned, session_store
+    ):
+        """clear_session() removes both misalignment and override state."""
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-cls",
+            intention="Build a web app",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-cls",
+            intention="Delete everything",
+            parent_session_id="parent-cls",
+        )
+
+        barrier = _make_barrier(db, mock_llm_misaligned)
+
+        async def _test():
+            await barrier.trigger("user-1", "child-cls")
+            await barrier.wait("user-1", "child-cls")
+
+        asyncio.run(_test())
+
+        # Acknowledge to add to overridden set
+        barrier.acknowledge("user-1", "child-cls")
+
+        # Clear session — should remove from both dicts
+        barrier.clear_session("user-1", "child-cls")
+
+        # Verify both are gone
+        assert barrier.is_misaligned("user-1", "child-cls") is None
+        m = barrier.metrics()
+        assert m["overridden_sessions"] == 0
+
+    def test_restore_overrides_from_db(self, db, session_store):
+        """restore_overrides() loads acknowledged sessions from DB on startup."""
+        from intaris.alignment import AlignmentBarrier
+
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-rst",
+            intention="Build a web app",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-rst",
+            intention="Something else",
+            parent_session_id="parent-rst",
+        )
+
+        # Manually set alignment_overridden in DB
+        session_store.set_alignment_overridden(
+            "child-rst", user_id="user-1", overridden=True
+        )
+
+        # Create a fresh barrier (simulating server restart)
+        mock_llm = MagicMock()
+        barrier = AlignmentBarrier(db=db, llm=mock_llm, timeout_ms=5000)
+
+        count = barrier.restore_overrides()
+        assert count == 1
+
+        # The session should be in the overridden set
+        assert barrier.is_misaligned("user-1", "child-rst") is None
+        m = barrier.metrics()
+        assert m["overridden_sessions"] == 1
+
+    def test_no_event_published_when_overridden(
+        self, db, mock_llm_misaligned, session_store
+    ):
+        """No event is published when misalignment is detected but user already acknowledged."""
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-noev",
+            intention="Build a web app",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-noev",
+            intention="Delete everything",
+            parent_session_id="parent-noev",
+        )
+
+        barrier = _make_barrier(db, mock_llm_misaligned)
+        mock_bus = MagicMock()
+        barrier.set_event_bus(mock_bus)
+
+        # First trigger — misalignment detected, event published
+        async def _first():
+            await barrier.trigger("user-1", "child-noev")
+            await barrier.wait("user-1", "child-noev")
+
+        asyncio.run(_first())
+        mock_bus.publish.assert_called_once()
+        mock_bus.reset_mock()
+
+        # Acknowledge
+        barrier.acknowledge("user-1", "child-noev")
+
+        # Re-trigger — misalignment detected again but overridden, no event
+        async def _second():
+            await barrier.trigger("user-1", "child-noev")
+            await barrier.wait("user-1", "child-noev")
+
+        asyncio.run(_second())
+        mock_bus.publish.assert_not_called()
+
+
+class TestAlignmentEscalation:
+    """Tests for the evaluator returning escalate for misaligned sessions."""
+
+    def test_evaluator_returns_escalate_for_misaligned(self, db, session_store):
+        """Evaluator returns decision=escalate with path=alignment for misaligned sessions."""
+        from intaris.audit import AuditStore
+        from intaris.evaluator import Evaluator
+
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-esc",
+            intention="Build feature X",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-esc",
+            intention="Delete everything",
+            parent_session_id="parent-esc",
+        )
+
+        audit_store = AuditStore(db)
+        mock_llm = MagicMock()
+
+        # Create a barrier with misalignment pre-loaded
+        from intaris.alignment import AlignmentBarrier
+
+        barrier = AlignmentBarrier(db=db, llm=mock_llm, timeout_ms=5000)
+        # Manually inject misalignment
+        barrier._misaligned[("user-1", "child-esc")] = (
+            "Child session misaligned with parent: intentions conflict"
+        )
+
+        evaluator = Evaluator(
+            llm=mock_llm,
+            session_store=session_store,
+            audit_store=audit_store,
+            alignment_barrier=barrier,
+        )
+
+        result = evaluator.evaluate(
+            user_id="user-1",
+            session_id="child-esc",
+            agent_id=None,
+            tool="bash",
+            args={"command": "rm -rf /"},
+        )
+
+        assert result["decision"] == "escalate"
+        assert result["path"] == "alignment"
+        assert result["risk"] == "high"
+        assert "misaligned" in result["reasoning"].lower()
+
+    def test_evaluator_normal_after_acknowledge(self, db, session_store):
+        """After acknowledge, evaluator proceeds with normal evaluation."""
+        from intaris.audit import AuditStore
+        from intaris.evaluator import Evaluator
+
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-norm",
+            intention="Build feature X",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-norm",
+            intention="Help with feature X",
+            parent_session_id="parent-norm",
+        )
+
+        audit_store = AuditStore(db)
+        mock_llm = MagicMock()
+
+        from intaris.alignment import AlignmentBarrier
+
+        barrier = AlignmentBarrier(db=db, llm=mock_llm, timeout_ms=5000)
+        # Inject misalignment then acknowledge
+        barrier._misaligned[("user-1", "child-norm")] = "Some misalignment"
+        barrier.acknowledge("user-1", "child-norm")
+
+        evaluator = Evaluator(
+            llm=mock_llm,
+            session_store=session_store,
+            audit_store=audit_store,
+            alignment_barrier=barrier,
+        )
+
+        # Read-only tool → fast-path approve (no LLM needed)
+        result = evaluator.evaluate(
+            user_id="user-1",
+            session_id="child-norm",
+            agent_id=None,
+            tool="read",
+            args={"path": "/tmp/test.txt"},
+        )
+
+        assert result["decision"] == "approve"
+        assert result["path"] == "fast"
 
 
 # ── Parent lifecycle cascade tests ────────────────────────────────────

@@ -279,6 +279,17 @@ The `audit_log` table supports multiple record types via the `record_type` colum
 
 For `tool_call` records, `tool`, `args_redacted`, and `classification` are populated. For `reasoning`, `checkpoint`, and `summary` records, `content` holds the text and tool-specific fields are null. All record types share `decision`, `risk`, `reasoning`, `evaluation_path`, and `latency_ms`. The `profile_version` column records the behavioral profile version at time of evaluation.
 
+### Evaluation paths
+
+The `evaluation_path` column indicates how the decision was reached:
+
+| Path | Description |
+|---|---|
+| `fast` | Read-only auto-approve, escalation retry, or session status deny |
+| `critical` | Critical pattern auto-deny |
+| `llm` | LLM safety evaluation → decision matrix |
+| `alignment` | Alignment misalignment escalation (child session intention conflicts with parent) |
+
 ## Intention Model
 
 Session intention is **user-driven only** — only user messages, explicit declarations, and client-side title changes can update it. Agent tool calls never redefine intention.
@@ -318,10 +329,11 @@ The `AlignmentBarrier` (`alignment.py`) enforces parent/child session intention 
 **Flow:**
 
 1. **Trigger at creation**: `POST /intention` with `parent_session_id` → validates parent exists → creates session (status=active) → triggers `alignment_barrier.trigger()` async.
-2. **Trigger on intention update**: When `IntentionBarrier` completes an intention update for a child session, or when `PATCH /session/{id}` updates a child session's intention, a re-check is triggered via `alignment_barrier.trigger()`.
+2. **Trigger on intention update**: When `IntentionBarrier` completes an intention update for a child session, or when `PATCH /session/{id}` updates a child session's intention, a re-check is triggered via `alignment_barrier.trigger()`. The `alignment_overridden` flag is cleared before re-triggering so the new intention is re-evaluated.
 3. **Wait at evaluate**: `POST /evaluate` calls `await alignment_barrier.wait()` after the intention barrier wait. If a check is pending, it blocks up to `ALIGNMENT_BARRIER_TIMEOUT_MS` (default 15s).
-4. **Auto-suspend on misalignment**: If the LLM determines the child intention contradicts the parent, the barrier auto-suspends the session with a `status_reason` explaining why.
-5. **Fail-open**: If the LLM call fails or times out, the session stays active. Per-call LLM evaluation still catches misaligned WRITE calls.
+4. **Escalate on misalignment**: If the LLM determines the child intention contradicts the parent, the barrier stores the misalignment in memory. The evaluator returns `decision=escalate` with `evaluation_path=alignment` for subsequent tool calls. The client handles this like any other escalation (poll for user approval via `POST /decision`).
+5. **User acknowledgment**: When the user approves the alignment escalation via `POST /decision`, the `alignment_overridden` flag is set on the session (persisted to DB). Subsequent tool calls proceed through normal LLM evaluation with `parent_intention` injected as defense-in-depth.
+6. **Fail-open**: If the LLM call fails or times out, the session stays active. Per-call LLM evaluation still catches misaligned WRITE calls.
 
 **Timing budget (worst case, first evaluate of new child session):**
 - Intention barrier wait: up to 1s
@@ -334,15 +346,18 @@ This worst case only applies to the very first evaluate call. Subsequent calls h
 **Parent lifecycle cascade**: The evaluator also checks parent session status on every evaluate call for child sessions. If the parent is terminated or suspended, the child is auto-suspended with `status_reason = "Parent session is {status}"`.
 
 **Client-side handling** (OpenCode plugin):
-- `session_status === "suspended"` in evaluate response → enter polling loop (poll `GET /session/{id}` with exponential backoff). If reactivated → allow tool call. If terminated → throw error.
+- `decision === "escalate"` with `path === "alignment"` → enters the standard escalation polling loop (poll `GET /audit/{call_id}` with exponential backoff). When user approves → tool call proceeds. When user denies → tool call blocked.
+- `session_status === "suspended"` → only for parent lifecycle cascade (parent terminated/suspended). Enter polling loop for session status.
 - `session_status === "terminated"` → throw error immediately (hard kill).
-- Reuses `INTARIS_ESCALATION_TIMEOUT` for max wait time during suspension.
+- Reuses `INTARIS_ESCALATION_TIMEOUT` for max wait time.
 
 **Design principles:**
 - No tool calls execute before alignment is verified (barrier blocks first evaluate)
+- Misalignment → escalation (not suspension) so the user can approve via standard UI
 - Cancel-and-restart on re-trigger (e.g., intention update while check is in flight)
-- User can override by reactivating in the UI (no re-check on reactivation)
-- `status_reason` column on sessions stores the suspension reason; cleared on reactivation
+- User acknowledgment persisted via `alignment_overridden` column (survives server restart)
+- Intention changes clear the override flag and re-trigger alignment check
+- `alignment_overridden` restored from DB on startup; active non-overridden child sessions re-checked
 
 | Env Var | Default | Description |
 |---|---|---|

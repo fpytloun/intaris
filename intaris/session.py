@@ -363,6 +363,73 @@ class SessionStore:
                 (now, session_id, user_id),
             )
 
+    def set_alignment_overridden(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        overridden: bool,
+    ) -> None:
+        """Set or clear the alignment_overridden flag on a session.
+
+        Called when a user acknowledges (approves) an alignment escalation,
+        or when the child session's intention changes (clears the flag so
+        the alignment barrier re-checks).
+
+        Args:
+            session_id: Session to update.
+            user_id: Tenant identifier (must match session owner).
+            overridden: True to mark as overridden, False to clear.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET alignment_overridden = ?, updated_at = ?
+                WHERE session_id = ? AND user_id = ?
+                """,
+                (1 if overridden else 0, now, session_id, user_id),
+            )
+
+    def get_active_child_sessions(
+        self,
+        *,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get active child sessions that need alignment re-checking.
+
+        Returns child sessions (parent_session_id IS NOT NULL) that are
+        active and have NOT been alignment-overridden by the user. Used
+        on startup to re-trigger alignment checks after server restart.
+
+        Args:
+            user_id: Optional tenant filter. If None, returns for all users.
+
+        Returns:
+            List of dicts with user_id and session_id.
+        """
+        conditions = [
+            "parent_session_id IS NOT NULL",
+            "status = 'active'",
+            "COALESCE(alignment_overridden, 0) = 0",
+        ]
+        params: list[Any] = []
+
+        if user_id is not None:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+
+        where = " AND ".join(conditions)
+        with self._db.cursor() as cur:
+            cur.execute(
+                f"SELECT user_id, session_id FROM sessions WHERE {where}",
+                params,
+            )
+            rows = cur.fetchall()
+
+        return [{"user_id": row[0], "session_id": row[1]} for row in rows]
+
     def list_sessions(
         self,
         *,

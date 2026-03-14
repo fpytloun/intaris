@@ -5,13 +5,21 @@ alignment check runs against the parent session's intention using the
 analysis LLM. The first POST /evaluate call waits for the check to
 complete before proceeding — same barrier pattern as IntentionBarrier.
 
+When misalignment is detected, the barrier stores the result in memory
+and the evaluator returns ``escalate`` (not ``deny``) for subsequent
+tool calls. The user can approve the escalation in the Intaris UI,
+which sets the ``alignment_overridden`` flag and allows tool calls to
+proceed through normal LLM evaluation.
+
 Design principles:
 - No tool calls execute before alignment is verified
+- Misalignment → escalation (not suspension) so the user can approve
 - Fail-open on LLM failure (session stays active, per-call eval catches
   misaligned WRITE calls)
 - Barrier is session-scoped: keyed by (user_id, session_id)
 - Cancel-and-restart on re-trigger (e.g., intention update while check
   is in flight)
+- User acknowledgment persisted via ``alignment_overridden`` DB column
 
 Components:
 - check_intention_alignment(): LLM-based alignment check function
@@ -23,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import threading
 from typing import Any
 
 from intaris.db import Database
@@ -93,11 +102,16 @@ class AlignmentBarrier:
     When a child session is created or its intention is updated:
     1. trigger() starts an async alignment check (non-blocking)
     2. The next evaluate() call waits for it to complete (up to timeout)
-    3. If misaligned, the barrier auto-suspends the session
+    3. If misaligned, the barrier stores the result and the evaluator
+       returns ``escalate`` for tool calls until the user acknowledges
     4. If a new trigger arrives while a check is running, cancel-and-restart
 
     This mirrors the IntentionBarrier pattern but for cross-session
     intention validation.
+
+    Thread safety: The ``_misaligned`` and ``_overridden`` dicts are
+    accessed from both async (barrier _run) and sync (evaluator) contexts.
+    A threading.Lock protects all mutations and reads.
     """
 
     def __init__(
@@ -113,6 +127,19 @@ class AlignmentBarrier:
         self._event_bus: Any | None = None
         self._pending: dict[tuple[str, str], tuple[asyncio.Event, asyncio.Task]] = {}
 
+        # Misalignment state: maps (user_id, session_id) → reasoning.
+        # Populated by _run() when alignment check fails. Cleared when
+        # user acknowledges or when alignment re-check passes.
+        self._misaligned: dict[tuple[str, str], str] = {}
+
+        # Override state: sessions where the user has acknowledged
+        # alignment misalignment via POST /decision. Prevents re-escalation
+        # after approval. Cleared when the child session's intention changes.
+        self._overridden: set[tuple[str, str]] = set()
+
+        # Thread safety for _misaligned and _overridden (evaluator is sync)
+        self._lock = threading.Lock()
+
         # Metrics
         self.wait_count: int = 0
         self.timeout_count: int = 0
@@ -127,8 +154,47 @@ class AlignmentBarrier:
         """
         self._event_bus = event_bus
 
+    def restore_overrides(self) -> int:
+        """Restore _overridden set from persisted alignment_overridden flags.
+
+        Called on startup to recover user acknowledgments after server
+        restart. Queries the sessions table for active child sessions
+        with alignment_overridden=1.
+
+        Returns:
+            Number of overrides restored.
+        """
+        session_store = SessionStore(self._db)
+        try:
+            with self._db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, session_id FROM sessions
+                    WHERE parent_session_id IS NOT NULL
+                      AND status IN ('active', 'idle')
+                      AND COALESCE(alignment_overridden, 0) = 1
+                    """
+                )
+                rows = cur.fetchall()
+
+            count = 0
+            with self._lock:
+                for row in rows:
+                    self._overridden.add((row[0], row[1]))
+                    count += 1
+
+            if count:
+                logger.info("Restored %d alignment override(s) from database", count)
+            return count
+        except Exception:
+            logger.debug("Failed to restore alignment overrides", exc_info=True)
+            return 0
+
     def metrics(self) -> dict[str, Any]:
         """Export barrier metrics for health check response."""
+        with self._lock:
+            misaligned_sessions = len(self._misaligned)
+            overridden_sessions = len(self._overridden)
         return {
             "wait_count": self.wait_count,
             "timeout_count": self.timeout_count,
@@ -136,7 +202,112 @@ class AlignmentBarrier:
             "misaligned_count": self.misaligned_count,
             "check_errors": self.check_errors,
             "pending": len(self._pending),
+            "misaligned_sessions": misaligned_sessions,
+            "overridden_sessions": overridden_sessions,
         }
+
+    # ── Public API for evaluator (thread-safe) ────────────────────────
+
+    def is_misaligned(self, user_id: str, session_id: str) -> str | None:
+        """Check if a session has a pending alignment misalignment.
+
+        Returns the misalignment reasoning if the session is misaligned
+        AND the user has not acknowledged it. Returns None otherwise.
+
+        Thread-safe — called from the synchronous evaluator.
+
+        Args:
+            user_id: Tenant identifier.
+            session_id: Session to check.
+
+        Returns:
+            Misalignment reasoning string, or None if aligned/overridden.
+        """
+        key = (user_id, session_id)
+        with self._lock:
+            if key in self._overridden:
+                return None
+            return self._misaligned.get(key)
+
+    def acknowledge(self, user_id: str, session_id: str) -> None:
+        """Acknowledge alignment misalignment (user approved escalation).
+
+        Adds the session to the override set and removes from misaligned.
+        Also persists the override flag to the database so it survives
+        server restarts.
+
+        Thread-safe — called from the POST /decision endpoint.
+
+        Args:
+            user_id: Tenant identifier.
+            session_id: Session to acknowledge.
+        """
+        key = (user_id, session_id)
+        with self._lock:
+            self._overridden.add(key)
+            self._misaligned.pop(key, None)
+
+        # Persist to database
+        try:
+            session_store = SessionStore(self._db)
+            session_store.set_alignment_overridden(
+                session_id, user_id=user_id, overridden=True
+            )
+        except Exception:
+            logger.debug(
+                "Failed to persist alignment_overridden for session %s",
+                session_id,
+                exc_info=True,
+            )
+
+    def clear_override(self, user_id: str, session_id: str) -> None:
+        """Clear the alignment override for a session.
+
+        Called when the child session's intention changes, so the
+        alignment barrier re-checks with the new intention. Also
+        clears the persisted flag in the database.
+
+        Thread-safe.
+
+        Args:
+            user_id: Tenant identifier.
+            session_id: Session to clear.
+        """
+        key = (user_id, session_id)
+        with self._lock:
+            self._overridden.discard(key)
+
+        # Clear in database
+        try:
+            session_store = SessionStore(self._db)
+            session_store.set_alignment_overridden(
+                session_id, user_id=user_id, overridden=False
+            )
+        except Exception:
+            logger.debug(
+                "Failed to clear alignment_overridden for session %s",
+                session_id,
+                exc_info=True,
+            )
+
+    def clear_session(self, user_id: str, session_id: str) -> None:
+        """Remove all alignment state for a session.
+
+        Called when a session transitions to completed/terminated to
+        prevent unbounded memory growth.
+
+        Thread-safe.
+
+        Args:
+            user_id: Tenant identifier.
+            session_id: Session to clean up.
+        """
+        key = (user_id, session_id)
+        with self._lock:
+            self._misaligned.pop(key, None)
+            self._overridden.discard(key)
+
+    # ── Barrier pattern (async) ───────────────────────────────────────
 
     async def trigger(self, user_id: str, session_id: str) -> None:
         """Start an async alignment check. Non-blocking.
@@ -213,8 +384,13 @@ class AlignmentBarrier:
     ) -> None:
         """Run alignment check in a thread executor, then signal.
 
-        If misaligned, auto-suspends the session and publishes an event.
-        The event is set in the finally block to always unblock waiters.
+        If misaligned and the user has not previously acknowledged,
+        stores the misalignment in ``_misaligned`` and publishes an
+        event. The evaluator will return ``escalate`` for subsequent
+        tool calls until the user approves.
+
+        If the user has already acknowledged (``_overridden``), the
+        check result is logged but not stored.
 
         Args:
             key: (user_id, session_id) tuple.
@@ -263,8 +439,10 @@ class AlignmentBarrier:
 
             if not aligned:
                 self.misaligned_count += 1
-                status_reason = (
-                    f"Child intention conflicts with parent session: {reasoning}"
+                misalignment_reason = (
+                    f"Child session misaligned with parent "
+                    f"({parent_session_id}): {reasoning}. "
+                    f"Parent intention: {parent_intention}"
                 )
                 logger.warning(
                     "Alignment check FAILED for session %s (parent=%s): %s",
@@ -273,25 +451,31 @@ class AlignmentBarrier:
                     reasoning,
                 )
 
-                # Auto-suspend the child session
-                session_store.update_status(
-                    session_id,
-                    "suspended",
-                    user_id=user_id,
-                    status_reason=status_reason,
-                )
+                # Store misalignment (unless user already acknowledged)
+                with self._lock:
+                    if key not in self._overridden:
+                        self._misaligned[key] = misalignment_reason
+                    else:
+                        logger.debug(
+                            "Alignment check failed but user already "
+                            "acknowledged for session %s — skipping",
+                            session_id,
+                        )
 
-                # Publish session_status_changed event
+                # Publish alignment_failed event (for UI notifications)
                 if self._event_bus is not None:
-                    self._event_bus.publish(
-                        {
-                            "type": "session_status_changed",
-                            "session_id": session_id,
-                            "user_id": user_id,
-                            "status": "suspended",
-                            "status_reason": status_reason,
-                        }
-                    )
+                    with self._lock:
+                        is_overridden = key in self._overridden
+                    if not is_overridden:
+                        self._event_bus.publish(
+                            {
+                                "type": "session_alignment_failed",
+                                "session_id": session_id,
+                                "user_id": user_id,
+                                "parent_session_id": parent_session_id,
+                                "reasoning": misalignment_reason,
+                            }
+                        )
             else:
                 logger.debug(
                     "Alignment check PASSED for session %s (parent=%s): %s",
@@ -299,6 +483,9 @@ class AlignmentBarrier:
                     parent_session_id,
                     reasoning,
                 )
+                # Clear any prior misalignment (intention may have changed)
+                with self._lock:
+                    self._misaligned.pop(key, None)
 
         except asyncio.CancelledError:
             logger.debug(

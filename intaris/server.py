@@ -79,7 +79,7 @@ def _get_db():
     return _db
 
 
-def _get_evaluator():
+def _get_evaluator(alignment_barrier=None):
     global _evaluator
     if _evaluator is None:
         from intaris.audit import AuditStore
@@ -95,6 +95,7 @@ def _get_evaluator():
             audit_store=AuditStore(db),
             db=db,
             analysis_config=cfg.analysis,
+            alignment_barrier=alignment_barrier,
         )
     return _evaluator
 
@@ -391,6 +392,29 @@ async def lifespan(app):
     else:
         app.state.alignment_barrier = None
         logger.info("Alignment barrier not initialized (analysis disabled)")
+
+    # Restore alignment overrides from database and re-trigger alignment
+    # checks for active child sessions that haven't been overridden.
+    if app.state.alignment_barrier is not None:
+        app.state.alignment_barrier.restore_overrides()
+
+        # Re-trigger alignment checks for active child sessions that
+        # haven't been overridden. This closes the post-restart gap
+        # where _misaligned is empty after server restart.
+        from intaris.session import SessionStore as _SS
+
+        _startup_sessions = _SS(_get_db()).get_active_child_sessions()
+        for _s in _startup_sessions:
+            await app.state.alignment_barrier.trigger(_s["user_id"], _s["session_id"])
+        if _startup_sessions:
+            logger.info(
+                "Startup: triggered alignment checks for %d active child sessions",
+                len(_startup_sessions),
+            )
+
+    # Eagerly initialize the evaluator with alignment_barrier reference
+    # so it's available for both REST API and MCP proxy.
+    _get_evaluator(alignment_barrier=app.state.alignment_barrier)
 
     # Initialize event store for session recording (before background worker
     # so the flush loop is included when the worker starts).

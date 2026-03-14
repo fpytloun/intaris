@@ -182,6 +182,14 @@ class Database:
             conn.execute("ALTER TABLE notification_channels ADD COLUMN events TEXT")
             logger.info("Migration: added events column to notification_channels")
 
+        # Migration: add alignment_overridden to sessions (persists user
+        # acknowledgment of alignment misalignment across server restarts)
+        if not self._column_exists(conn, "sessions", "alignment_overridden"):
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN alignment_overridden INTEGER DEFAULT 0"
+            )
+            logger.info("Migration: added alignment_overridden column to sessions")
+
         # Index for idle session sweep (status + last_activity_at)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
