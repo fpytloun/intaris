@@ -231,6 +231,29 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     return lastResult
   }
 
+  // -- Toast Notifications --------------------------------------------------
+
+  /**
+   * Show a visible toast notification in the OpenCode TUI.
+   * Fire-and-forget — never blocks or throws.
+   */
+  function showToast(
+    message: string,
+    variant: "info" | "success" | "warning" | "error",
+    duration?: number,
+  ): void {
+    client.tui
+      .showToast({
+        body: {
+          title: "Intaris",
+          message,
+          variant,
+          duration: duration ?? (variant === "error" ? 8000 : 5000),
+        },
+      })
+      .catch(() => {})
+  }
+
   // -- Helpers --------------------------------------------------------------
 
   function getOrCreateState(sessionId: string): SessionState {
@@ -992,6 +1015,11 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
               },
             })
             .catch(() => {})
+          showToast(
+            `Session suspended: ${statusReason}. Reactivate in Intaris UI.`,
+            "warning",
+            10000,
+          )
 
           // Poll GET /session/{id} with exponential backoff
           const suspendBackoffMs = [2000, 4000, 8000, 16000, 30000]
@@ -1021,6 +1049,10 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
                   },
                 })
                 .catch(() => {})
+              showToast(
+                `Session still suspended... (${waitSec}s)`,
+                "info",
+              )
               suspendLastReminder = suspendNow
             }
 
@@ -1052,6 +1084,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
                   },
                 })
                 .catch(() => {})
+              showToast("Session reactivated — re-evaluating...", "success")
 
               const { data: reResult } = await callApiWithRetry(
                 "POST",
@@ -1084,6 +1117,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
             }
 
             if (sessionData.status === "terminated") {
+              showToast("Session terminated", "error")
               throw new Error(
                 `[intaris] Session terminated: ${sessionData.status_reason || "terminated by user"}`,
               )
@@ -1094,12 +1128,14 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
         // Handle session termination: hard kill
         if (result.session_status === "terminated") {
+          showToast("Session terminated", "error")
           throw new Error(
             `[intaris] Session terminated: ${result.status_reason || "terminated by user"}`,
           )
         }
 
         const reason = result.reasoning || "Tool call denied by safety evaluation"
+        showToast(`Tool "${tool}" denied: ${reason}`, "error")
         throw new Error(
           `[intaris] DENIED: ${reason}`,
         )
@@ -1120,6 +1156,11 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
             },
           })
           .catch(() => {})
+        showToast(
+          `Tool "${tool}" escalated — approve or deny in Intaris UI.\n${reason}`,
+          "warning",
+          10000,
+        )
 
         // Poll for user decision with exponential backoff
         const pollBackoffMs = [2000, 4000, 8000, 16000, 30000]
@@ -1149,6 +1190,10 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
                 },
               })
               .catch(() => {})
+            showToast(
+              `Still waiting for approval of "${tool}"... (${waitSec}s)`,
+              "info",
+            )
             lastReminderAt = now
           }
 
@@ -1177,6 +1222,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
                 },
               })
               .catch(() => {})
+            showToast(`Tool "${tool}" approved — proceeding`, "success")
             break // Approved — let the tool call proceed
           }
 
@@ -1184,6 +1230,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
             const denyNote = auditRecord.user_note
               ? ` — ${auditRecord.user_note}`
               : ""
+            showToast(`Tool "${tool}" denied by user`, "error")
             throw new Error(
               `[intaris] DENIED by user (${result.call_id}): ${reason}${denyNote}`,
             )
