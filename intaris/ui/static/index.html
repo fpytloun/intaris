@@ -434,10 +434,12 @@
                       <button @click.stop="updateStatus(session.session_id, 'active')" class="btn-success text-sm">Reactivate</button>
                     </template>
                   </div>
-                  <button @click.stop="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: session.session_id } }))"
-                          class="btn-primary text-sm">Console</button>
-                  <button @click.stop="window.dispatchEvent(new CustomEvent('intaris:open-recording', { detail: { sessionId: session.session_id } }))"
-                          class="btn-secondary text-sm">Events</button>
+                  <div class="flex gap-2 ml-auto">
+                    <button @click.stop="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: session.session_id } }))"
+                            class="btn-primary text-sm">Console</button>
+                    <button @click.stop="window.dispatchEvent(new CustomEvent('intaris:open-recording', { detail: { sessionId: session.session_id } }))"
+                            class="btn-secondary text-sm">Events</button>
+                  </div>
                 </div>
 
                 <!-- Status Reason (shown when session is suspended/terminated) -->
@@ -1362,10 +1364,12 @@
                 <button @click="$store.nav.updateSessionStatus($store.nav.sessionModal.session_id, 'active')" class="btn-success text-sm">Reactivate</button>
               </template>
             </div>
-            <button @click="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: $store.nav.sessionModal.session_id } }))"
-                    class="btn-primary text-sm">Console</button>
-            <button @click="window.dispatchEvent(new CustomEvent('intaris:open-recording', { detail: { sessionId: $store.nav.sessionModal.session_id } }))"
-                    class="btn-secondary text-sm">Events</button>
+            <div class="flex gap-2 ml-auto">
+              <button @click="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: $store.nav.sessionModal.session_id } }))"
+                      class="btn-primary text-sm">Console</button>
+              <button @click="window.dispatchEvent(new CustomEvent('intaris:open-recording', { detail: { sessionId: $store.nav.sessionModal.session_id } }))"
+                      class="btn-secondary text-sm">Events</button>
+            </div>
           </div>
 
           <!-- Status Reason (modal) -->
@@ -1451,10 +1455,13 @@
        @intaris:open-console.window="open($event.detail.sessionId)"
        @keydown.escape.window="if (visible) close()"
        class="modal-overlay" @click.self="close()">
-    <div class="modal-content max-w-4xl overflow-x-hidden" @click.stop>
+    <div class="modal-content max-w-6xl overflow-x-hidden" @click.stop>
       <!-- Header -->
       <div class="flex items-center justify-between mb-4">
         <div class="flex items-center gap-3">
+          <button x-show="parentSessionId"
+                  @click="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: parentSessionId } }))"
+                  class="text-brand-accent hover:underline text-sm">&larr; Parent</button>
           <span class="text-lg font-semibold">Session Console</span>
           <span class="font-mono text-sm text-brand-accent" x-text="sessionId"></span>
           <span class="badge badge-low text-xs" x-text="sourceLabel()"></span>
@@ -1546,6 +1553,9 @@
                 <span class="console-subtask-label">Subtask:</span>
                 <span x-text="block.description"></span>
                 <span class="text-muted" x-show="block.agent" x-text="'(' + block.agent + ')'"></span>
+                <button x-show="block.childSessionId"
+                        @click="window.dispatchEvent(new CustomEvent('intaris:open-console', { detail: { sessionId: block.childSessionId } }))"
+                        class="text-brand-accent hover:underline text-xs ml-1">&rarr; Open Console</button>
               </div>
             </template>
 

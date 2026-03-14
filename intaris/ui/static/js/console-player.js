@@ -219,6 +219,9 @@ function processOpenCode(events) {
 
   // Track consumed events (tool_result, evaluation) to avoid double-rendering
   const consumed = new Set();
+  // Track which user messageIDs already have a rendered user-message block
+  // (used to deduplicate text parts that echo user input)
+  const renderedUserMessages = new Set();
 
   // Step 3: Walk events in order, generate blocks
   for (const event of events) {
@@ -228,6 +231,7 @@ function processOpenCode(events) {
     if (event.type === 'message' && data.role === 'user') {
       // Skip empty user messages
       if (!data.text || !data.text.trim()) continue;
+      if (data.messageID) renderedUserMessages.add(data.messageID);
       blocks.push({
         type: 'user-message',
         id: 'b' + (blockId++),
@@ -258,8 +262,21 @@ function processOpenCode(events) {
       if (partType === 'text') {
         // Skip synthetic parts (system-generated echoes)
         if (part.synthetic) continue;
-        // Skip text parts belonging to user messages (echoed input)
-        if (part.messageID && userMessageIds.has(part.messageID)) continue;
+        // Text parts belonging to user messages: render as user-message
+        // fallback if the message event was missing (race condition in
+        // chat.message hook), otherwise skip to avoid duplicates.
+        if (part.messageID && userMessageIds.has(part.messageID)) {
+          if (renderedUserMessages.has(part.messageID)) continue;
+          if (!part.text || !part.text.trim()) continue;
+          renderedUserMessages.add(part.messageID);
+          blocks.push({
+            type: 'user-message',
+            id: 'b' + (blockId++),
+            text: part.text,
+            ts: event.ts,
+          });
+          continue;
+        }
         // Skip empty text parts
         if (!part.text && !data.delta) continue;
         blocks.push({
@@ -303,11 +320,15 @@ function processOpenCode(events) {
       }
 
       if (partType === 'subtask') {
+        // SubtaskPart.sessionID is the child's OpenCode session ID;
+        // Intaris session IDs use the oc- prefix convention.
+        const childSessionId = part.sessionID ? ('oc-' + part.sessionID) : null;
         blocks.push({
           type: 'subtask',
           id: 'b' + (blockId++),
           description: part.description || part.prompt || '',
           agent: part.agent || '',
+          childSessionId,
           ts: event.ts,
         });
         continue;
@@ -627,6 +648,7 @@ function consolePlayer() {
   return {
     // State
     sessionId: null,
+    parentSessionId: null,
     events: [],
     blocks: [],
     source: null,
@@ -652,6 +674,7 @@ function consolePlayer() {
 
     async open(sessionId) {
       this.sessionId = sessionId;
+      this.parentSessionId = null;
       this.events = [];
       this.blocks = [];
       this.source = null;
@@ -663,6 +686,10 @@ function consolePlayer() {
       this.expandedTools = {};
       this.expandedReasoning = {};
       this.stopLiveTail();
+      // Fetch session details for parent link (best-effort, non-blocking)
+      IntarisAPI.getSession(sessionId)
+        .then(s => { this.parentSessionId = s.parent_session_id || null; })
+        .catch(() => {});
       await this.loadEvents();
       this.processEvents();
       this.scrollToBottom();
@@ -672,6 +699,7 @@ function consolePlayer() {
     close() {
       this.visible = false;
       this.sessionId = null;
+      this.parentSessionId = null;
       this.events = [];
       this.blocks = [];
       this.stopLiveTail();
