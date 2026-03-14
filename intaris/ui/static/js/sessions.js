@@ -19,6 +19,8 @@ function sessionsTab() {
     sessionAudit: [],
     expandedAuditId: null,
     expandedAuditRecord: null,
+    auditLimit: 5,
+    auditTotal: 0,
     treeView: true,
     collapsedSessions: {},
 
@@ -142,6 +144,7 @@ function sessionsTab() {
         // Deduplicate by call_id to prevent Alpine x-for duplicate key crashes.
         if (this.expandedId === data.session_id && data.call_id) {
           const auditCallId = data.call_id;
+          const isNew = !this.sessionAudit.some(r => r.call_id === auditCallId);
           this.sessionAudit = [
             {
               call_id: auditCallId,
@@ -156,7 +159,8 @@ function sessionsTab() {
               timestamp: data.timestamp || new Date().toISOString(),
             },
             ...this.sessionAudit.filter(r => r.call_id !== auditCallId),
-          ].slice(0, 20);
+          ].slice(0, Math.max(this.auditLimit, this.sessionAudit.length + 1));
+          if (isNew) this.auditTotal++;
         }
       }
     },
@@ -390,23 +394,38 @@ function sessionsTab() {
 
     async toggleExpand(session) {
       if (this.expandedId === session.session_id) {
+        // Collapsing — also collapse child tree if parent has children
         this.expandedId = null;
         this.expandedSession = null;
         this.sessionAudit = [];
         this.expandedAuditId = null;
         this.expandedAuditRecord = null;
+        this.auditLimit = 5;
+        this.auditTotal = 0;
+        if (session._children?.length > 0) {
+          this.collapsedSessions[session.session_id] = true;
+          this.collapsedSessions = { ...this.collapsedSessions };
+        }
         return;
       }
+      // Expanding — also expand child tree if parent has children
       this.expandedId = session.session_id;
       this.expandedSession = session;
       this.expandedAuditId = null;
       this.expandedAuditRecord = null;
+      this.auditLimit = 5;
+      this.auditTotal = 0;
+      if (session._children?.length > 0 && this.collapsedSessions[session.session_id]) {
+        delete this.collapsedSessions[session.session_id];
+        this.collapsedSessions = { ...this.collapsedSessions };
+      }
       try {
         const audit = await IntarisAPI.listAudit({
           session_id: session.session_id,
-          limit: 20,
+          limit: 5,
         });
         this.sessionAudit = audit.items || [];
+        this.auditTotal = audit.total || 0;
       } catch (e) {
         Alpine.store('notify').error('Failed to load session audit: ' + e.message);
       }
@@ -423,6 +442,21 @@ function sessionsTab() {
         this.expandedAuditRecord = await IntarisAPI.getAuditRecord(record.call_id);
       } catch (e) {
         this.expandedAuditRecord = record;
+      }
+    },
+
+    async loadMoreAudit() {
+      if (!this.expandedId) return;
+      this.auditLimit += 10;
+      try {
+        const audit = await IntarisAPI.listAudit({
+          session_id: this.expandedId,
+          limit: this.auditLimit,
+        });
+        this.sessionAudit = audit.items || [];
+        this.auditTotal = audit.total || 0;
+      } catch (e) {
+        Alpine.store('notify').error('Failed to load more evaluations: ' + e.message);
       }
     },
 

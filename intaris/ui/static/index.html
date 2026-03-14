@@ -523,6 +523,11 @@
                         </div>
                       </div>
                     </template>
+                    <button x-show="sessionAudit.length < auditTotal"
+                            @click.stop="loadMoreAudit()"
+                            class="btn-secondary text-sm w-full mt-2"
+                            x-text="'Load more (' + (auditTotal - sessionAudit.length) + ')'">
+                    </button>
                   </div>
                 </div>
               </div>
