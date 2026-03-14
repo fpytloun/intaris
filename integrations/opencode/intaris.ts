@@ -338,25 +338,34 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
    * Build session policy from INTARIS_ALLOW_PATHS.
    * Expands ~ to home directory and converts each path to a glob pattern.
    * E.g., "~/src" → "/Users/name/src/*"
+   *
+   * Always includes ~/.local/share/opencode/* (tool output storage)
+   * so reads of truncated output files are never blocked.
    */
   function buildPolicy(): Record<string, any> | null {
-    if (!allowPathsRaw) return null
     const home = process.env.HOME || process.env.USERPROFILE || ""
-    const patterns = allowPathsRaw
-      .split(",")
-      .map((p) => p.trim())
-      .filter(Boolean)
-      .map((p) => {
-        // Expand ~ to home directory
-        if (p.startsWith("~/") || p === "~") {
-          p = home + p.slice(1)
-        }
-        // Ensure trailing /* for glob matching
-        if (!p.endsWith("*")) {
-          p = p.endsWith("/") ? p + "*" : p + "/*"
-        }
-        return p
-      })
+    // Always allow reads from OpenCode's tool output directory
+    const builtinPaths = home
+      ? [`${home}/.local/share/opencode/*`]
+      : []
+    const userPatterns = allowPathsRaw
+      ? allowPathsRaw
+          .split(",")
+          .map((p) => p.trim())
+          .filter(Boolean)
+          .map((p) => {
+            // Expand ~ to home directory
+            if (p.startsWith("~/") || p === "~") {
+              p = home + p.slice(1)
+            }
+            // Ensure trailing /* for glob matching
+            if (!p.endsWith("*")) {
+              p = p.endsWith("/") ? p + "*" : p + "/*"
+            }
+            return p
+          })
+      : []
+    const patterns = [...builtinPaths, ...userPatterns]
     if (patterns.length === 0) return null
     return { allow_paths: patterns }
   }
