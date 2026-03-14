@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Pattern for validating path components (user_id, session_id).
 # Same pattern as mnemory — allows alphanumeric, hyphens, underscores,
 # dots, colons, at signs, and forward slashes. Rejects path traversal.
-_SAFE_PATH_COMPONENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:/@-]*$")
+_SAFE_PATH_COMPONENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@-]*$")
 
 # Pattern for parsing chunk filenames: seq_000001_000100.ndjson
 _CHUNK_FILENAME = re.compile(r"^seq_(\d{6,})_(\d{6,})\.ndjson$")
@@ -401,28 +401,22 @@ class S3EventBackend:
 
     def delete_session(self, user_id: str, session_id: str) -> None:
         prefix = self._prefix(user_id, session_id)
-        continuation_token = None
-        while True:
-            kwargs: dict[str, Any] = {"Bucket": self._bucket, "Prefix": prefix}
-            if continuation_token:
-                kwargs["ContinuationToken"] = continuation_token
-            response = self._client.list_objects_v2(**kwargs)
-            objects = response.get("Contents", [])
-            if objects:
-                self._client.delete_objects(
-                    Bucket=self._bucket,
-                    Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]},
-                )
-            if not response.get("IsTruncated"):
-                break
-            continuation_token = response.get("NextContinuationToken")
+        self._delete_by_prefix(prefix)
 
     def delete_all_for_user(self, user_id: str) -> None:
         _validate_path_component(user_id, "user_id")
         prefix = f"events/{user_id}/"
+        self._delete_by_prefix(prefix)
+
+    def _delete_by_prefix(self, prefix: str) -> None:
+        """Delete all S3 objects under a prefix, respecting the 1000-object batch limit."""
         continuation_token = None
         while True:
-            kwargs: dict[str, Any] = {"Bucket": self._bucket, "Prefix": prefix}
+            kwargs: dict[str, Any] = {
+                "Bucket": self._bucket,
+                "Prefix": prefix,
+                "MaxKeys": 1000,  # Explicit cap matching delete_objects limit
+            }
             if continuation_token:
                 kwargs["ContinuationToken"] = continuation_token
             response = self._client.list_objects_v2(**kwargs)

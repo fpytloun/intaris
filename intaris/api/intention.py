@@ -227,12 +227,15 @@ async def update_session(
                 }
             )
 
-        # Re-check alignment for child sessions when intention changes
+        # Re-check alignment for child sessions when intention changes.
+        # Clear the override flag first so the new intention is re-evaluated
+        # (AGENTS.md: "Intention changes clear the override flag").
         if request.intention and session.get("parent_session_id"):
             alignment_barrier = getattr(
                 http_request.app.state, "alignment_barrier", None
             )
             if alignment_barrier is not None:
+                alignment_barrier.clear_override(ctx.user_id, session_id)
                 await alignment_barrier.trigger(ctx.user_id, session_id)
 
         return SessionResponse(**session)

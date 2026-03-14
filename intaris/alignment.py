@@ -164,7 +164,6 @@ class AlignmentBarrier:
         Returns:
             Number of overrides restored.
         """
-        session_store = SessionStore(self._db)
         try:
             with self._db.cursor() as cur:
                 cur.execute(
@@ -306,6 +305,35 @@ class AlignmentBarrier:
         with self._lock:
             self._misaligned.pop(key, None)
             self._overridden.discard(key)
+
+    def sweep(self, active_sessions: set[tuple[str, str]]) -> int:
+        """Remove alignment state for sessions that are no longer active.
+
+        Called periodically by the background worker to prevent unbounded
+        growth of ``_misaligned`` and ``_overridden`` dicts for abandoned
+        sessions that never transitioned to completed/terminated.
+
+        Args:
+            active_sessions: Set of (user_id, session_id) tuples for
+                sessions that are still active/idle.
+
+        Returns:
+            Number of entries removed.
+        """
+        removed = 0
+        with self._lock:
+            stale_misaligned = [k for k in self._misaligned if k not in active_sessions]
+            for k in stale_misaligned:
+                del self._misaligned[k]
+                removed += 1
+
+            stale_overridden = [k for k in self._overridden if k not in active_sessions]
+            for k in stale_overridden:
+                self._overridden.discard(k)
+                removed += 1
+        if removed:
+            logger.debug("Swept %d stale alignment entries", removed)
+        return removed
 
     # ── Barrier pattern (async) ───────────────────────────────────────
 
@@ -451,10 +479,14 @@ class AlignmentBarrier:
                     reasoning,
                 )
 
-                # Store misalignment (unless user already acknowledged)
+                # Store misalignment and decide whether to publish in a
+                # single lock scope to avoid TOCTOU between storage and
+                # event publishing.
+                should_publish = False
                 with self._lock:
                     if key not in self._overridden:
                         self._misaligned[key] = misalignment_reason
+                        should_publish = True
                     else:
                         logger.debug(
                             "Alignment check failed but user already "
@@ -463,19 +495,16 @@ class AlignmentBarrier:
                         )
 
                 # Publish alignment_failed event (for UI notifications)
-                if self._event_bus is not None:
-                    with self._lock:
-                        is_overridden = key in self._overridden
-                    if not is_overridden:
-                        self._event_bus.publish(
-                            {
-                                "type": "session_alignment_failed",
-                                "session_id": session_id,
-                                "user_id": user_id,
-                                "parent_session_id": parent_session_id,
-                                "reasoning": misalignment_reason,
-                            }
-                        )
+                if should_publish and self._event_bus is not None:
+                    self._event_bus.publish(
+                        {
+                            "type": "session_alignment_failed",
+                            "session_id": session_id,
+                            "user_id": user_id,
+                            "parent_session_id": parent_session_id,
+                            "reasoning": misalignment_reason,
+                        }
+                    )
             else:
                 logger.debug(
                     "Alignment check PASSED for session %s (parent=%s): %s",

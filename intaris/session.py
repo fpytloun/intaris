@@ -492,8 +492,14 @@ class SessionStore:
             params.append(parent_session_id)
 
         if search:
-            conditions.append("(session_id LIKE ? OR intention LIKE ?)")
-            like_pattern = f"%{search}%"
+            conditions.append(
+                "(session_id LIKE ? ESCAPE '\\' OR intention LIKE ? ESCAPE '\\')"
+            )
+            # Escape LIKE metacharacters so literal %, _ in search work correctly
+            escaped = (
+                search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            like_pattern = f"%{escaped}%"
             params.extend([like_pattern, like_pattern])
 
         where = " AND ".join(conditions)
@@ -558,8 +564,13 @@ class SessionStore:
                 root_params.append(status)
 
             if search:
-                root_conditions.append("(session_id LIKE ? OR intention LIKE ?)")
-                like = f"%{search}%"
+                root_conditions.append(
+                    "(session_id LIKE ? ESCAPE '\\' OR intention LIKE ? ESCAPE '\\')"
+                )
+                escaped = (
+                    search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                )
+                like = f"%{escaped}%"
                 root_params.extend([like, like])
 
             root_where = " AND ".join(root_conditions)
@@ -567,7 +578,10 @@ class SessionStore:
             # -- Step 2: If searching, also find parents of matching
             #    children (include parent even if it doesn't match filters)
             if search:
-                like = f"%{search}%"
+                escaped = (
+                    search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                )
+                like = f"%{escaped}%"
                 # Collect root IDs from both sources using UNION
                 root_id_sql = f"""
                     SELECT session_id FROM sessions
@@ -576,7 +590,7 @@ class SessionStore:
                     SELECT DISTINCT parent_session_id FROM sessions
                     WHERE {base_cond}
                       AND parent_session_id IS NOT NULL
-                      AND (session_id LIKE ? OR intention LIKE ?)
+                      AND (session_id LIKE ? ESCAPE '\\' OR intention LIKE ? ESCAPE '\\')
                 """
                 root_id_params = [
                     *root_params,

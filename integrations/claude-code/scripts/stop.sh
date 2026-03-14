@@ -44,6 +44,13 @@ if [ -z "$SESSION_ID" ]; then
     exit 0
 fi
 
+# Validate session ID format to prevent path traversal in state file paths
+if [[ "$SESSION_ID" =~ [/\\] ]] || [[ "$SESSION_ID" == *".."* ]]; then
+    log "Invalid session_id format, skipping"
+    echo '{}'
+    exit 0
+fi
+
 # Load session state from JSON state file
 SESSION_FILE="/tmp/intaris_state_${SESSION_ID}.json"
 
@@ -101,24 +108,46 @@ if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
     if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
         log "Uploading transcript from: $TRANSCRIPT_PATH"
 
-        # Read transcript and wrap each line as a recording event
-        EVENTS="[]"
+        # Read transcript and wrap each line as a recording event.
+        # Build the JSON array in a single jq pass (O(n) instead of O(n^2))
+        # and chunk uploads to avoid shell argument length limits.
+        CHUNK_SIZE=500
+        CHUNK="[]"
+        CHUNK_COUNT=0
+        TOTAL_UPLOADED=0
+
         while IFS= read -r line; do
             [ -z "$line" ] && continue
-            EVENTS=$(echo "$EVENTS" | jq --argjson entry "$line" \
-                '. + [{type: "transcript", data: $entry}]' 2>/dev/null || echo "$EVENTS")
+            CHUNK=$(echo "$CHUNK" | jq --argjson entry "$line" \
+                '. + [{type: "transcript", data: $entry}]' 2>/dev/null || echo "$CHUNK")
+            CHUNK_COUNT=$((CHUNK_COUNT + 1))
+
+            if [ "$CHUNK_COUNT" -ge "$CHUNK_SIZE" ]; then
+                curl -s --max-time 10 \
+                    -X POST \
+                    "${HEADERS[@]}" \
+                    -H "X-Intaris-Source: claude-code" \
+                    -d "$CHUNK" \
+                    "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
+                TOTAL_UPLOADED=$((TOTAL_UPLOADED + CHUNK_COUNT))
+                CHUNK="[]"
+                CHUNK_COUNT=0
+            fi
         done < "$TRANSCRIPT_PATH"
 
-        EVENT_COUNT=$(echo "$EVENTS" | jq 'length' 2>/dev/null || echo "0")
-        if [ "$EVENT_COUNT" -gt 0 ]; then
-            log "Uploading $EVENT_COUNT transcript events"
-            curl -s --max-time 5 \
+        # Upload remaining events
+        if [ "$CHUNK_COUNT" -gt 0 ]; then
+            curl -s --max-time 10 \
                 -X POST \
                 "${HEADERS[@]}" \
                 -H "X-Intaris-Source: claude-code" \
-                -d "$EVENTS" \
+                -d "$CHUNK" \
                 "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
+            TOTAL_UPLOADED=$((TOTAL_UPLOADED + CHUNK_COUNT))
+        fi
 
+        if [ "$TOTAL_UPLOADED" -gt 0 ]; then
+            log "Uploaded $TOTAL_UPLOADED transcript events"
             # Flush events to storage
             curl -s --max-time 2 \
                 -X POST \

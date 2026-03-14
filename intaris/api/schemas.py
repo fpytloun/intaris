@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal  # noqa: TC003
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ── Evaluate ──────────────────────────────────────────────────────────
 
@@ -338,7 +338,18 @@ class SessionEvent(BaseModel):
     data: dict[str, Any] = Field(
         default_factory=dict,
         description="Event payload (client-native for reconstruction)",
+        json_schema_extra={"maxProperties": 200},
     )
+
+    @model_validator(mode="after")
+    def _validate_data_size(self) -> SessionEvent:
+        """Reject oversized event payloads to prevent memory exhaustion."""
+        import json
+
+        raw = json.dumps(self.data, separators=(",", ":"))
+        if len(raw) > 1_048_576:  # 1 MB
+            raise ValueError("Event data payload exceeds 1 MB limit")
+        return self
 
 
 class EventAppendResponse(BaseModel):

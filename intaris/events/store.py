@@ -120,40 +120,47 @@ class EventStore:
         with self._lock:
             key = (user_id, session_id)
 
-            # Lazy recovery of sequence counter from backend
+            # Lazy recovery of sequence counter from backend.
+            # On failure, propagate the error to avoid seq collisions
+            # with existing persisted events.
             if key not in self._seq_counters:
                 try:
                     self._seq_counters[key] = self._backend.last_seq(
                         user_id, session_id
                     )
                 except Exception:
-                    logger.warning(
-                        "Failed to recover last_seq for %s/%s, starting from 0",
+                    logger.exception(
+                        "Failed to recover last_seq for %s/%s — "
+                        "refusing to start from 0 (would risk seq collisions)",
                         user_id,
                         session_id,
                     )
-                    self._seq_counters[key] = 0
+                    raise
 
-            # Assign seq and ts to each event
+            # Assign seq and ts to each event (copy to avoid mutating caller's dicts)
+            enriched: list[dict] = []
             for event in events:
                 self._seq_counters[key] += 1
                 seq = self._seq_counters[key]
-                event["seq"] = seq
-                event["ts"] = now
-                event["source"] = source
+                enriched_event = dict(event)
+                enriched_event["seq"] = seq
+                enriched_event["ts"] = now
+                enriched_event["source"] = source
+                enriched.append(enriched_event)
                 assigned_seqs.append(seq)
 
-            # Buffer events
+            # Buffer enriched copies
             buf = self._buffers.setdefault(key, [])
-            buf.extend(events)
+            buf.extend(enriched)
 
             # Flush if buffer exceeds threshold
             if len(buf) >= self._config.flush_size:
                 self._flush_locked(key)
 
-        # Publish to EventBus for live tailing (outside lock)
+        # Publish to EventBus for live tailing (outside lock).
+        # Uses enriched copies (with seq/ts/source) rather than caller's dicts.
         if self._event_bus is not None:
-            for event in events:
+            for event in enriched:
                 self._event_bus.publish(
                     {
                         "type": "session_event",
@@ -297,6 +304,34 @@ class EventStore:
                 return True
         return self._backend.exists(user_id, session_id)
 
+    def sweep_seq_counters(self, active_sessions: set[tuple[str, str]]) -> int:
+        """Remove seq counters for sessions that are no longer active.
+
+        Called periodically by the background worker to prevent unbounded
+        growth of ``_seq_counters``. Sessions with buffered events are
+        never swept (they still need their counter).
+
+        Args:
+            active_sessions: Set of (user_id, session_id) tuples for
+                sessions that are still active/idle.
+
+        Returns:
+            Number of counters removed.
+        """
+        removed = 0
+        with self._lock:
+            stale = [
+                k
+                for k in self._seq_counters
+                if k not in active_sessions and k not in self._buffers
+            ]
+            for k in stale:
+                del self._seq_counters[k]
+                removed += 1
+        if removed:
+            logger.debug("Swept %d stale seq counters", removed)
+        return removed
+
     @property
     def buffered_session_count(self) -> int:
         """Number of sessions with buffered (unflushed) events."""
@@ -326,7 +361,9 @@ class EventStore:
                 buf[-1]["seq"],
             )
         except Exception:
-            # Put events back in buffer on failure so they aren't lost
+            # Put events back in buffer on failure so they aren't lost.
+            # Cap total buffer size to prevent OOM on persistent failure.
+            _MAX_BUFFER_PER_SESSION = 10000
             logger.exception(
                 "Failed to flush %d events for %s/%s, re-buffering",
                 len(buf),
@@ -334,4 +371,14 @@ class EventStore:
                 session_id,
             )
             existing = self._buffers.get(key, [])
-            self._buffers[key] = buf + existing
+            combined = buf + existing
+            if len(combined) > _MAX_BUFFER_PER_SESSION:
+                dropped = len(combined) - _MAX_BUFFER_PER_SESSION
+                logger.error(
+                    "Buffer overflow for %s/%s, dropping %d oldest events",
+                    user_id,
+                    session_id,
+                    dropped,
+                )
+                combined = combined[-_MAX_BUFFER_PER_SESSION:]
+            self._buffers[key] = combined

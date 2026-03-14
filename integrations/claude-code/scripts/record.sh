@@ -59,6 +59,12 @@ if [ -z "$SESSION_ID" ] || [ -z "$TOOL_NAME" ]; then
     exit 0
 fi
 
+# Validate session ID format to prevent path traversal in state file paths
+if [[ "$SESSION_ID" =~ [/\\] ]] || [[ "$SESSION_ID" == *".."* ]]; then
+    echo '{}'
+    exit 0
+fi
+
 # Load Intaris session ID from state file
 SESSION_FILE="/tmp/intaris_state_${SESSION_ID}.json"
 if [ ! -f "$SESSION_FILE" ]; then

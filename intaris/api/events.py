@@ -79,6 +79,14 @@ async def append_events(
     if not events:
         raise HTTPException(status_code=400, detail="No events provided.")
 
+    # Limit batch size to prevent memory exhaustion
+    _MAX_BATCH_SIZE = 1000
+    if len(events) > _MAX_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many events ({len(events)}). Max {_MAX_BATCH_SIZE} per request.",
+        )
+
     # Validate event types
     for event in events:
         if event.type not in VALID_EVENT_TYPES:

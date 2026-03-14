@@ -356,7 +356,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
     callApi(
       "PATCH",
-      `/api/v1/session/${intarisSessionId}`,
+      `/api/v1/session/${encodeURIComponent(intarisSessionId)}`,
       { intention, details },
       2000,
     ).catch(() => {})
@@ -522,13 +522,13 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       // and update intention in case the title changed since creation
       callApi(
         "PATCH",
-        `/api/v1/session/${intarisSessionId}/status`,
+        `/api/v1/session/${encodeURIComponent(intarisSessionId)}/status`,
         { status: "active" },
         2000,
       ).catch(() => {})
       callApi(
         "PATCH",
-        `/api/v1/session/${intarisSessionId}`,
+        `/api/v1/session/${encodeURIComponent(intarisSessionId)}`,
         { intention: buildIntention(state), details: buildDetails(state) },
         2000,
       ).catch(() => {})
@@ -583,13 +583,13 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     Promise.all([
       callApi(
         "PATCH",
-        `/api/v1/session/${intarisSessionId}/status`,
+        `/api/v1/session/${encodeURIComponent(intarisSessionId)}/status`,
         { status: "completed" },
         2000,
       ),
       callApi(
         "POST",
-        `/api/v1/session/${intarisSessionId}/agent-summary`,
+        `/api/v1/session/${encodeURIComponent(intarisSessionId)}/agent-summary`,
         { summary: buildAgentSummary(state) },
         2000,
       ),
@@ -679,7 +679,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           const details = buildDetails(state)
           callApi(
             "PATCH",
-            `/api/v1/session/${state.intarisSessionId}`,
+            `/api/v1/session/${encodeURIComponent(state.intarisSessionId)}`,
             { intention, details },
             2000,
           ).catch(() => {})
@@ -693,7 +693,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         state.isIdle = false
         callApi(
           "PATCH",
-          `/api/v1/session/${state.intarisSessionId}/status`,
+          `/api/v1/session/${encodeURIComponent(state.intarisSessionId)}/status`,
           { status: "active" },
           2000,
         ).catch(() => {})
@@ -777,7 +777,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           state.sessionTitle = title
           callApi(
             "PATCH",
-            `/api/v1/session/${state.intarisSessionId}`,
+            `/api/v1/session/${encodeURIComponent(state.intarisSessionId)}`,
             { intention: buildIntention(state), details: buildDetails(state) },
             2000,
           ).catch(() => {})
@@ -820,7 +820,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
             state.isIdle = true
             callApi(
               "PATCH",
-              `/api/v1/session/${state.intarisSessionId}/status`,
+              `/api/v1/session/${encodeURIComponent(state.intarisSessionId)}/status`,
               { status: "idle" },
               2000,
             ).catch(() => {})

@@ -43,6 +43,13 @@ if [ -z "$SESSION_ID" ]; then
     exit 0
 fi
 
+# Validate session ID format to prevent path traversal in state file paths
+if [[ "$SESSION_ID" =~ [/\\] ]] || [[ "$SESSION_ID" == *".."* ]]; then
+    log "Invalid session_id format, skipping"
+    echo '{}'
+    exit 0
+fi
+
 # Generate deterministic Intaris session ID
 INTARIS_SESSION_ID="cc-${SESSION_ID}"
 

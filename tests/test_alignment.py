@@ -69,7 +69,7 @@ class TestCheckIntentionAlignment:
             child_intention="Write unit tests for the OAuth2 module",
         )
         assert aligned is True
-        assert "compatible" in reasoning.lower() or len(reasoning) > 0
+        assert reasoning, "Expected non-empty reasoning from alignment check"
         mock_llm.generate.assert_called_once()
 
     def test_contradictory_intentions(self, mock_llm_misaligned):

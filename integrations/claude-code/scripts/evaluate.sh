@@ -69,6 +69,12 @@ fi
 # Supports both new JSON format and legacy plain-text format for
 # backward compatibility during upgrades.
 
+# Validate session ID format to prevent path traversal in state file paths
+if [[ "${SESSION_ID:-}" =~ [/\\] ]] || [[ "${SESSION_ID:-}" == *".."* ]]; then
+    echo '{"decision":"approve"}'
+    exit 0
+fi
+
 SESSION_FILE="/tmp/intaris_state_${SESSION_ID:-default}.json"
 INTARIS_SESSION_ID=""
 CALL_COUNT=0
