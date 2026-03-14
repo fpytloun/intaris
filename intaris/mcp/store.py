@@ -166,7 +166,7 @@ class MCPServerStore:
                     url,
                     headers_encrypted,
                     agent_pattern,
-                    int(enabled),
+                    enabled,
                     source,
                     now,
                     now,

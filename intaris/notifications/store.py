@@ -157,7 +157,7 @@ class NotificationStore:
                     name,
                     provider,
                     config_encrypted,
-                    int(enabled),
+                    enabled,
                     events_json,
                     now,
                     now,
