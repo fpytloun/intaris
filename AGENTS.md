@@ -910,7 +910,7 @@ Different clients use different tool naming conventions:
 
 | Client | Built-in tools | MCP tools |
 |---|---|---|
-| **OpenCode** | `read`, `edit`, `write`, `bash` | MCP tool name directly (e.g., `add_memory`) |
+| **OpenCode** | `read`, `edit`, `write`, `bash` | `server_tool` (single underscore, e.g., `mnemory_add_memory`) |
 | **Claude Code** | `Read`, `Edit`, `Write`, `Bash` (capitalized) | `mcp__server__tool` (double underscore, e.g., `mcp__mnemory__add_memory`) |
 | **Intaris MCP proxy** | N/A | `server_name:tool_name` (colon, e.g., `mnemory:add_memory`) |
 

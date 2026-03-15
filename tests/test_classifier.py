@@ -68,9 +68,19 @@ class TestReadOnlyTools:
         assert classify(tool_name, {"thought": "test"}) == Classification.READ
 
     def test_mcp_write_tools(self):
-        assert classify("add_memory", {}) == Classification.WRITE
-        assert classify("delete_memory", {}) == Classification.WRITE
-        assert classify("mnemory:add_memory", {}) == Classification.WRITE
+        # Unknown MCP tools default to WRITE
+        assert classify("unknown_server:dangerous_tool", {}) == Classification.WRITE
+        assert classify("some_random_tool", {}) == Classification.WRITE
+
+    def test_mnemory_tools_are_read(self):
+        """All mnemory tools are memory infrastructure — auto-approved."""
+        assert classify("add_memory", {}) == Classification.READ
+        assert classify("delete_memory", {}) == Classification.READ
+        assert classify("mnemory:add_memory", {}) == Classification.READ
+        # OpenCode single-underscore convention
+        assert classify("mnemory_add_memory", {}) == Classification.READ
+        assert classify("mnemory_initialize_memory", {}) == Classification.READ
+        assert classify("mnemory_get_core_memories", {}) == Classification.READ
 
 
 class TestReadOnlyBash:

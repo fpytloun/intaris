@@ -148,18 +148,26 @@ _GIT_SUBCOMMANDS_WITH_CHECKS: set[str] = {
 # The OpenCode single-underscore format (server_tool) is ambiguous,
 # so known full names are listed explicitly.
 _READ_ONLY_MCP_TOOLS: set[str] = {
-    # Mnemory read-only tools
+    # Mnemory tools (agent memory infrastructure — not project-modifying)
+    "initialize_memory",
+    "add_memory",
+    "add_memories",
     "search_memories",
     "find_memories",
     "ask_memories",
+    "get_core_memories",
+    "get_recent_memories",
     "list_memories",
+    "list_categories",
+    "update_memory",
+    "delete_memory",
+    "delete_memories",
+    "delete_all_memories",
+    "save_artifact",
     "get_artifact",
     "get_artifact_url",
     "list_artifacts",
-    "list_categories",
-    "get_core_memories",
-    "get_recent_memories",
-    "initialize_memory",
+    "delete_artifact",
     # Thinking / reasoning tools (no side effects)
     "sequentialthinking",
     "sequentialthinking_sequentialthinking",  # OpenCode: server_tool format
@@ -612,6 +620,17 @@ def is_read_only(tool: str, args: dict[str, Any]) -> bool:
         tool_name = tool.rsplit("__", 1)[-1]
         if tool_name in _READ_ONLY_MCP_TOOLS:
             return True
+
+    # Handle OpenCode single-underscore convention: server_tool → tool
+    # Try progressively shorter suffixes to handle tool names that
+    # themselves contain underscores (e.g., "mnemory_get_core_memories"
+    # → try "get_core_memories", then "core_memories", etc.)
+    if "_" in tool and not tool.startswith("mcp__"):
+        parts = tool.split("_")
+        for i in range(1, len(parts)):
+            candidate = "_".join(parts[i:])
+            if candidate in _READ_ONLY_MCP_TOOLS:
+                return True
 
     # Bash commands (case-sensitive — "bash" is always lowercase)
     if tool == "bash":
