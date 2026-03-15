@@ -1636,3 +1636,144 @@ class TestAuditResolvedFilter:
         data = resp.json()
         # Should have at least 2 records (escalated + approved)
         assert data["total"] >= 2
+
+
+# ── Analysis Disabled ─────────────────────────────────────────────────
+
+
+class TestAnalysisDisabled:
+    """Tests for ANALYSIS_ENABLED=false behavior.
+
+    Verifies that L2/L3 trigger endpoints return 404 when analysis is
+    disabled, while L1 data collection and retrieval endpoints still work.
+    """
+
+    @pytest.fixture
+    def client_analysis_disabled(self, tmp_db):
+        """Test client with ANALYSIS_ENABLED=false."""
+        env = {
+            "LLM_API_KEY": "test-key",
+            "DB_PATH": tmp_db,
+            "ANALYSIS_ENABLED": "false",
+            "RATE_LIMIT": "60",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            for key in (
+                "INTARIS_API_KEY",
+                "INTARIS_API_KEYS",
+                "WEBHOOK_URL",
+                "WEBHOOK_SECRET",
+            ):
+                os.environ.pop(key, None)
+
+            import intaris.server as srv
+
+            srv._config = None
+            srv._db = None
+            srv._evaluator = None
+
+            from intaris.server import create_app
+
+            app = create_app()
+            with TestClient(app) as client:
+                yield client
+
+    def test_trigger_summary_returns_404(self, client_analysis_disabled):
+        """POST /session/{id}/summary/trigger returns 404 when disabled."""
+        headers = {"X-User-Id": "user-dis-sum"}
+        _create_session(client_analysis_disabled, "sess-dis-sum", headers)
+        resp = client_analysis_disabled.post(
+            "/api/v1/session/sess-dis-sum/summary/trigger",
+            headers=headers,
+        )
+        assert resp.status_code == 404
+        assert "not enabled" in resp.json()["detail"].lower()
+
+    def test_trigger_analysis_returns_404(self, client_analysis_disabled):
+        """POST /analysis/trigger returns 404 when disabled."""
+        headers = {"X-User-Id": "user-dis-ana"}
+        resp = client_analysis_disabled.post(
+            "/api/v1/analysis/trigger",
+            headers=headers,
+        )
+        assert resp.status_code == 404
+        assert "not enabled" in resp.json()["detail"].lower()
+
+    def test_reasoning_still_works(self, client_analysis_disabled):
+        """POST /reasoning succeeds even when analysis is disabled."""
+        headers = {"X-User-Id": "user-dis-reas"}
+        _create_session(client_analysis_disabled, "sess-dis-reas", headers)
+        resp = client_analysis_disabled.post(
+            "/api/v1/reasoning",
+            json={
+                "session_id": "sess-dis-reas",
+                "content": "Working on feature X.",
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    def test_checkpoint_still_works(self, client_analysis_disabled):
+        """POST /checkpoint succeeds even when analysis is disabled."""
+        headers = {"X-User-Id": "user-dis-chk"}
+        _create_session(client_analysis_disabled, "sess-dis-chk", headers)
+        resp = client_analysis_disabled.post(
+            "/api/v1/checkpoint",
+            json={
+                "session_id": "sess-dis-chk",
+                "content": "Progress: 3 of 5 tasks done.",
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+    def test_agent_summary_still_works(self, client_analysis_disabled):
+        """POST /session/{id}/agent-summary succeeds when disabled."""
+        headers = {"X-User-Id": "user-dis-asum"}
+        _create_session(client_analysis_disabled, "sess-dis-asum", headers)
+        resp = client_analysis_disabled.post(
+            "/api/v1/session/sess-dis-asum/agent-summary",
+            json={"summary": "Completed the task."},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+
+    def test_get_summaries_still_works(self, client_analysis_disabled):
+        """GET /session/{id}/summary returns data when disabled."""
+        headers = {"X-User-Id": "user-dis-gsum"}
+        _create_session(client_analysis_disabled, "sess-dis-gsum", headers)
+        resp = client_analysis_disabled.get(
+            "/api/v1/session/sess-dis-gsum/summary",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "intaris_summaries" in data
+
+    def test_get_analyses_still_works(self, client_analysis_disabled):
+        """GET /analysis returns data when disabled."""
+        headers = {"X-User-Id": "user-dis-gana"}
+        resp = client_analysis_disabled.get(
+            "/api/v1/analysis",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 0
+
+    def test_evaluate_still_works(self, client_analysis_disabled):
+        """POST /evaluate still works when analysis is disabled."""
+        headers = {"X-User-Id": "user-dis-eval"}
+        _create_session(client_analysis_disabled, "sess-dis-eval", headers)
+        resp = client_analysis_disabled.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-dis-eval",
+                "tool": "read",
+                "args": {"path": "/tmp/test.txt"},
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["decision"] == "approve"

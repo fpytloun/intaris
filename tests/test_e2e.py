@@ -1159,3 +1159,348 @@ class TestParentChildIntention:
         # Read-only tool → fast-path approve
         assert result["decision"] == "approve"
         assert result["path"] == "fast"
+
+
+# ---------------------------------------------------------------------------
+# TC12: L2 Summary Pipeline -- generate_summary with real LLM
+# ---------------------------------------------------------------------------
+
+
+class TestL2SummaryPipeline:
+    """End-to-end tests for L2 session summary generation.
+
+    Uses real LLM calls via generate_summary() directly after setting
+    up data through the HTTP API. This avoids async worker timing issues.
+    """
+
+    def test_summary_generation(self, client):
+        """Generate a session summary with real LLM after tool evaluations."""
+        import asyncio
+
+        _create_session(
+            client,
+            "sess-l2-sum",
+            "Implement user authentication with bcrypt in a Node.js project",
+        )
+
+        # Make several evaluate calls to build audit data
+        for tool, args in [
+            ("read", {"path": "src/auth.ts"}),
+            ("read", {"path": "package.json"}),
+            ("bash", {"command": "npm install bcrypt"}),
+            (
+                "edit",
+                {
+                    "filePath": "src/auth.ts",
+                    "oldString": "// TODO",
+                    "newString": "import bcrypt",
+                },
+            ),
+            ("read", {"path": "src/auth.ts"}),
+        ]:
+            _evaluate(client, "sess-l2-sum", tool, args)
+
+        # Call generate_summary directly with real LLM
+        from intaris.server import _get_db
+
+        db = _get_db()
+
+        from intaris.config import load_config
+        from intaris.llm import LLMClient
+
+        cfg = load_config()
+        llm = LLMClient(cfg.llm_analysis)
+
+        from intaris.analyzer import generate_summary
+
+        task = {
+            "user_id": _DEFAULT_USER,
+            "session_id": "sess-l2-sum",
+            "payload": {"trigger": "manual"},
+        }
+        result = asyncio.run(generate_summary(db, llm, task))
+
+        # Verify summary was generated
+        assert result.get("error") is None
+        assert result.get("status") != "skipped"
+        assert result.get("intent_alignment") in (
+            "aligned",
+            "partially_aligned",
+            "unclear",
+            "misaligned",
+        )
+
+        # Verify stored in DB
+        resp = client.get(
+            "/api/v1/session/sess-l2-sum/summary",
+            headers=_HEADERS,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["intaris_summaries"]) >= 1
+        summary = data["intaris_summaries"][0]
+        assert summary["summary_type"] in ("window", "compacted")
+        assert summary["summary"]  # Non-empty summary text
+
+    def test_summary_with_reasoning(self, client):
+        """Summary incorporates reasoning data when available."""
+        import asyncio
+
+        _create_session(
+            client,
+            "sess-l2-reas",
+            "Refactor the database module for better performance",
+        )
+
+        # Submit reasoning
+        client.post(
+            "/api/v1/reasoning",
+            json={
+                "session_id": "sess-l2-reas",
+                "content": "User message: Please refactor the database module",
+            },
+            headers=_HEADERS,
+        )
+        client.post(
+            "/api/v1/reasoning",
+            json={
+                "session_id": "sess-l2-reas",
+                "content": "I will start by analyzing the current schema.",
+            },
+            headers=_HEADERS,
+        )
+
+        # Make evaluate calls
+        for tool, args in [
+            ("read", {"path": "src/db.ts"}),
+            ("read", {"path": "src/models.ts"}),
+            ("edit", {"filePath": "src/db.ts", "oldString": "old", "newString": "new"}),
+            ("bash", {"command": "npm test"}),
+            ("read", {"path": "src/db.ts"}),
+        ]:
+            _evaluate(client, "sess-l2-reas", tool, args)
+
+        from intaris.analyzer import generate_summary
+        from intaris.config import load_config
+        from intaris.llm import LLMClient
+        from intaris.server import _get_db
+
+        db = _get_db()
+        cfg = load_config()
+        llm = LLMClient(cfg.llm_analysis)
+
+        task = {
+            "user_id": _DEFAULT_USER,
+            "session_id": "sess-l2-reas",
+            "payload": {"trigger": "manual"},
+        }
+        result = asyncio.run(generate_summary(db, llm, task))
+        assert result.get("error") is None
+        assert result.get("status") != "skipped"
+
+
+# ---------------------------------------------------------------------------
+# TC13: L3 Analysis Pipeline -- run_analysis with real LLM
+# ---------------------------------------------------------------------------
+
+
+class TestL3AnalysisPipeline:
+    """End-to-end tests for L3 cross-session behavioral analysis.
+
+    Creates multiple sessions with summaries, then runs analysis
+    with real LLM.
+    """
+
+    def test_cross_session_analysis(self, client):
+        """Run cross-session analysis across multiple sessions."""
+        import asyncio
+
+        # Create and populate 2 sessions
+        for i, (sid, intention) in enumerate(
+            [
+                ("sess-l3-a", "Implement authentication module"),
+                ("sess-l3-b", "Add database migration scripts"),
+            ]
+        ):
+            _create_session(client, sid, intention)
+            for tool, args in [
+                ("read", {"path": f"src/module{i}.ts"}),
+                (
+                    "edit",
+                    {
+                        "filePath": f"src/module{i}.ts",
+                        "oldString": "old",
+                        "newString": "new",
+                    },
+                ),
+                ("bash", {"command": "npm test"}),
+                ("read", {"path": f"src/module{i}.ts"}),
+                ("read", {"path": "package.json"}),
+            ]:
+                _evaluate(client, sid, tool, args)
+
+        # Generate summaries for both sessions
+        from intaris.analyzer import generate_summary, run_analysis
+        from intaris.config import load_config
+        from intaris.llm import LLMClient
+        from intaris.server import _get_db
+
+        db = _get_db()
+        cfg = load_config()
+        llm = LLMClient(cfg.llm_analysis)
+
+        for sid in ["sess-l3-a", "sess-l3-b"]:
+            task = {
+                "user_id": _DEFAULT_USER,
+                "session_id": sid,
+                "payload": {"trigger": "manual"},
+            }
+            result = asyncio.run(generate_summary(db, llm, task))
+            assert result.get("status") != "skipped", (
+                f"Summary generation skipped for {sid}: {result}"
+            )
+
+        # Run cross-session analysis
+        analysis_task = {
+            "user_id": _DEFAULT_USER,
+            "payload": {
+                "triggered_by": "manual",
+                "agent_id": "",
+                "lookback_days": 30,
+            },
+        }
+        result = asyncio.run(run_analysis(db, llm, analysis_task))
+
+        assert result.get("status") != "skipped", f"Analysis skipped: {result}"
+        assert "analysis_id" in result
+        assert result["risk_level"] in ("low", "medium", "high", "critical")
+        assert result["sessions_analyzed"] >= 2
+
+        # Verify analysis stored
+        resp = client.get("/api/v1/analysis", headers=_HEADERS)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+
+    def test_profile_updated_after_analysis(self, client):
+        """Behavioral profile is updated after analysis."""
+        import asyncio
+
+        # Create 2 sessions with summaries
+        for sid, intention in [
+            ("sess-l3-prof-a", "Implement feature A"),
+            ("sess-l3-prof-b", "Implement feature B"),
+        ]:
+            _create_session(client, sid, intention)
+            for tool, args in [
+                ("read", {"path": "src/a.ts"}),
+                ("edit", {"filePath": "src/a.ts", "oldString": "x", "newString": "y"}),
+                ("read", {"path": "src/b.ts"}),
+                ("bash", {"command": "npm test"}),
+                ("read", {"path": "src/c.ts"}),
+            ]:
+                _evaluate(client, sid, tool, args)
+
+        from intaris.analyzer import generate_summary, run_analysis
+        from intaris.config import load_config
+        from intaris.llm import LLMClient
+        from intaris.server import _get_db
+
+        db = _get_db()
+        cfg = load_config()
+        llm = LLMClient(cfg.llm_analysis)
+
+        for sid in ["sess-l3-prof-a", "sess-l3-prof-b"]:
+            asyncio.run(
+                generate_summary(
+                    db,
+                    llm,
+                    {
+                        "user_id": _DEFAULT_USER,
+                        "session_id": sid,
+                        "payload": {"trigger": "manual"},
+                    },
+                )
+            )
+
+        asyncio.run(
+            run_analysis(
+                db,
+                llm,
+                {
+                    "user_id": _DEFAULT_USER,
+                    "payload": {
+                        "triggered_by": "manual",
+                        "agent_id": "",
+                        "lookback_days": 30,
+                    },
+                },
+            )
+        )
+
+        # Verify profile exists in DB
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT risk_level, profile_version FROM behavioral_profiles "
+                "WHERE user_id = ?",
+                (_DEFAULT_USER,),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        assert row["risk_level"] in ("low", "medium", "high", "critical")
+        assert row["profile_version"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# TC14: Behavioral Profile Injection
+# ---------------------------------------------------------------------------
+
+
+class TestBehavioralProfileInjection:
+    """Test that behavioral profiles are injected into evaluations."""
+
+    def test_profile_version_recorded_in_audit(self, client):
+        """High-risk profile version is recorded in audit records."""
+        from intaris.server import _get_db
+
+        db = _get_db()
+
+        _create_session(
+            client,
+            "sess-prof-inj",
+            "Implement a simple utility function",
+        )
+
+        # Pre-insert a high-risk behavioral profile directly
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        with db.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO behavioral_profiles
+                    (user_id, agent_id, risk_level, active_alerts,
+                     context_summary, profile_version, last_analysis_id,
+                     updated_at)
+                VALUES (?, '', 'high', '[]',
+                        'Agent shows unusual patterns.', 5, 'test-analysis',
+                        ?)
+                """,
+                (_DEFAULT_USER, now),
+            )
+
+        # Evaluate a write tool call (goes through LLM path)
+        result = _evaluate(
+            client,
+            "sess-prof-inj",
+            "edit",
+            {
+                "filePath": "src/util.ts",
+                "oldString": "// placeholder",
+                "newString": "export function add(a, b) { return a + b; }",
+            },
+        )
+
+        # Verify the audit record has profile_version
+        audit = _get_audit_record(client, result["call_id"])
+        assert audit.get("profile_version") == 5
