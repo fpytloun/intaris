@@ -285,6 +285,15 @@ class ReasoningRequest(BaseModel):
 
     session_id: str = Field(..., description="Session identifier")
     content: str = Field(..., max_length=65536, description="Agent reasoning text")
+    context: str | None = Field(
+        None,
+        max_length=65536,
+        description=(
+            "Optional conversational context (e.g., assistant's last response) "
+            "to help interpret short user replies like 'ok, do it'. "
+            "Used for intention generation only — not stored in audit log."
+        ),
+    )
 
 
 class ReasoningResponse(BaseModel):

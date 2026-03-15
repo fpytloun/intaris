@@ -143,7 +143,11 @@ async def submit_reasoning(
             barrier = getattr(http_request.app.state, "intention_barrier", None)
             if barrier is not None:
                 try:
-                    await barrier.trigger(ctx.user_id, request.session_id)
+                    await barrier.trigger(
+                        ctx.user_id,
+                        request.session_id,
+                        context=request.context,
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to trigger intention barrier",

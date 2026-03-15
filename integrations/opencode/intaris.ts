@@ -56,6 +56,8 @@ interface SessionState {
   intentionUpdated: boolean
   intentionPending: boolean
   isIdle: boolean
+  // Last assistant response text for intention context
+  lastAssistantText: string
   // Recording buffer
   recordingBuffer: RecordingEvent[]
 }
@@ -275,6 +277,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         intentionUpdated: false,
         intentionPending: false,
         isIdle: false,
+        lastAssistantText: "",
         recordingBuffer: [],
       }
       sessions.set(sessionId, state)
@@ -744,12 +747,19 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           .trim()
 
         if (userText) {
+          // Include assistant's last response as context for intention
+          // generation. This helps interpret short user replies like
+          // "ok, do it" by providing what the assistant proposed.
+          const assistantContext = state.lastAssistantText || undefined
+          state.lastAssistantText = ""  // Consumed — clear for next turn
+
           callApi(
             "POST",
             "/api/v1/reasoning",
             {
               session_id: state.intarisSessionId,
               content: `User message: ${userText}`,
+              ...(assistantContext && { context: assistantContext }),
             },
             2000,
           ).catch(() => {})
@@ -879,6 +889,17 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
         const sessionId: string = part.sessionID
         if (!sessionId) return
+
+        // Track last assistant text for intention context.
+        // part.text contains the full accumulated text (not just the delta).
+        // When the user next sends a message, this context helps the
+        // intention generator understand what "ok, do it" refers to.
+        if (part.type === "text" && typeof part.text === "string") {
+          const state = sessions.get(sessionId)
+          if (state) {
+            state.lastAssistantText = part.text
+          }
+        }
 
         recordEvent(sessionId, {
           type: "part",

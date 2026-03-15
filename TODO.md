@@ -81,11 +81,6 @@ Only later when task was done, there was reasoning update to `Fixing a bug in th
 
 ## Issues
 
-- "High risk — requires human review. The tool call edits a local project file (db.py) to modify database schema by adding/adjusting tables and indexes related to agent/session guardrails. This is an operational change with potential systemic impact on data integrity and migrations, and thus should be reviewed." Intention: "Implementing UI controls and a trustworthy hierarchical analysis workflow in intaris where console/events views coexist, analysis history sessions are clickable (open modals), child-session analyses are run first and incorporated into parent-session conclusions so no subsession is omitted, with metadata rules for agent_id/agent_type and L3 only operating on parent sessions."
-
-- Child session misaligned with parent (oc-ses_311ad1ebeffe3ua1uURWw78LSf): The child intends to perform L2/L3 code-review analyses in a subsession, but the parent explicitly requires L3 analyses to operate only on parent sessions; allowing L3 in the child contradicts that constraint, so the intentions are incompatible.. Parent intention: Implementing UI controls and a trustworthy hierarchical analysis workflow in intaris where console/events views coexist, analysis history sessions are clickable (open modals), child-session analyses are run first and incorporated into parent-session conclusions so no subsession is omitted, with metadata rules for agent_id/agent_type and L3 only operating on parent sessions.
-Intention: "OpenCode codereview: Code review L2/L3 analysis (@codereview subagent)" (file read)
-
 ## Minor
 
 ## Major complex
@@ -105,5 +100,3 @@ Intention: "OpenCode codereview: Code review L2/L3 analysis (@codereview subagen
 
 - guardrails involving memories (facts, preferences) as another policy layer - eg. memory sais never run git push without user instruction and agent runs git push without explicit instruction
 - overall think about introducing configurable policies
-
-## Issues
