@@ -61,8 +61,6 @@ _PARENT_RECHECK_DELAY_S = 30
 # The partitioner splits data into windows that fit within this budget.
 # No content is ever truncated — if there's too much data, more windows are created.
 _MAX_WINDOW_CHARS = 60_000
-# Hard limit on event store reads to prevent OOM (C2 fix)
-_MAX_EVENT_READ = 5_000
 # Formatting overhead per conversation entry (timestamp + role prefix + tags)
 _ENTRY_OVERHEAD = 50
 # Estimated chars per compressed tool call line
@@ -172,14 +170,19 @@ async def generate_summary(
             }
 
         if children_needing_summaries and parent_check_count >= _MAX_PARENT_RECHECK:
-            logger.warning(
-                "Parent session %s: max re-enqueue reached (%d), "
-                "proceeding with best-effort data",
+            # Exclude children without summaries — don't use raw metadata.
+            # These children either had no data or their summaries failed.
+            unsummarized_ids = {c["session_id"] for c in children_needing_summaries}
+            children = [c for c in children if c["session_id"] not in unsummarized_ids]
+            logger.info(
+                "Parent session %s: excluding %d unsummarized children "
+                "after %d re-checks",
                 session_id,
+                len(unsummarized_ids),
                 parent_check_count,
             )
 
-        # Collect child data (compacted > window > raw metadata)
+        # Collect child data (compacted > window summaries only)
         child_data = _collect_child_data(db, user_id, children)
 
     # ── Step 2: Determine window range ────────────────────────────
@@ -207,7 +210,7 @@ async def generate_summary(
     )
 
     # ── Step 3: Try event-enriched path ───────────────────────────
-    conversation, event_read_truncated = _get_session_events(
+    conversation = _get_session_events(
         event_store, user_id, session_id, window_start, window_end
     )
     event_enriched = bool(conversation)
@@ -517,7 +520,6 @@ async def generate_summary(
             # Annotate with event-enriched info
             compaction_result["event_enriched"] = event_enriched
             compaction_result["windows_generated"] = windows_generated
-            compaction_result["event_read_truncated"] = event_read_truncated
             return compaction_result
 
     # If we only generated tail window(s), return that info
@@ -531,7 +533,6 @@ async def generate_summary(
             "compacted": False,
             "event_enriched": event_enriched,
             "windows_generated": windows_generated,
-            "event_read_truncated": event_read_truncated,
         }
 
     # Exactly 1 window exists, no compaction needed
@@ -804,12 +805,19 @@ def _store_summary(
 
     Returns the summary ID.
     """
+    _VALID_TRIGGERS = {"inactivity", "volume", "close", "manual", "compaction"}
+
     summary_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     tools_used = result.get("tools_used", [])
     risk_indicators = result.get("risk_indicators", [])
 
     alignment = result.get("intent_alignment", "unclear")
+
+    # Sanitize trigger to match DB CHECK constraint
+    if trigger not in _VALID_TRIGGERS:
+        logger.debug("Mapping unknown trigger %r to 'manual'", trigger)
+        trigger = "manual"
 
     with db.cursor() as cur:
         cur.execute(
@@ -982,13 +990,14 @@ def _collect_child_data(
                             ri = []
                     entry["risk_indicators"] = ri or []
                 else:
-                    # Raw metadata fallback
-                    entry["summary_source"] = "metadata"
-                    logger.warning(
-                        "Child session %s summary unavailable, "
-                        "using raw metadata fallback",
+                    # No summary available — exclude this child entirely.
+                    # Only properly analyzed children are included.
+                    logger.debug(
+                        "Child session %s has no summary, excluding "
+                        "from parent analysis",
                         child_sid,
                     )
+                    continue  # Skip — don't append to child_data
 
         child_data.append(entry)
 
@@ -1001,7 +1010,7 @@ def _get_session_events(
     session_id: str,
     after_ts: str | None,
     before_ts: str | None,
-) -> tuple[list[dict[str, Any]], bool]:
+) -> list[dict[str, Any]]:
     """Fetch and process session events for L2 analysis enrichment.
 
     Reads ``part`` and ``message`` events from the event store, deduplicates
@@ -1019,11 +1028,11 @@ def _get_session_events(
         before_ts: Window end timestamp (ISO 8601).
 
     Returns:
-        Tuple of (conversation entries, event_read_truncated flag).
-        Conversation entries are ``{ts, role, text, seq}`` dicts sorted by seq.
+        List of conversation entries (``{ts, role, text, seq}`` dicts
+        sorted by seq).
     """
     if event_store is None:
-        return [], False
+        return []
 
     try:
         raw_events = event_store.read(
@@ -1032,7 +1041,6 @@ def _get_session_events(
             event_types={"part", "message"},
             after_ts=after_ts,
             before_ts=before_ts,
-            limit=_MAX_EVENT_READ,
         )
     except Exception:
         logger.exception(
@@ -1040,21 +1048,10 @@ def _get_session_events(
             user_id,
             session_id,
         )
-        return [], False
+        return []
 
     if not raw_events:
-        return [], False
-
-    # Log if we hit the read limit (C2 — truncation warning).
-    event_read_truncated = len(raw_events) >= _MAX_EVENT_READ
-    if event_read_truncated:
-        logger.warning(
-            "Event store read hit limit (%d) for %s/%s — "
-            "some events may be missing from analysis",
-            _MAX_EVENT_READ,
-            user_id,
-            session_id,
-        )
+        return []
 
     from intaris.sanitize import sanitize_for_prompt
 
@@ -1151,7 +1148,7 @@ def _get_session_events(
     # Sort by seq (primary ordering key)
     conversation.sort(key=lambda e: e["seq"])
 
-    return conversation, event_read_truncated
+    return conversation
 
 
 def _partition_into_windows(

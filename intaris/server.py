@@ -528,7 +528,11 @@ async def lifespan(app):
                 logger.info("MCP proxy initialized")
                 yield
                 # Cleanup MCP proxy before exiting the session manager context.
-                await mcp_proxy.shutdown()
+                # Timeout prevents hanging on unresponsive upstream servers.
+                try:
+                    await asyncio.wait_for(mcp_proxy.shutdown(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("MCP proxy shutdown timed out (5s)")
         else:
             yield
     except (asyncio.CancelledError, KeyboardInterrupt):
@@ -536,28 +540,32 @@ async def lifespan(app):
         # Best-effort MCP proxy cleanup if interrupted before normal exit
         if mcp_proxy is not None:
             with contextlib.suppress(Exception):
-                await mcp_proxy.shutdown()
+                await asyncio.wait_for(mcp_proxy.shutdown(), timeout=3.0)
     finally:
         # Cleanup always runs, even on CancelledError/KeyboardInterrupt.
-        # Each step is individually guarded so one failure doesn't block
-        # the rest.
+        # Each step is individually guarded with timeouts so one failure
+        # or hang doesn't block the rest.
         _mcp_proxy_ref = None
 
-        # Flush event store buffers (deterministic — no event loss)
+        # Flush event store buffers (synchronous — fast)
         if app.state.event_store is not None:
             with contextlib.suppress(Exception):
                 app.state.event_store.flush_all()
                 logger.info("Event store flushed")
 
+        # Stop background worker (5s timeout — has its own internal timeout)
         with contextlib.suppress(Exception):
-            await background_worker.stop()
+            await asyncio.wait_for(background_worker.stop(), timeout=5.0)
 
+        # Close webhook client (2s timeout)
         with contextlib.suppress(Exception):
-            await app.state.webhook.close()
+            await asyncio.wait_for(app.state.webhook.close(), timeout=2.0)
 
+        # Close notification dispatcher (2s timeout)
         with contextlib.suppress(Exception):
-            await notification_dispatcher.close()
+            await asyncio.wait_for(notification_dispatcher.close(), timeout=2.0)
 
+        # Close database (synchronous)
         with contextlib.suppress(Exception):
             db = _get_db()
             db.close()

@@ -56,7 +56,6 @@ class Metrics:
         self.summary_event_enriched_total: int = 0
         self.summary_audit_only_total: int = 0
         self.summary_partitions_total: int = 0
-        self.event_read_truncated_total: int = 0
         # Liveness timestamps (ISO 8601)
         self.last_worker_poll: str = ""
         self.last_idle_sweep: str = ""
@@ -78,7 +77,6 @@ class Metrics:
             "summary_event_enriched_total": self.summary_event_enriched_total,
             "summary_audit_only_total": self.summary_audit_only_total,
             "summary_partitions_total": self.summary_partitions_total,
-            "event_read_truncated_total": self.event_read_truncated_total,
             "last_worker_poll": self.last_worker_poll,
             "last_idle_sweep": self.last_idle_sweep,
         }
@@ -505,29 +503,40 @@ class BackgroundWorker:
     async def start(self) -> None:
         """Launch all background loops.
 
-        Called during server lifespan startup.
+        Called during server lifespan startup. Does NOT block on startup
+        catchup — catchup runs in the first worker loop iteration so the
+        server can accept requests immediately.
         """
         if not self._config.enabled:
             logger.info("Behavioral analysis disabled — background worker not started")
             return
 
         self._running = True
+        self._catchup_done = False
 
-        # Startup catch-up: recover from crashes
-        await self._startup_catchup()
+        # Launch parallel worker loops (atomic claim prevents double-processing)
+        worker_count = self._config.worker_count
+        for i in range(worker_count):
+            self._tasks.append(
+                asyncio.create_task(
+                    self._resilient_loop(f"worker-{i}", self._worker_loop)
+                )
+            )
 
-        # Launch background loops with restart-on-failure wrappers
-        self._tasks = [
-            asyncio.create_task(self._resilient_loop("worker", self._worker_loop)),
+        # Launch idle sweeper and periodic scheduler
+        self._tasks.append(
             asyncio.create_task(
                 self._resilient_loop("idle_sweeper", self._idle_sweeper)
-            ),
+            )
+        )
+        self._tasks.append(
             asyncio.create_task(
                 self._resilient_loop("scheduler", self._periodic_scheduler)
-            ),
-        ]
+            )
+        )
 
         # Add event store flush loop if event store is configured
+        loop_count = worker_count + 2  # workers + sweeper + scheduler
         if self._event_store is not None:
             self._tasks.append(
                 asyncio.create_task(
@@ -536,22 +545,33 @@ class BackgroundWorker:
                     )
                 )
             )
-            logger.info(
-                "Background worker started (4 loops, incl. event store flusher)"
-            )
-        else:
-            logger.info("Background worker started (3 loops)")
+            loop_count += 1
+
+        logger.info(
+            "Background worker started (%d loops: %d workers, idle_sweeper, "
+            "scheduler%s)",
+            loop_count,
+            worker_count,
+            ", event_store_flusher" if self._event_store is not None else "",
+        )
 
     async def stop(self) -> None:
         """Cancel all background loops.
 
-        Called during server lifespan shutdown.
+        Called during server lifespan shutdown. Uses a 5-second timeout
+        to prevent hanging on unresponsive tasks.
         """
         self._running = False
         for task in self._tasks:
             task.cancel()
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._tasks, return_exceptions=True),
+                    timeout=5.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Background tasks did not stop within 5s timeout")
         self._tasks.clear()
         logger.info("Background worker stopped")
 
@@ -593,7 +613,17 @@ class BackgroundWorker:
                 backoff = 5  # Reset backoff on normal exit
 
     async def _worker_loop(self) -> None:
-        """Poll task queue and execute tasks."""
+        """Poll task queue and execute tasks.
+
+        Multiple instances of this loop run concurrently (configurable
+        via ANALYSIS_WORKER_COUNT). Each claims tasks atomically via
+        UPDATE...RETURNING — no double-processing risk.
+        """
+        # Run startup catchup once (first worker to reach this wins)
+        if not self._catchup_done:
+            self._catchup_done = True
+            await self._startup_catchup()
+
         stale_check_counter = 0
 
         while self._running:
@@ -629,6 +659,26 @@ class BackgroundWorker:
                     result = await self._execute_summary_task(task)
                     if result.get("status") != "waiting_for_children":
                         self.metrics.summaries_generated_total += 1
+                    # Mark session as "summary attempted" even for skips.
+                    # This prevents parent sessions from endlessly
+                    # re-enqueuing child tasks that will always be skipped.
+                    if (
+                        result.get("status") == "skipped"
+                        and task.get("session_id")
+                        and task.get("user_id")
+                    ):
+                        try:
+                            from intaris.session import SessionStore
+
+                            SessionStore(self._db).increment_summary_count(
+                                task["session_id"],
+                                user_id=task["user_id"],
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Failed to increment summary_count for skipped task",
+                                exc_info=True,
+                            )
                     if result.get("compacted"):
                         self.metrics.compaction_total += 1
                     children_count = len(result.get("child_sessions", []))
@@ -641,8 +691,6 @@ class BackgroundWorker:
                         self.metrics.summary_partitions_total += windows_gen
                     elif result.get("status") != "skipped":
                         self.metrics.summary_audit_only_total += 1
-                    if result.get("event_read_truncated"):
-                        self.metrics.event_read_truncated_total += 1
                     # Notify on concerning L2 summaries
                     if self._notification_dispatcher and self._should_notify_summary(
                         result
@@ -755,17 +803,21 @@ class BackgroundWorker:
             )
 
             # Update the next_attempt_at for the newly enqueued task
-            # (the enqueue method sets it to now, but we want a delay)
+            # (the enqueue method sets it to now, but we want a delay).
+            # Use subquery for PostgreSQL compatibility (no ORDER BY in UPDATE).
             with self._db.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE analysis_tasks
                     SET next_attempt_at = ?
-                    WHERE user_id = ? AND session_id = ?
-                      AND task_type = 'summary'
-                      AND status = 'pending'
-                    ORDER BY created_at DESC
-                    LIMIT 1
+                    WHERE id = (
+                        SELECT id FROM analysis_tasks
+                        WHERE user_id = ? AND session_id = ?
+                          AND task_type = 'summary'
+                          AND status = 'pending'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    )
                     """,
                     (next_attempt, user_id, session_id),
                 )
@@ -1195,7 +1247,7 @@ class BackgroundWorker:
                             "summary",
                             uid,
                             session_id=sid,
-                            payload={"trigger": "startup_catchup"},
+                            payload={"trigger": "inactivity"},
                             priority=1,
                         )
                         enqueued += 1

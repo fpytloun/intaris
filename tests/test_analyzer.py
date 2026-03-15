@@ -956,16 +956,16 @@ class TestGetSessionEvents:
     def test_none_event_store(self):
         from intaris.analyzer import _get_session_events
 
-        result, trunc = _get_session_events(None, TEST_USER, "s", None, None)
-        assert result == [] and trunc is False
+        result = _get_session_events(None, TEST_USER, "s", None, None)
+        assert result == []
 
     def test_empty_events(self):
         from intaris.analyzer import _get_session_events
 
         es = MagicMock()
         es.read.return_value = []
-        result, trunc = _get_session_events(es, TEST_USER, "s", None, None)
-        assert result == [] and trunc is False
+        result = _get_session_events(es, TEST_USER, "s", None, None)
+        assert result == []
 
     def test_user_messages(self):
         from intaris.analyzer import _get_session_events
@@ -979,7 +979,7 @@ class TestGetSessionEvents:
                 "data": {"role": "user", "content": "Hello"},
             },
         ]
-        result, _ = _get_session_events(es, TEST_USER, "s", None, None)
+        result = _get_session_events(es, TEST_USER, "s", None, None)
         assert len(result) == 1
         assert result[0]["role"] == "user"
 
@@ -1001,7 +1001,7 @@ class TestGetSessionEvents:
                 },
             },
         ]
-        result, _ = _get_session_events(es, TEST_USER, "s", None, None)
+        result = _get_session_events(es, TEST_USER, "s", None, None)
         assert "Part 1" in result[0]["text"] and "Part 2" in result[0]["text"]
 
     def test_dedup_parts_by_id(self):
@@ -1022,7 +1022,7 @@ class TestGetSessionEvents:
                 "data": {"part": {"id": "p1", "type": "text", "text": "Final"}},
             },
         ]
-        result, _ = _get_session_events(es, TEST_USER, "s", None, None)
+        result = _get_session_events(es, TEST_USER, "s", None, None)
         assert len(result) == 1
 
     def test_graceful_fallback(self):
@@ -1030,24 +1030,8 @@ class TestGetSessionEvents:
 
         es = MagicMock()
         es.read.side_effect = RuntimeError("fail")
-        result, trunc = _get_session_events(es, TEST_USER, "s", None, None)
-        assert result == [] and trunc is False
-
-    def test_truncation_flag(self):
-        from intaris.analyzer import _MAX_EVENT_READ, _get_session_events
-
-        es = MagicMock()
-        es.read.return_value = [
-            {
-                "type": "message",
-                "seq": i,
-                "ts": f"2026-01-01T00:{i % 60:02d}:00",
-                "data": {"role": "user", "content": f"M{i}"},
-            }
-            for i in range(_MAX_EVENT_READ)
-        ]
-        _, trunc = _get_session_events(es, TEST_USER, "s", None, None)
-        assert trunc is True
+        result = _get_session_events(es, TEST_USER, "s", None, None)
+        assert result == []
 
     def test_skips_non_text_parts(self):
         from intaris.analyzer import _get_session_events
@@ -1067,7 +1051,7 @@ class TestGetSessionEvents:
                 "data": {"part": {"id": "p2", "type": "text", "text": "Real"}},
             },
         ]
-        result, _ = _get_session_events(es, TEST_USER, "s", None, None)
+        result = _get_session_events(es, TEST_USER, "s", None, None)
         assert len(result) == 1
 
     def test_sorted_by_seq(self):
@@ -1088,7 +1072,7 @@ class TestGetSessionEvents:
                 "data": {"part": {"id": "p1", "type": "text", "text": "A"}},
             },
         ]
-        result, _ = _get_session_events(es, TEST_USER, "s", None, None)
+        result = _get_session_events(es, TEST_USER, "s", None, None)
         assert result[0]["seq"] < result[1]["seq"]
 
 
@@ -1183,7 +1167,9 @@ class TestHierarchicalSummary:
             == "window"
         )
 
-    def test_child_data_metadata_fallback(self, db, session_store):
+    def test_child_without_summary_excluded(self, db, session_store):
+        """Children without summaries are excluded entirely — no raw
+        metadata fallback."""
         _create_session(session_store, "sess-p3")
         _create_session(session_store, "sess-c3", parent_session_id="sess-p3")
         from intaris.analyzer import _collect_child_data
@@ -1201,10 +1187,8 @@ class TestHierarchicalSummary:
                 "last_activity_at": "",
             }
         ]
-        assert (
-            _collect_child_data(db, TEST_USER, children)[0]["summary_source"]
-            == "metadata"
-        )
+        result = _collect_child_data(db, TEST_USER, children)
+        assert len(result) == 0, "Children without summaries should be excluded"
 
 
 # ── TestCompaction ────────────────────────────────────────────────────

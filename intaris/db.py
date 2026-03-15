@@ -699,6 +699,24 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_sessions_parent "
                 "ON sessions(user_id, parent_session_id)"
             )
+
+            # Migration: update session_summaries trigger CHECK constraint
+            # to include 'compaction'. PostgreSQL requires DROP + ADD.
+            try:
+                cur.execute(
+                    "ALTER TABLE session_summaries "
+                    "DROP CONSTRAINT IF EXISTS session_summaries_trigger_check"
+                )
+                cur.execute(
+                    "ALTER TABLE session_summaries "
+                    "ADD CONSTRAINT session_summaries_trigger_check "
+                    "CHECK (trigger IN ("
+                    "'inactivity', 'volume', 'close', 'manual', 'compaction'"
+                    "))"
+                )
+            except Exception:
+                # Constraint may already be correct or table may not exist yet
+                pass
         finally:
             cur.close()
 

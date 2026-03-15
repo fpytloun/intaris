@@ -221,6 +221,11 @@ class AnalysisConfig:
         default_factory=lambda: _env_int("ANALYSIS_LOOKBACK_DAYS", 30)
     )
 
+    # Number of parallel task queue workers.
+    worker_count: int = field(
+        default_factory=lambda: _env_int("ANALYSIS_WORKER_COUNT", 4)
+    )
+
 
 @dataclass
 class NotificationConfig:

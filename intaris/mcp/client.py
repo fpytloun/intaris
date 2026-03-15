@@ -132,7 +132,11 @@ class MCPConnectionManager:
             )
 
     async def shutdown(self) -> None:
-        """Close all connections and stop the sweep task."""
+        """Close all connections and stop the sweep task.
+
+        Uses per-connection timeouts to prevent hanging on unresponsive
+        upstream MCP servers.
+        """
         if self._sweep_task is not None:
             self._sweep_task.cancel()
             try:
@@ -144,7 +148,10 @@ class MCPConnectionManager:
         async with self._lock:
             keys = list(self._connections.keys())
             for key in keys:
-                await self._close_connection(key)
+                try:
+                    await asyncio.wait_for(self._close_connection(key), timeout=3.0)
+                except (asyncio.TimeoutError, Exception):
+                    logger.warning("MCP connection %s close timed out or failed", key)
             logger.info(
                 "MCPConnectionManager shutdown: closed %d connections", len(keys)
             )
