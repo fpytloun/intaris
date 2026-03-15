@@ -853,6 +853,53 @@ class Database:
                     "PG migration for numeric risk_level failed",
                     exc_info=True,
                 )
+
+            # Migration: ensure behavioral_profiles has compound PK
+            # (user_id, agent_id). Older PG installs may have PK on
+            # user_id only (agent_id was added via ALTER TABLE ADD
+            # COLUMN, which doesn't update the PK). The compound PK
+            # is required for ON CONFLICT (user_id, agent_id) upserts.
+            try:
+                cur.execute(
+                    "SELECT constraint_name FROM information_schema."
+                    "table_constraints WHERE table_name = "
+                    "'behavioral_profiles' AND constraint_type = "
+                    "'PRIMARY KEY'"
+                )
+                pk_row = cur.fetchone()
+                if pk_row:
+                    pk_name = (
+                        pk_row["constraint_name"]
+                        if isinstance(pk_row, dict)
+                        else pk_row[0]
+                    )
+                    # Check if agent_id is in the PK columns
+                    cur.execute(
+                        "SELECT column_name FROM information_schema."
+                        "key_column_usage WHERE constraint_name = %s "
+                        "AND table_name = 'behavioral_profiles'",
+                        (pk_name,),
+                    )
+                    pk_cols = {
+                        (r["column_name"] if isinstance(r, dict) else r[0])
+                        for r in cur.fetchall()
+                    }
+                    if "agent_id" not in pk_cols:
+                        logger.info(
+                            "Migration (PG): adding agent_id to behavioral_profiles PK"
+                        )
+                        cur.execute(
+                            f"ALTER TABLE behavioral_profiles DROP CONSTRAINT {pk_name}"
+                        )
+                        cur.execute(
+                            "ALTER TABLE behavioral_profiles "
+                            "ADD PRIMARY KEY (user_id, agent_id)"
+                        )
+            except Exception:
+                logger.warning(
+                    "PG migration for behavioral_profiles compound PK failed",
+                    exc_info=True,
+                )
         finally:
             cur.close()
 

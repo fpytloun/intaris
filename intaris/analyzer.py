@@ -746,6 +746,28 @@ def run_analysis(
         if "session_ids" not in finding:
             finding["session_ids"] = []
 
+    # Normalize recommendations — the LLM may return plain strings
+    # instead of {action, priority, rationale} objects in fallback mode.
+    for i, rec in enumerate(recommendations):
+        if isinstance(rec, str):
+            recommendations[i] = {
+                "action": "review",
+                "priority": "medium",
+                "rationale": rec,
+            }
+        elif isinstance(rec, dict):
+            if "rationale" not in rec:
+                rec["rationale"] = (
+                    rec.pop("description", None)
+                    or rec.pop("detail", None)
+                    or rec.pop("summary", None)
+                    or ""
+                )
+            if "action" not in rec:
+                rec["action"] = rec.pop("recommendation", "review")
+            if "priority" not in rec:
+                rec["priority"] = "medium"
+
     with db.cursor() as cur:
         cur.execute(
             """

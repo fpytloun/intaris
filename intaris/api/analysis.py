@@ -777,6 +777,28 @@ async def list_analyses(
                         d[field] = json.loads(d[field])
                     except (json.JSONDecodeError, TypeError):
                         pass
+            # Normalize recommendations stored as plain strings
+            # (LLM fallback mode without strict schema enforcement)
+            if isinstance(d.get("recommendations"), list):
+                d["recommendations"] = [
+                    r
+                    if isinstance(r, dict)
+                    else {
+                        "action": "review",
+                        "priority": "medium",
+                        "rationale": str(r),
+                    }
+                    for r in d["recommendations"]
+                ]
+            # Normalize findings stored with 'summary' instead of 'detail'
+            if isinstance(d.get("findings"), list):
+                for f in d["findings"]:
+                    if isinstance(f, dict) and "detail" not in f:
+                        f["detail"] = (
+                            f.pop("summary", None) or f.pop("description", None) or ""
+                        )
+                    if isinstance(f, dict) and "session_ids" not in f:
+                        f["session_ids"] = []
             items.append(AnalysisRecord(**d))
 
         pages = max(1, (total + limit - 1) // limit)
