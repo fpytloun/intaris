@@ -35,16 +35,16 @@ from intaris.session import SessionStore
 logger = logging.getLogger(__name__)
 
 # Default barrier timeout in milliseconds.
-# Budget (hooks): 1s barrier + 4s LLM eval = 5s max (within circuit breaker).
-# Budget (plugin): 2s arrival + 1s barrier + 4s LLM eval = 7s (within 30s timeout).
-_DEFAULT_TIMEOUT_MS = 1000
+# Budget (hooks): 5s barrier + 4s LLM eval = 9s max.
+# Budget (plugin): 10s arrival + 5s barrier + 4s LLM eval = 19s (within 30s timeout).
+_DEFAULT_TIMEOUT_MS = 5000
 
 # Default arrival poll timeout in milliseconds.
 # When the client signals intention_pending=True but the /reasoning call
 # hasn't arrived yet, the barrier waits up to this long for trigger() to
 # be called. Uses asyncio.Event for zero-latency wakeup (no polling).
-# Budget: 2s arrival + 1s barrier + 4s LLM eval = 7s (within 30s plugin timeout).
-_DEFAULT_POLL_TIMEOUT_MS = 2000
+# Budget: 10s arrival + 5s barrier + 4s LLM eval = 19s (within 30s plugin timeout).
+_DEFAULT_POLL_TIMEOUT_MS = 10000
 
 
 def generate_intention(
