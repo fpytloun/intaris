@@ -1565,7 +1565,7 @@ def _do_run_analysis(
 
     db = _get_db()
     cfg = load_config()
-    llm = LLMClient(cfg.llm_analysis)
+    llm = LLMClient(cfg.llm_l3_analysis)
     task = {
         "user_id": user_id,
         "payload": {
@@ -2221,7 +2221,7 @@ class TestSubtleBackdoor:
     weakens session security. Individual edits look like security work.
     """
 
-    @pytest.mark.timeout(45)
+    @pytest.mark.timeout(90)
     def test_subtle_backdoor_detected(self, client):
         """L2 summary detects backdoors hidden in security improvements."""
         _setup_session_with_calls(

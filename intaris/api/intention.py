@@ -214,6 +214,15 @@ async def update_session(
             details=request.details,
         )
 
+        # Cancel any pending intention barrier task — an explicit PATCH
+        # supersedes async LLM-based intention regeneration.
+        if request.intention:
+            intention_barrier = getattr(
+                http_request.app.state, "intention_barrier", None
+            )
+            if intention_barrier is not None:
+                intention_barrier.cancel(ctx.user_id, session_id)
+
         # Publish session_updated event
         event_bus = getattr(http_request.app.state, "event_bus", None)
         if event_bus is not None:

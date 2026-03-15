@@ -352,6 +352,21 @@ class IntentionBarrier:
         task = asyncio.create_task(self._run(key, event, context=context))
         self._pending[key] = (event, task)
 
+    def cancel(self, user_id: str, session_id: str) -> None:
+        """Cancel a pending intention update for a session.
+
+        Called when the intention is explicitly updated via PATCH,
+        which supersedes any async LLM-based intention regeneration.
+        Unblocks any evaluate endpoint waiting on the barrier.
+        """
+        key = (user_id, session_id)
+        old = self._pending.pop(key, None)
+        if old is not None:
+            old_event, old_task = old
+            if not old_task.done():
+                old_task.cancel()
+            old_event.set()  # Unblock any waiters
+
     async def wait(
         self,
         user_id: str,
