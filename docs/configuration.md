@@ -64,7 +64,7 @@ Separate LLM configuration for analysis tasks (session summaries, cross-session 
 | `SESSION_IDLE_TIMEOUT_MINUTES` | `30` | Minutes of inactivity before session transitions to idle |
 | `SUMMARY_VOLUME_THRESHOLD` | `50` | Evaluate calls per session before triggering a summary |
 | `ANALYSIS_INTERVAL_MINUTES` | `60` | Minutes between periodic cross-session analysis runs |
-| `ANALYSIS_LOOKBACK_DAYS` | `30` | Days of history to include in cross-session analysis |
+| `ANALYSIS_LOOKBACK_DAYS` | `7` | Days of history to include in cross-session analysis |
 
 ## Barriers
 

@@ -186,7 +186,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `SESSION_IDLE_TIMEOUT_MINUTES` | Minutes of inactivity before session transitions to idle (default `30`) |
 | `SUMMARY_VOLUME_THRESHOLD` | Evaluate calls per session before triggering a summary (default `50`) |
 | `ANALYSIS_INTERVAL_MINUTES` | Minutes between periodic cross-session analysis runs (default `60`) |
-| `ANALYSIS_LOOKBACK_DAYS` | Days of history to include in cross-session analysis (default `30`) |
+| `ANALYSIS_LOOKBACK_DAYS` | Days of history to include in cross-session analysis (default `7`) |
 | `ANALYSIS_LLM_MODEL` | LLM model for analysis tasks (default `gpt-5-mini`) |
 | `ANALYSIS_LLM_BASE_URL` | LLM base URL for analysis (falls back to `LLM_BASE_URL`) |
 | `ANALYSIS_LLM_API_KEY` | LLM API key for analysis (falls back to `LLM_API_KEY`) |

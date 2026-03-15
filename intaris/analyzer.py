@@ -633,6 +633,7 @@ def run_analysis(
 
     system_prompt = BEHAVIORAL_ANALYSIS_SYSTEM_PROMPT.format(
         anti_injection=ANTI_INJECTION_PREAMBLE,
+        lookback_days=lookback_days,
     )
 
     try:

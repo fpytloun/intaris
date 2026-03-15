@@ -377,7 +377,7 @@ class TestAnalysisConfigDefaults:
         assert config.session_idle_timeout_min == 30
         assert config.summary_volume_threshold == 50
         assert config.analysis_interval_min == 60
-        assert config.lookback_days == 30
+        assert config.lookback_days == 7
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("ANALYSIS_ENABLED", "false")

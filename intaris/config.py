@@ -217,8 +217,11 @@ class AnalysisConfig:
     )
 
     # Days of history to include in cross-session analysis.
+    # 7-day window balances pattern detection with responsive risk decay —
+    # incidents older than 7 days age out of the active profile while
+    # historical analyses remain permanently stored for visibility.
     lookback_days: int = field(
-        default_factory=lambda: _env_int("ANALYSIS_LOOKBACK_DAYS", 30)
+        default_factory=lambda: _env_int("ANALYSIS_LOOKBACK_DAYS", 7)
     )
 
     # Number of parallel task queue workers.
