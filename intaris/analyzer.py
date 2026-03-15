@@ -69,6 +69,56 @@ _TOOL_CALL_EST = 250
 _PARTITION_OVERHEAD = 2_000
 
 
+# ── Risk score helpers ────────────────────────────────────────────────
+
+
+def risk_band(score: int) -> str:
+    """Map a numeric risk score (1-10) to a named band.
+
+    Bands:
+        1-2: minimal — Normal activity, no concerning patterns.
+        3-4: low — Minor patterns, informational only.
+        5-6: moderate — Notable patterns, review recommended.
+        7-8: elevated — Concerning, may warrant policy changes.
+          9: high — Clear misalignment, triggers behavioral alert.
+         10: critical — Active threat, immediate intervention.
+    """
+    if score <= 2:
+        return "minimal"
+    if score <= 4:
+        return "low"
+    if score <= 6:
+        return "moderate"
+    if score <= 8:
+        return "elevated"
+    if score == 9:
+        return "high"
+    return "critical"
+
+
+def coerce_risk_score(value: Any, default: int = 1) -> int:
+    """Coerce an LLM-returned risk score to a clamped integer in [1, 10].
+
+    Handles string-encoded integers (e.g. ``"7"``), floats, and legacy
+    string enum values (``"low"`` → 1, ``"medium"`` → 4, etc.).
+    Returns *default* on any conversion failure.
+    """
+    if isinstance(value, int):
+        return max(1, min(10, value))
+    if isinstance(value, float):
+        return max(1, min(10, int(value)))
+    if isinstance(value, str):
+        # Try numeric parse first
+        try:
+            return max(1, min(10, int(value)))
+        except ValueError:
+            pass
+        # Legacy string enum fallback
+        legacy = {"low": 2, "medium": 4, "high": 7, "critical": 10}
+        return legacy.get(value.lower(), default)
+    return default
+
+
 def generate_summary(
     db: Database,
     llm: Any | None,
@@ -662,6 +712,11 @@ def run_analysis(
     session_ids = list(summaries_by_session.keys())
     findings = result.get("findings", [])
     recommendations = result.get("recommendations", [])
+    risk_score = coerce_risk_score(result.get("risk_level", 1))
+
+    # Coerce finding severities to integers
+    for finding in findings:
+        finding["severity"] = coerce_risk_score(finding.get("severity", 1))
 
     with db.cursor() as cur:
         cur.execute(
@@ -677,7 +732,7 @@ def run_analysis(
                 agent_id or None,
                 analysis_type,
                 json.dumps(session_ids),
-                result.get("risk_level", "low"),
+                risk_score,
                 json.dumps(findings),
                 json.dumps(recommendations),
                 now,
@@ -689,7 +744,7 @@ def run_analysis(
         db,
         user_id=user_id,
         agent_id=agent_id,
-        risk_level=result.get("risk_level", "low"),
+        risk_level=risk_score,
         context_summary=result.get("context_summary", ""),
         findings=findings,
         analysis_id=analysis_id,
@@ -697,10 +752,11 @@ def run_analysis(
 
     logger.info(
         "Cross-session analysis completed: user=%s agent=%s "
-        "risk=%s findings=%d recommendations=%d sessions=%d",
+        "risk=%d (%s) findings=%d recommendations=%d sessions=%d",
         user_id,
         agent_id,
-        result.get("risk_level"),
+        risk_score,
+        risk_band(risk_score),
         len(findings),
         len(recommendations),
         len(session_ids),
@@ -708,7 +764,7 @@ def run_analysis(
 
     return {
         "analysis_id": analysis_id,
-        "risk_level": result.get("risk_level"),
+        "risk_level": risk_score,
         "findings_count": len(findings),
         "recommendations_count": len(recommendations),
         "sessions_analyzed": len(session_ids),
@@ -1674,10 +1730,12 @@ def _append_child_section(
                 parts.append(f"Summary: {summary}")
             indicators = child.get("risk_indicators", [])
             if indicators:
-                ind_strs = [
-                    f"{i.get('indicator', '?')}({i.get('severity', '?')})"
-                    for i in indicators
-                ]
+                ind_strs = []
+                for i in indicators:
+                    sev = coerce_risk_score(i.get("severity", 1))
+                    ind_strs.append(
+                        f"{i.get('indicator', '?')}({sev}/{risk_band(sev)})"
+                    )
                 parts.append(f"Risk Indicators: {', '.join(ind_strs)}")
             else:
                 parts.append("Risk Indicators: none")
@@ -1933,11 +1991,13 @@ def _build_compaction_prompt(
 
         indicators = ws.get("risk_indicators", [])
         if isinstance(indicators, list) and indicators:
-            ind_strs = [
-                f"{ind.get('indicator', '?')}({ind.get('severity', '?')}): "
-                f"{ind.get('detail', '')[:100]}"
-                for ind in indicators
-            ]
+            ind_strs = []
+            for ind in indicators:
+                sev = coerce_risk_score(ind.get("severity", 1))
+                detail = ind.get("detail", "")[:100]
+                ind_strs.append(
+                    f"{ind.get('indicator', '?')}({sev}/{risk_band(sev)}): {detail}"
+                )
             parts.append(f"Risk Indicators: {'; '.join(ind_strs)}")
         else:
             parts.append("Risk Indicators: none")
@@ -2122,10 +2182,12 @@ def _build_analysis_prompt(
                 all_tools.update(tools)
 
         if all_indicators:
-            indicator_strs = [
-                f"{ind.get('indicator', '?')}({ind.get('severity', '?')})"
-                for ind in all_indicators
-            ]
+            indicator_strs = []
+            for ind in all_indicators:
+                sev = coerce_risk_score(ind.get("severity", 1))
+                indicator_strs.append(
+                    f"{ind.get('indicator', '?')}({sev}/{risk_band(sev)})"
+                )
             parts.append(f"  Risk indicators: {', '.join(indicator_strs)}")
 
         if all_tools:
@@ -2176,20 +2238,22 @@ def _update_profile(
     *,
     user_id: str,
     agent_id: str,
-    risk_level: str,
+    risk_level: int,
     context_summary: str,
     findings: list[dict[str, Any]],
     analysis_id: str,
 ) -> None:
     """Update (or create) the behavioral profile for a user+agent.
 
-    Extracts active alerts from high/critical findings and increments
-    the profile version.
+    Extracts active alerts from findings with severity >= 7 (elevated+)
+    and increments the profile version.
     """
     now = datetime.now(timezone.utc).isoformat()
 
-    # Extract active alerts from high/critical findings
-    active_alerts = [f for f in findings if f.get("severity") in ("high", "critical")]
+    # Extract active alerts from elevated+ findings (severity >= 7)
+    active_alerts = [
+        f for f in findings if coerce_risk_score(f.get("severity", 1)) >= 7
+    ]
 
     # Get current profile version (if exists)
     with db.cursor() as cur:
@@ -2246,9 +2310,10 @@ def _update_profile(
             )
 
     logger.info(
-        "Behavioral profile updated: user=%s agent=%s risk=%s version=%d",
+        "Behavioral profile updated: user=%s agent=%s risk=%d (%s) version=%d",
         user_id,
         agent_id,
         risk_level,
+        risk_band(risk_level),
         new_version,
     )

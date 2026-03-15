@@ -401,6 +401,9 @@ class Database:
         # Migration: add agent_id to behavioral_profiles (recreate with compound PK)
         self._migrate_behavioral_profiles_sqlite(conn)
 
+        # Migration: convert risk_level from TEXT enum to INTEGER 1-10
+        self._migrate_risk_level_numeric_sqlite(conn)
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
             "ON sessions(status, last_activity_at)"
@@ -465,6 +468,95 @@ class Database:
             "SELECT user_id, '', risk_level, active_alerts, context_summary, "
             "profile_version, last_analysis_id, updated_at "
             "FROM behavioral_profiles"
+        )
+        conn.execute("DROP TABLE behavioral_profiles")
+        conn.execute(
+            "ALTER TABLE behavioral_profiles_new RENAME TO behavioral_profiles"
+        )
+
+    @staticmethod
+    def _migrate_risk_level_numeric_sqlite(conn: sqlite3.Connection) -> None:
+        """Migrate risk_level from TEXT enum to INTEGER 1-10.
+
+        Clears all analysis data (pre-release, no production data to
+        preserve) and recreates behavioral_analyses and
+        behavioral_profiles with INTEGER risk_level CHECK (1..10).
+        Also clears session_summaries and agent_summaries since their
+        risk_indicators JSON now uses numeric severity.
+        """
+        cursor = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='behavioral_profiles'"
+        )
+        row = cursor.fetchone()
+        if not row:
+            return
+        create_sql = row[0]
+        if "BETWEEN 1 AND 10" in create_sql:
+            return  # Already migrated
+
+        logger.info(
+            "Migration: converting risk_level to numeric 1-10 "
+            "(clearing all analysis data)"
+        )
+
+        # Clear all analysis data — pre-release, regeneration is cheap
+        conn.execute("DELETE FROM behavioral_analyses")
+        conn.execute("DELETE FROM behavioral_profiles")
+        conn.execute("DELETE FROM session_summaries")
+        conn.execute("DELETE FROM agent_summaries")
+
+        # Recreate behavioral_analyses with INTEGER risk_level
+        conn.execute("DROP TABLE IF EXISTS behavioral_analyses_new")
+        conn.execute(
+            """
+            CREATE TABLE behavioral_analyses_new (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                agent_id        TEXT,
+                analysis_type   TEXT NOT NULL
+                    CHECK (analysis_type IN (
+                        'session_end', 'periodic', 'on_demand'
+                    )),
+                sessions_scope  TEXT,
+                risk_level      INTEGER NOT NULL DEFAULT 1
+                    CHECK (risk_level BETWEEN 1 AND 10),
+                findings        TEXT NOT NULL,
+                recommendations TEXT,
+                created_at      TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("DROP TABLE behavioral_analyses")
+        conn.execute(
+            "ALTER TABLE behavioral_analyses_new RENAME TO behavioral_analyses"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analyses_user_time "
+            "ON behavioral_analyses(user_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analyses_agent "
+            "ON behavioral_analyses(user_id, agent_id, created_at)"
+        )
+
+        # Recreate behavioral_profiles with INTEGER risk_level
+        conn.execute("DROP TABLE IF EXISTS behavioral_profiles_new")
+        conn.execute(
+            """
+            CREATE TABLE behavioral_profiles_new (
+                user_id         TEXT NOT NULL,
+                agent_id        TEXT NOT NULL DEFAULT '',
+                risk_level      INTEGER NOT NULL DEFAULT 1
+                    CHECK (risk_level BETWEEN 1 AND 10),
+                active_alerts   TEXT,
+                context_summary TEXT,
+                profile_version INTEGER NOT NULL DEFAULT 0,
+                last_analysis_id TEXT,
+                updated_at      TEXT NOT NULL,
+                PRIMARY KEY (user_id, agent_id)
+            )
+            """
         )
         conn.execute("DROP TABLE behavioral_profiles")
         conn.execute(
@@ -717,6 +809,50 @@ class Database:
             except Exception:
                 # Constraint may already be correct or table may not exist yet
                 pass
+
+            # Migration: convert risk_level from TEXT enum to INTEGER 1-10
+            try:
+                cur.execute(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_name = 'behavioral_profiles' "
+                    "AND column_name = 'risk_level'"
+                )
+                col_row = cur.fetchone()
+                if col_row and col_row["data_type"].lower() != "integer":
+                    logger.info("Migration (PG): converting risk_level to numeric 1-10")
+                    # Clear all analysis data — pre-release
+                    cur.execute("DELETE FROM behavioral_analyses")
+                    cur.execute("DELETE FROM behavioral_profiles")
+                    cur.execute("DELETE FROM session_summaries")
+                    cur.execute("DELETE FROM agent_summaries")
+                    # Alter column types — must drop CHECK and DEFAULT
+                    # before the TEXT→INTEGER cast, then re-add them.
+                    for tbl in ("behavioral_analyses", "behavioral_profiles"):
+                        cur.execute(
+                            f"ALTER TABLE {tbl} "
+                            f"DROP CONSTRAINT IF EXISTS {tbl}_risk_level_check"
+                        )
+                        cur.execute(
+                            f"ALTER TABLE {tbl} ALTER COLUMN risk_level DROP DEFAULT"
+                        )
+                        cur.execute(
+                            f"ALTER TABLE {tbl} "
+                            "ALTER COLUMN risk_level TYPE INTEGER "
+                            "USING 1"
+                        )
+                        cur.execute(
+                            f"ALTER TABLE {tbl} ALTER COLUMN risk_level SET DEFAULT 1"
+                        )
+                        cur.execute(
+                            f"ALTER TABLE {tbl} "
+                            f"ADD CONSTRAINT {tbl}_risk_level_check "
+                            "CHECK (risk_level BETWEEN 1 AND 10)"
+                        )
+            except Exception:
+                logger.warning(
+                    "PG migration for numeric risk_level failed",
+                    exc_info=True,
+                )
         finally:
             cur.close()
 
@@ -890,8 +1026,8 @@ CREATE TABLE IF NOT EXISTS behavioral_analyses (
     analysis_type   TEXT NOT NULL
         CHECK (analysis_type IN ('session_end', 'periodic', 'on_demand')),
     sessions_scope  TEXT,
-    risk_level      TEXT NOT NULL
-        CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
+    risk_level      INTEGER NOT NULL DEFAULT 1
+        CHECK (risk_level BETWEEN 1 AND 10),
     findings        TEXT NOT NULL,
     recommendations TEXT,
     created_at      TEXT NOT NULL
@@ -905,8 +1041,8 @@ CREATE INDEX IF NOT EXISTS idx_analyses_user_time
 CREATE TABLE IF NOT EXISTS behavioral_profiles (
     user_id         TEXT NOT NULL,
     agent_id        TEXT NOT NULL DEFAULT '',
-    risk_level      TEXT NOT NULL DEFAULT 'low'
-        CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
+    risk_level      INTEGER NOT NULL DEFAULT 1
+        CHECK (risk_level BETWEEN 1 AND 10),
     active_alerts   TEXT,
     context_summary TEXT,
     profile_version INTEGER NOT NULL DEFAULT 0,
@@ -1107,8 +1243,8 @@ CREATE TABLE IF NOT EXISTS behavioral_analyses (
     analysis_type   TEXT NOT NULL
         CHECK (analysis_type IN ('session_end', 'periodic', 'on_demand')),
     sessions_scope  TEXT,
-    risk_level      TEXT NOT NULL
-        CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
+    risk_level      INTEGER NOT NULL DEFAULT 1
+        CHECK (risk_level BETWEEN 1 AND 10),
     findings        TEXT NOT NULL,
     recommendations TEXT,
     created_at      TIMESTAMPTZ NOT NULL
@@ -1121,8 +1257,8 @@ CREATE INDEX IF NOT EXISTS idx_analyses_user_time
 CREATE TABLE IF NOT EXISTS behavioral_profiles (
     user_id         TEXT NOT NULL,
     agent_id        TEXT NOT NULL DEFAULT '',
-    risk_level      TEXT NOT NULL DEFAULT 'low'
-        CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
+    risk_level      INTEGER NOT NULL DEFAULT 1
+        CHECK (risk_level BETWEEN 1 AND 10),
     active_alerts   TEXT,
     context_summary TEXT,
     profile_version INTEGER NOT NULL DEFAULT 0,

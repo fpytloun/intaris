@@ -262,7 +262,7 @@ def _get_analysis_stats(
     from typing import Any as _Any
 
     stats: dict[str, _Any] = {
-        "behavioral_risk_level": "low",
+        "behavioral_risk_level": 1,
         "profile_version": 0,
         "total_summaries": 0,
         "total_analyses": 0,
@@ -283,11 +283,7 @@ def _get_analysis_stats(
                 cur.execute(
                     "SELECT risk_level, profile_version FROM behavioral_profiles "
                     "WHERE user_id = ? "
-                    "ORDER BY CASE risk_level "
-                    "  WHEN 'critical' THEN 0 "
-                    "  WHEN 'high' THEN 1 "
-                    "  WHEN 'medium' THEN 2 "
-                    "  ELSE 3 END "
+                    "ORDER BY risk_level DESC "
                     "LIMIT 1",
                     (user_id,),
                 )

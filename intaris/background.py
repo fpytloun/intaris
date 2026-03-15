@@ -709,10 +709,10 @@ class BackgroundWorker:
                 elif task_type == "analysis":
                     result = await self._execute_analysis_task(task)
                     self.metrics.analyses_completed_total += 1
-                    # Notify on high/critical L3 analysis results
-                    if self._notification_dispatcher and result.get("risk_level") in (
-                        "high",
-                        "critical",
+                    # Notify on elevated+ L3 analysis results (score >= 7)
+                    if (
+                        self._notification_dispatcher
+                        and (result.get("risk_level") or 0) >= 7
                     ):
                         await self._notify_analysis_alert(task, result)
                 elif task_type == "intention_update":
@@ -874,7 +874,7 @@ class BackgroundWorker:
         Triggers when:
         - intent_alignment is "misaligned" (always)
         - intent_alignment is "partially_aligned" AND any risk indicator
-          has severity "high" or "critical"
+          has severity >= 7 (elevated+)
         """
         if result.get("status") == "skipped":
             return False
@@ -884,8 +884,10 @@ class BackgroundWorker:
         if alignment == "partially_aligned":
             indicators = result.get("risk_indicators", [])
             if isinstance(indicators, list):
+                from intaris.analyzer import coerce_risk_score
+
                 return any(
-                    ind.get("severity") in ("high", "critical") for ind in indicators
+                    coerce_risk_score(ind.get("severity", 1)) >= 7 for ind in indicators
                 )
         return False
 
@@ -940,7 +942,7 @@ class BackgroundWorker:
     async def _notify_analysis_alert(
         self, task: dict[str, Any], result: dict[str, Any]
     ) -> None:
-        """Send an analysis_alert notification for high/critical L3 analysis."""
+        """Send an analysis_alert notification for elevated+ (>= 7) L3 analysis."""
         from intaris.notifications.providers import Notification
 
         try:

@@ -8,6 +8,64 @@
  * - ws: shared WebSocket connection for real-time updates
  */
 
+// ── Risk score helpers (shared across all tabs) ──────────────────────
+// Maps numeric risk scores (1-10) to named bands and CSS classes.
+// Mirrors the Python risk_band() function in analyzer.py.
+
+/** Map a numeric score (1-10) to a named band. */
+function riskBand(score) {
+  const s = Number(score) || 1;
+  if (s <= 2) return 'minimal';
+  if (s <= 4) return 'low';
+  if (s <= 6) return 'moderate';
+  if (s <= 8) return 'elevated';
+  if (s === 9) return 'high';
+  return 'critical';
+}
+
+/** Format a risk score for display: "3 (LOW)" */
+function riskScoreLabel(score) {
+  const s = Number(score) || 1;
+  return s + ' (' + riskBand(s).toUpperCase() + ')';
+}
+
+/** Return Tailwind dot color class object for a risk score. */
+function riskScoreColor(score) {
+  const s = Number(score) || 1;
+  if (s <= 2) return 'bg-green-500';
+  if (s <= 4) return 'bg-cyan-500';
+  if (s <= 6) return 'bg-yellow-500';
+  if (s <= 8) return 'bg-orange-500';
+  return 'bg-red-500';
+}
+
+/** Return dot class as an object for Alpine :class binding. */
+function riskScoreDotClass(score) {
+  const cls = riskScoreColor(score);
+  return { [cls]: true };
+}
+
+/** Return badge class object for a severity score (numeric 1-10). */
+function severityBadgeClass(score) {
+  const s = Number(score) || 1;
+  return {
+    'badge-low': s <= 4,
+    'badge-medium': s >= 5 && s <= 6,
+    'badge-high': s >= 7 && s <= 8,
+    'badge-critical': s >= 9,
+  };
+}
+
+/** Map a numeric risk score to a chart color hex. */
+function riskScoreChartColor(score) {
+  const s = Number(score) || 1;
+  if (s <= 2) return '#22D3EE'; // cyan
+  if (s <= 4) return '#34D399'; // green
+  if (s <= 6) return '#FBBF24'; // amber
+  if (s <= 8) return '#FB923C'; // orange
+  return '#F87171'; // red
+}
+
 document.addEventListener('alpine:init', () => {
 
   // ── Auth Store ───────────────────────────────────────────────

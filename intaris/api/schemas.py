@@ -389,7 +389,7 @@ class AnalysisRecord(BaseModel):
     agent_id: str | None = None
     analysis_type: str
     sessions_scope: list[str] | None = None
-    risk_level: str
+    risk_level: int
     findings: list[dict[str, Any]]
     recommendations: list[dict[str, Any]] | None = None
     created_at: str
@@ -409,7 +409,7 @@ class ProfileResponse(BaseModel):
 
     user_id: str
     agent_id: str | None = None
-    risk_level: str = "low"
+    risk_level: int = 1
     active_alerts: list[dict[str, Any]] | None = None
     context_summary: str | None = None
     profile_version: int = 0

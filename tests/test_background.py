@@ -470,7 +470,7 @@ class TestShouldNotifySummary:
         result = {
             "intent_alignment": "partially_aligned",
             "risk_indicators": [
-                {"indicator": "intent_drift", "severity": "high", "detail": "Drifting"},
+                {"indicator": "intent_drift", "severity": 7, "detail": "Drifting"},
             ],
         }
         assert BackgroundWorker._should_notify_summary(result) is True
@@ -483,7 +483,7 @@ class TestShouldNotifySummary:
             "risk_indicators": [
                 {
                     "indicator": "injection_attempt",
-                    "severity": "critical",
+                    "severity": 10,
                     "detail": "Injection",
                 },
             ],
@@ -496,7 +496,7 @@ class TestShouldNotifySummary:
         result = {
             "intent_alignment": "partially_aligned",
             "risk_indicators": [
-                {"indicator": "scope_creep", "severity": "low", "detail": "Minor"},
+                {"indicator": "scope_creep", "severity": 2, "detail": "Minor"},
             ],
         }
         assert BackgroundWorker._should_notify_summary(result) is False
@@ -516,7 +516,7 @@ class TestShouldNotifySummary:
             "risk_indicators": [
                 {
                     "indicator": "unusual_tool_pattern",
-                    "severity": "medium",
+                    "severity": 4,
                     "detail": "Unusual",
                 },
             ],
@@ -584,7 +584,7 @@ class TestNotificationDataclass:
             timestamp="2026-01-01T00:00:00",
             intent_alignment="misaligned",
             risk_indicators=[
-                {"indicator": "intent_drift", "severity": "high", "detail": "Drifted"},
+                {"indicator": "intent_drift", "severity": 7, "detail": "Drifted"},
             ],
         )
         assert n.event_type == "summary_alert"
@@ -608,14 +608,14 @@ class TestNotificationDataclass:
             approve_url=None,
             deny_url=None,
             timestamp="2026-01-01T00:00:00",
-            risk_level="critical",
+            risk_level=10,
             findings_count=3,
             context_summary="Agent shows dangerous patterns.",
             analysis_id="analysis-1",
             sessions_analyzed=5,
         )
         assert n.event_type == "analysis_alert"
-        assert n.risk_level == "critical"
+        assert n.risk_level == 10
         assert n.sessions_analyzed == 5
 
 
@@ -703,12 +703,12 @@ class TestProviderFormatting:
             risk_indicators=[
                 {
                     "indicator": "intent_drift",
-                    "severity": "high",
+                    "severity": 7,
                     "detail": "Agent drifted from CSS to database changes",
                 },
                 {
                     "indicator": "scope_creep",
-                    "severity": "medium",
+                    "severity": 4,
                     "detail": "Accessed files outside project",
                 },
             ],
@@ -731,7 +731,7 @@ class TestProviderFormatting:
             approve_url=None,
             deny_url=None,
             timestamp="2026-01-01T00:00:00",
-            risk_level="critical",
+            risk_level=10,
             findings_count=3,
             context_summary="Agent shows progressive escalation across sessions with increasing denial rates.",
             analysis_id="analysis-1",
@@ -746,14 +746,14 @@ class TestProviderFormatting:
         assert "sess-test-123" in msg
         assert "misaligned" in msg
         assert "intent_drift" in msg
-        assert "2 (1 high/critical)" in msg
+        assert "2 (1 elevated+)" in msg
 
     def test_pushover_analysis_alert_format(self):
         from intaris.notifications.providers import PushoverProvider
 
         n = self._make_analysis_notification()
         msg = PushoverProvider._format_analysis_alert_message(n)
-        assert "CRITICAL" in msg
+        assert "10" in msg
         assert "test-agent" in msg
         assert "5" in msg  # sessions_analyzed
         assert "progressive escalation" in msg
@@ -778,7 +778,7 @@ class TestProviderFormatting:
         blocks = SlackProvider._build_analysis_alert_blocks(n)
         assert any(b.get("type") == "header" for b in blocks)
         header_text = blocks[0]["text"]["text"]
-        assert "CRITICAL" in header_text
+        assert "CRITICAL" in header_text.upper()
         # Should have context summary section
         text_blocks = [
             b
@@ -798,7 +798,7 @@ class TestProviderFormatting:
         # The webhook provider builds a payload dict internally.
         # We can't easily test the full send() without HTTP, but we can
         # verify the Notification dataclass has the fields set.
-        assert n.risk_level == "critical"
+        assert n.risk_level == 10
         assert n.findings_count == 3
         assert n.context_summary is not None
         assert n.sessions_analyzed == 5

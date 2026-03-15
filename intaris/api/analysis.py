@@ -615,11 +615,7 @@ async def get_profile(
                 cur.execute(
                     "SELECT * FROM behavioral_profiles "
                     "WHERE user_id = ? "
-                    "ORDER BY CASE risk_level "
-                    "  WHEN 'critical' THEN 0 "
-                    "  WHEN 'high' THEN 1 "
-                    "  WHEN 'medium' THEN 2 "
-                    "  ELSE 3 END "
+                    "ORDER BY risk_level DESC "
                     "LIMIT 1",
                     (ctx.user_id,),
                 )

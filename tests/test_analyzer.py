@@ -32,7 +32,7 @@ _SUMMARY_RESPONSE = json.dumps(
 
 _ANALYSIS_RESPONSE = json.dumps(
     {
-        "risk_level": "low",
+        "risk_level": 2,
         "findings": [],
         "recommendations": [],
         "context_summary": "Normal development activity across sessions.",
@@ -301,7 +301,7 @@ class TestRunAnalysis:
         }
         result = run_analysis(db, llm, task)
         assert "analysis_id" in result
-        assert result["risk_level"] == "low"
+        assert result["risk_level"] == 2
         assert result["sessions_analyzed"] >= 2
 
     def test_analysis_updates_profile(self, db, session_store, audit_store):
@@ -322,7 +322,7 @@ class TestRunAnalysis:
                 (TEST_USER,),
             )
             row = cur.fetchone()
-        assert row["risk_level"] == "low"
+        assert row["risk_level"] == 2
         assert row["profile_version"] == 1
 
     def test_skips_when_no_llm(self, db, session_store, audit_store):
@@ -412,7 +412,7 @@ class TestUpdateProfile:
             db,
             user_id=TEST_USER,
             agent_id="",
-            risk_level="low",
+            risk_level=2,
             context_summary="Normal.",
             findings=[],
             analysis_id="a-1",
@@ -423,7 +423,7 @@ class TestUpdateProfile:
                 (TEST_USER,),
             )
             row = cur.fetchone()
-        assert row["risk_level"] == "low"
+        assert row["risk_level"] == 2
         assert row["profile_version"] == 1
 
     def test_updates_existing_profile(self, db):
@@ -433,7 +433,7 @@ class TestUpdateProfile:
             db,
             user_id=TEST_USER,
             agent_id="",
-            risk_level="low",
+            risk_level=2,
             context_summary="First.",
             findings=[],
             analysis_id="a-1",
@@ -442,7 +442,7 @@ class TestUpdateProfile:
             db,
             user_id=TEST_USER,
             agent_id="",
-            risk_level="medium",
+            risk_level=4,
             context_summary="Second.",
             findings=[],
             analysis_id="a-2",
@@ -453,18 +453,18 @@ class TestUpdateProfile:
                 (TEST_USER,),
             )
             row = cur.fetchone()
-        assert row["risk_level"] == "medium"
+        assert row["risk_level"] == 4
         assert row["profile_version"] == 2
 
     def test_extracts_active_alerts(self, db):
         from intaris.analyzer import _update_profile
 
         findings = [
-            {"category": "intent_drift", "severity": "high", "detail": "Drifting"},
-            {"category": "scope_creep", "severity": "low", "detail": "Minor"},
+            {"category": "intent_drift", "severity": 7, "detail": "Drifting"},
+            {"category": "scope_creep", "severity": 2, "detail": "Minor"},
             {
                 "category": "injection_attempt",
-                "severity": "critical",
+                "severity": 10,
                 "detail": "Injection",
             },
         ]
@@ -472,7 +472,7 @@ class TestUpdateProfile:
             db,
             user_id=TEST_USER,
             agent_id="",
-            risk_level="high",
+            risk_level=7,
             context_summary="Risky.",
             findings=findings,
             analysis_id="a-3",
@@ -485,7 +485,7 @@ class TestUpdateProfile:
             row = cur.fetchone()
         alerts = json.loads(row["active_alerts"])
         assert len(alerts) == 2
-        assert {a["severity"] for a in alerts} == {"high", "critical"}
+        assert all(a["severity"] >= 7 for a in alerts)
 
     def test_no_alerts_for_low_severity(self, db):
         from intaris.analyzer import _update_profile
@@ -494,9 +494,9 @@ class TestUpdateProfile:
             db,
             user_id=TEST_USER,
             agent_id="",
-            risk_level="low",
+            risk_level=2,
             context_summary="Normal.",
-            findings=[{"category": "x", "severity": "low", "detail": "y"}],
+            findings=[{"category": "x", "severity": 2, "detail": "y"}],
             analysis_id="a-4",
         )
         with db.cursor() as cur:

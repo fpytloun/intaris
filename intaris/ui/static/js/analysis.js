@@ -39,18 +39,17 @@ const ANALYSIS_COLORS = {
   text:    '#E6EDF3',
 };
 
-const ANALYSIS_RISK_COLORS = {
-  low:      ANALYSIS_COLORS.cyan,
-  medium:   ANALYSIS_COLORS.amber,
-  high:     ANALYSIS_COLORS.orange,
-  critical: ANALYSIS_COLORS.red,
-};
-
-const ANALYSIS_SEVERITY_COLORS = {
-  low:      ANALYSIS_COLORS.cyan,
-  medium:   ANALYSIS_COLORS.amber,
-  high:     ANALYSIS_COLORS.orange,
-  critical: ANALYSIS_COLORS.red,
+// Note: risk_level and finding severity are now numeric (1-10).
+// Color mapping uses the global riskScoreChartColor() and riskBand()
+// helpers from app.js. The named-key maps below are for the severity
+// doughnut chart which groups findings by band name.
+const ANALYSIS_SEVERITY_BAND_COLORS = {
+  minimal:  ANALYSIS_COLORS.cyan,
+  low:      ANALYSIS_COLORS.green,
+  moderate: ANALYSIS_COLORS.amber,
+  elevated: ANALYSIS_COLORS.orange,
+  high:     ANALYSIS_COLORS.red,
+  critical: '#EF4444',
 };
 
 // Category colors for finding types (L2 indicators + L3 cross-session findings)
@@ -64,13 +63,17 @@ const CATEGORY_COLORS = {
   injection_attempt:          '#EF4444',
   escalation_pattern:         ANALYSIS_COLORS.teal,
   delegation_misalignment:    ANALYSIS_COLORS.slate,
-  // L3 cross-session findings
+  // L3 cross-session findings (concerning)
   coordinated_access:         ANALYSIS_COLORS.purple,
   progressive_escalation:     '#EF4444',
   intent_masking:             ANALYSIS_COLORS.pink,
   tool_abuse:                 ANALYSIS_COLORS.orange,
   persistent_misalignment:    ANALYSIS_COLORS.amber,
   insecure_reasoning_pattern: ANALYSIS_COLORS.teal,
+  // L3 cross-session findings (positive/neutral)
+  consistent_alignment:       ANALYSIS_COLORS.green,
+  normal_development:         ANALYSIS_COLORS.cyan,
+  improving_posture:          ANALYSIS_COLORS.teal,
 };
 
 const _FALLBACK_PALETTE = [
@@ -82,8 +85,6 @@ function _categoryColor(name, index) {
   if (CATEGORY_COLORS[name]) return CATEGORY_COLORS[name];
   return _FALLBACK_PALETTE[index % _FALLBACK_PALETTE.length];
 }
-
-const RISK_LEVEL_VALUE = { low: 1, medium: 2, high: 3, critical: 4 };
 
 // ── Module-level chart storage (outside Alpine reactivity) ──────────
 //
@@ -155,6 +156,37 @@ function _countSessionsForValue(findings, key, value) {
   return sessions.size;
 }
 
+/** Group findings by severity band (riskBand of numeric severity). */
+function _countSessionsByBand(findings) {
+  const sessionSets = {};
+  for (const f of findings) {
+    const band = typeof f.severity === 'number' ? riskBand(f.severity) : (f.severity || 'unknown');
+    if (!sessionSets[band]) sessionSets[band] = new Set();
+    for (const sid of (f.session_ids || [])) {
+      sessionSets[band].add(sid);
+    }
+  }
+  const counts = {};
+  for (const [k, s] of Object.entries(sessionSets)) {
+    counts[k] = s.size;
+  }
+  return counts;
+}
+
+/** Count sessions for a specific severity band across findings. */
+function _countSessionsForBand(findings, band) {
+  const sessions = new Set();
+  for (const f of findings) {
+    const b = typeof f.severity === 'number' ? riskBand(f.severity) : (f.severity || 'unknown');
+    if (b === band) {
+      for (const sid of (f.session_ids || [])) {
+        sessions.add(sid);
+      }
+    }
+  }
+  return sessions.size;
+}
+
 function _sortChronological(analyses) {
   return [...analyses].sort(
     (a, b) => new Date(a.created_at) - new Date(b.created_at),
@@ -175,7 +207,7 @@ function analysisTab() {
     initialized: false,
 
     // Profile
-    profile: { risk_level: 'low', profile_version: 0, active_alerts: [], context_summary: null, updated_at: null },
+    profile: { risk_level: 1, profile_version: 0, active_alerts: [], context_summary: null, updated_at: null },
     profileLoading: false,
 
     // Analyses list
@@ -233,7 +265,7 @@ function analysisTab() {
         if (agent) params.agent_id = agent;
         this.profile = await IntarisAPI.getProfile(params);
       } catch (e) {
-        this.profile = { risk_level: 'low', profile_version: 0, active_alerts: [], context_summary: null, updated_at: null };
+        this.profile = { risk_level: 1, profile_version: 0, active_alerts: [], context_summary: null, updated_at: null };
       } finally {
         this.profileLoading = false;
       }
@@ -304,8 +336,8 @@ function analysisTab() {
       try {
         this._renderDoughnut(
           'analysisSeverityChart',
-          _countSessionsByKey(latestFindings, 'severity'),
-          ANALYSIS_SEVERITY_COLORS,
+          _countSessionsByBand(latestFindings),
+          ANALYSIS_SEVERITY_BAND_COLORS,
           'sessions',
         );
       } catch (e) { console.warn('analysisSeverityChart error:', e); }
@@ -414,8 +446,8 @@ function analysisTab() {
       if (sorted.length < 2) return;
 
       const labels = sorted.map(a => _formatAnalysisLabel(a.created_at));
-      const values = sorted.map(a => RISK_LEVEL_VALUE[a.risk_level] || 0);
-      const pointColors = sorted.map(a => ANALYSIS_RISK_COLORS[a.risk_level] || ANALYSIS_COLORS.muted);
+      const values = sorted.map(a => Number(a.risk_level) || 1);
+      const pointColors = sorted.map(a => riskScoreChartColor(a.risk_level));
 
       const canvasId = 'analysisRiskTimeChart';
       const existing = _getChart(canvasId);
@@ -458,8 +490,7 @@ function analysisTab() {
             tooltip: {
               callbacks: {
                 label(ctx) {
-                  const levelNames = ['', 'Low', 'Medium', 'High', 'Critical'];
-                  return ' Risk: ' + (levelNames[ctx.raw] || 'Unknown');
+                  return ' Risk: ' + ctx.raw + ' (' + riskBand(ctx.raw).toUpperCase() + ')';
                 },
               },
             },
@@ -470,12 +501,13 @@ function analysisTab() {
               ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 10, font: { size: 10 } },
             },
             y: {
-              min: 0.5, max: 4.5,
+              min: 0, max: 10.5,
               grid: { color: ANALYSIS_COLORS.border },
               ticks: {
-                stepSize: 1, font: { size: 10 },
+                stepSize: 2, font: { size: 10 },
                 callback(value) {
-                  return { 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Critical' }[value] || '';
+                  const labels = { 1: 'Min', 3: 'Low', 5: 'Mod', 7: 'Elev', 9: 'High', 10: 'Crit' };
+                  return labels[value] || '';
                 },
               },
             },
@@ -489,11 +521,11 @@ function analysisTab() {
       if (sorted.length < 2) return;
 
       const labels = sorted.map(a => _formatAnalysisLabel(a.created_at));
-      const severities = ['low', 'medium', 'high', 'critical'];
-      const datasets = severities.map(sev => ({
-        label: sev.charAt(0).toUpperCase() + sev.slice(1),
-        data: sorted.map(a => _countSessionsForValue(a.findings || [], 'severity', sev)),
-        backgroundColor: ANALYSIS_SEVERITY_COLORS[sev] + 'CC',
+      const bands = ['minimal', 'low', 'moderate', 'elevated', 'high', 'critical'];
+      const datasets = bands.map(band => ({
+        label: band.charAt(0).toUpperCase() + band.slice(1),
+        data: sorted.map(a => _countSessionsForBand(a.findings || [], band)),
+        backgroundColor: (ANALYSIS_SEVERITY_BAND_COLORS[band] || ANALYSIS_COLORS.muted) + 'CC',
         borderRadius: 2,
         borderSkipped: false,
       }));

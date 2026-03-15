@@ -263,8 +263,8 @@ class Evaluator:
             profile = self._get_behavioral_context(user_id, agent_id)
             if profile:
                 profile_version = profile.get("profile_version")
-                # Inject context for high/critical risk profiles
-                if profile.get("risk_level") in ("high", "critical"):
+                # Inject context for high+ risk profiles (score >= 9)
+                if (profile.get("risk_level") or 0) >= 9:
                     context = dict(context) if context else {}
                     context["behavioral_alert"] = profile.get("context_summary", "")
 

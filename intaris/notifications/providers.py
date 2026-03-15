@@ -22,6 +22,8 @@ from typing import Any, Protocol
 
 import httpx
 
+from intaris.analyzer import coerce_risk_score, risk_band
+
 logger = logging.getLogger(__name__)
 
 # Shared HTTP client for all providers (lazy-initialized)
@@ -73,7 +75,7 @@ class Notification:
     user_decision: str | None = None  # "approve" or "deny"
     user_note: str | None = None
     # Behavioral analysis fields (summary_alert / analysis_alert)
-    risk_level: str | None = None  # "low", "medium", "high", "critical"
+    risk_level: int | None = None  # Numeric risk score 1-10
     intent_alignment: str | None = None  # L2 alignment assessment
     risk_indicators: list[dict[str, Any]] | None = None  # L2 risk indicators
     findings_count: int | None = None  # L3 findings count
@@ -245,14 +247,12 @@ class PushoverProvider:
             message = self._format_summary_alert_message(notification)
             priority = config.get("priority", 1)
         elif notification.event_type == "analysis_alert":
-            level = (notification.risk_level or "high").upper()
+            level = risk_band(notification.risk_level or 7).upper()
             title = f"Intaris: {level} Behavioral Alert"
             message = self._format_analysis_alert_message(notification)
-            # Critical analysis alerts get emergency priority
+            # Critical analysis alerts (score 10) get emergency priority
             priority = (
-                2
-                if notification.risk_level == "critical"
-                else config.get("priority", 1)
+                2 if (notification.risk_level or 0) >= 10 else config.get("priority", 1)
             )
         else:
             title = "Intaris: Escalation Required"
@@ -349,15 +349,13 @@ class PushoverProvider:
             high_count = sum(
                 1
                 for ind in n.risk_indicators
-                if ind.get("severity") in ("high", "critical")
+                if coerce_risk_score(ind.get("severity", 0)) >= 7
             )
-            parts.append(
-                f"<b>Risk indicators:</b> {count} ({high_count} high/critical)"
-            )
+            parts.append(f"<b>Risk indicators:</b> {count} ({high_count} elevated+)")
             # Show top indicators (truncated)
             for ind in n.risk_indicators[:3]:
                 cat = ind.get("indicator", "unknown")
-                sev = ind.get("severity", "?")
+                sev = coerce_risk_score(ind.get("severity", 0))
                 detail = ind.get("detail", "")[:80]
                 parts.append(f"  - {html_escape(cat)} ({sev}): {html_escape(detail)}")
         return "\n".join(parts)
@@ -367,7 +365,10 @@ class PushoverProvider:
         """Format L3 cross-session analysis alert for Pushover (HTML mode)."""
         parts = []
         if n.risk_level:
-            parts.append(f"<b>Risk level:</b> {html_escape(n.risk_level.upper())}")
+            band = risk_band(n.risk_level).upper()
+            parts.append(
+                f"<b>Risk level:</b> {html_escape(f'{n.risk_level} ({band})')}"
+            )
         if n.agent_id:
             parts.append(f"<b>Agent:</b> {html_escape(n.agent_id)}")
         if n.sessions_analyzed is not None:
@@ -719,14 +720,14 @@ class SlackProvider:
             high_count = sum(
                 1
                 for ind in n.risk_indicators
-                if ind.get("severity") in ("high", "critical")
+                if coerce_risk_score(ind.get("severity", 0)) >= 7
             )
             fields.append(
                 {
                     "type": "mrkdwn",
                     "text": (
                         f"*Risk indicators:* {len(n.risk_indicators)} "
-                        f"({high_count} high/critical)"
+                        f"({high_count} elevated+)"
                     ),
                 }
             )
@@ -738,7 +739,7 @@ class SlackProvider:
             lines = []
             for ind in n.risk_indicators[:5]:
                 cat = _slack_escape(ind.get("indicator", "unknown"))
-                sev = _slack_escape(ind.get("severity", "?"))
+                sev = str(coerce_risk_score(ind.get("severity", 0)))
                 detail = _slack_escape(ind.get("detail", "")[:100])
                 lines.append(f"- *{cat}* ({sev}): {detail}")
             if lines:
@@ -771,8 +772,8 @@ class SlackProvider:
     @staticmethod
     def _build_analysis_alert_blocks(n: Notification) -> list[dict[str, Any]]:
         """Build Slack Block Kit blocks for L3 behavioral analysis alert."""
-        level = (n.risk_level or "high").upper()
-        emoji = "\U0001f534" if n.risk_level == "critical" else "\U0001f7e0"
+        level = risk_band(n.risk_level or 7).upper()
+        emoji = "\U0001f534" if (n.risk_level or 0) >= 10 else "\U0001f7e0"
         blocks: list[dict[str, Any]] = [
             {
                 "type": "header",
@@ -785,10 +786,11 @@ class SlackProvider:
 
         fields = []
         if n.risk_level:
+            band = risk_band(n.risk_level).upper()
             fields.append(
                 {
                     "type": "mrkdwn",
-                    "text": f"*Risk level:* {_slack_escape(n.risk_level.upper())}",
+                    "text": f"*Risk level:* {_slack_escape(f'{n.risk_level} ({band})')}",
                 }
             )
         if n.agent_id:

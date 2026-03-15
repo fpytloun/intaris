@@ -1140,7 +1140,7 @@ class TestAnalysisEndpoints:
         resp = client_no_auth.get("/api/v1/profile", headers=headers)
         assert resp.status_code == 200
         data = resp.json()
-        assert data["risk_level"] == "low"
+        assert data["risk_level"] == 1
         assert data["profile_version"] == 0
 
     def test_profile_with_bound_user(self, tmp_db):
@@ -1171,7 +1171,7 @@ class TestAnalysisEndpoints:
                 assert resp.status_code == 200
                 data = resp.json()
                 assert data["user_id"] == "bound-user"
-                assert data["risk_level"] == "low"
+                assert data["risk_level"] == 1
                 assert data["profile_version"] == 0
 
     def test_reasoning_updates_activity(self, client_no_auth):
