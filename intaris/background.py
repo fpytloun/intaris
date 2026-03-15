@@ -56,6 +56,9 @@ class Metrics:
         self.summary_event_enriched_total: int = 0
         self.summary_audit_only_total: int = 0
         self.summary_partitions_total: int = 0
+        self.summary_event_store_fallback_total: int = 0
+        # Gauges
+        self.sessions_needing_summaries: int = 0
         # Liveness timestamps (ISO 8601)
         self.last_worker_poll: str = ""
         self.last_idle_sweep: str = ""
@@ -77,6 +80,8 @@ class Metrics:
             "summary_event_enriched_total": self.summary_event_enriched_total,
             "summary_audit_only_total": self.summary_audit_only_total,
             "summary_partitions_total": self.summary_partitions_total,
+            "summary_event_store_fallback_total": self.summary_event_store_fallback_total,
+            "sessions_needing_summaries": self.sessions_needing_summaries,
             "last_worker_poll": self.last_worker_poll,
             "last_idle_sweep": self.last_idle_sweep,
         }
@@ -512,7 +517,7 @@ class BackgroundWorker:
             return
 
         self._running = True
-        self._catchup_done = False
+        self._catchup_event = asyncio.Event()
 
         # Launch parallel worker loops (atomic claim prevents double-processing)
         worker_count = self._config.worker_count
@@ -619,10 +624,13 @@ class BackgroundWorker:
         via ANALYSIS_WORKER_COUNT). Each claims tasks atomically via
         UPDATE...RETURNING — no double-processing risk.
         """
-        # Run startup catchup once (first worker to reach this wins)
-        if not self._catchup_done:
-            self._catchup_done = True
+        # Run startup catchup once. First worker runs it; others wait.
+        # asyncio is single-threaded so the is_set() + set() is atomic.
+        if not self._catchup_event.is_set():
+            # First worker to reach this runs catchup and signals others
+            self._catchup_event.set()  # Claim immediately (prevents others)
             await self._startup_catchup()
+        # Workers that arrive after set() skip straight through
 
         stale_check_counter = 0
 
@@ -691,6 +699,8 @@ class BackgroundWorker:
                         self.metrics.summary_partitions_total += windows_gen
                     elif result.get("status") != "skipped":
                         self.metrics.summary_audit_only_total += 1
+                    if result.get("event_store_fallback"):
+                        self.metrics.summary_event_store_fallback_total += 1
                     # Notify on concerning L2 summaries
                     if self._notification_dispatcher and self._should_notify_summary(
                         result
@@ -713,12 +723,19 @@ class BackgroundWorker:
                 # Distinguish transient failures from legitimate skips.
                 # Errors and transient failures should be retried via fail().
                 # Legitimate skips (e.g., no data in window) are completed.
-                if result.get("error"):
-                    raise RuntimeError(f"Task returned error: {result['error']}")
+                # Transient failures (No LLM) are retried via fail().
+                # Permanent failures (session not found) are completed.
+                error_msg = result.get("error", "")
                 skip_reason = result.get("reason", "")
-                if result.get("status") == "skipped" and (
-                    "No LLM" in skip_reason or "not found" in skip_reason.lower()
-                ):
+                if error_msg:
+                    # "Session not found" is permanent — don't retry
+                    if "not found" in error_msg.lower():
+                        logger.warning(
+                            "Task %s: permanent error: %s", task_id, error_msg
+                        )
+                    else:
+                        raise RuntimeError(f"Task returned error: {error_msg}")
+                elif result.get("status") == "skipped" and "No LLM" in skip_reason:
                     raise RuntimeError(f"Task skipped (transient): {skip_reason}")
 
                 self._task_queue.complete(task_id, result)
@@ -1219,6 +1236,24 @@ class BackgroundWorker:
             # Update profile staleness metric
             self._update_staleness_metric()
 
+            # Update sessions needing summaries gauge
+            try:
+                with self._db.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) FROM sessions
+                        WHERE status IN ('idle', 'completed',
+                                         'terminated', 'suspended')
+                          AND summary_count = 0
+                          AND total_calls > 0
+                        """
+                    )
+                    row = cur.fetchone()
+                    count = row[0] if row else 0
+                    self.metrics.sessions_needing_summaries = count
+            except Exception:
+                pass  # Best-effort metric
+
     async def _startup_catchup(self) -> None:
         """Recover from server crashes on startup.
 
@@ -1231,24 +1266,27 @@ class BackgroundWorker:
         if reset_count:
             logger.info("Startup catch-up: reset %d stale tasks", reset_count)
 
-        # Enqueue summaries for idle/completed sessions without summaries.
-        # These could be orphaned by a crash between idle transition and
-        # task enqueue, or by a task that failed permanently.
+        # Enqueue summaries for sessions that should have them but don't.
+        # Covers: crash between idle transition and task enqueue, tasks
+        # that failed permanently, terminated/suspended sessions.
         if self.analyzer_ready:
             try:
+                enqueued = 0
+
+                # 1. Sessions with no summaries at all
                 with self._db.cursor() as cur:
                     cur.execute(
                         """
                         SELECT user_id, session_id FROM sessions
-                        WHERE status IN ('idle', 'completed')
+                        WHERE status IN ('idle', 'completed',
+                                         'terminated', 'suspended')
                           AND summary_count = 0
                           AND total_calls > 0
                         """
                     )
-                    orphaned = cur.fetchall()
+                    no_summary = cur.fetchall()
 
-                enqueued = 0
-                for row in orphaned:
+                for row in no_summary:
                     uid = row["user_id"] if isinstance(row, dict) else row[0]
                     sid = row["session_id"] if isinstance(row, dict) else row[1]
                     if not self._task_queue.cancel_duplicate("summary", uid, sid):
@@ -1261,11 +1299,46 @@ class BackgroundWorker:
                         )
                         enqueued += 1
 
+                # 2. Completed/terminated sessions with summaries but no
+                #    compacted summary (compaction gap — e.g., volume summary
+                #    was running when session closed, close summary was
+                #    skipped by cancel_duplicate).
+                with self._db.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT s.user_id, s.session_id FROM sessions s
+                        WHERE s.status IN ('completed', 'terminated')
+                          AND s.summary_count > 0
+                          AND NOT EXISTS (
+                              SELECT 1 FROM session_summaries ss
+                              WHERE ss.user_id = s.user_id
+                                AND ss.session_id = s.session_id
+                                AND ss.summary_type = 'compacted'
+                          )
+                        """
+                    )
+                    no_compaction = cur.fetchall()
+
+                for row in no_compaction:
+                    uid = row["user_id"] if isinstance(row, dict) else row[0]
+                    sid = row["session_id"] if isinstance(row, dict) else row[1]
+                    if not self._task_queue.cancel_duplicate("summary", uid, sid):
+                        self._task_queue.enqueue(
+                            "summary",
+                            uid,
+                            session_id=sid,
+                            payload={"trigger": "close"},
+                            priority=2,
+                        )
+                        enqueued += 1
+
                 if enqueued:
                     logger.info(
-                        "Startup catch-up: enqueued summaries for %d "
-                        "idle/completed sessions",
+                        "Startup catch-up: enqueued %d summary tasks "
+                        "(%d no-summary, %d no-compaction)",
                         enqueued,
+                        len(no_summary),
+                        len(no_compaction),
                     )
             except Exception:
                 logger.warning(

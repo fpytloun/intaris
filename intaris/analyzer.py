@@ -52,7 +52,7 @@ _MAX_COMPACTION_WINDOWS = 30
 # Maximum chars per child summary in compaction/parent prompt (ARB m2)
 _MAX_CHILD_SUMMARY_CHARS = 500
 # Maximum re-enqueue attempts for parent waiting on children
-_MAX_PARENT_RECHECK = 10
+_MAX_PARENT_RECHECK = 5
 # Delay between parent re-enqueue checks (seconds)
 _PARENT_RECHECK_DELAY_S = 30
 
@@ -190,15 +190,23 @@ def generate_summary(
     window_start = _get_window_start(db, user_id, session_id, session)
     window_end = now
 
-    # Fetch audit records for the tail window
+    # Fetch all audit records for the tail window (no limit — the
+    # partitioner handles splitting large data into context-budget-aware
+    # windows). No data is ever silently dropped.
     tool_calls = audit_store.get_window(
         session_id,
         user_id=user_id,
         from_ts=window_start,
         to_ts=window_end,
         record_types={"tool_call"},
-        limit=500,
+        limit=0,
     )
+    if len(tool_calls) > 2000:
+        logger.warning(
+            "Large audit window: %d tool_calls for session %s",
+            len(tool_calls),
+            session_id,
+        )
 
     reasoning_records = audit_store.get_window(
         session_id,
@@ -206,7 +214,7 @@ def generate_summary(
         from_ts=window_start,
         to_ts=window_end,
         record_types={"reasoning"},
-        limit=200,
+        limit=0,
     )
 
     # ── Step 3: Try event-enriched path ───────────────────────────
@@ -214,6 +222,8 @@ def generate_summary(
         event_store, user_id, session_id, window_start, window_end
     )
     event_enriched = bool(conversation)
+    # Track if event store was available but returned no data (fallback)
+    event_store_fallback = event_store is not None and not event_enriched
 
     # Split reasoning records into user messages and agent reasoning.
     # In the event-enriched path, user messages come from the event store
@@ -519,6 +529,7 @@ def generate_summary(
         if compaction_result:
             # Annotate with event-enriched info
             compaction_result["event_enriched"] = event_enriched
+            compaction_result["event_store_fallback"] = event_store_fallback
             compaction_result["windows_generated"] = windows_generated
             return compaction_result
 
@@ -532,6 +543,7 @@ def generate_summary(
             "window_number": last_window_number,
             "compacted": False,
             "event_enriched": event_enriched,
+            "event_store_fallback": event_store_fallback,
             "windows_generated": windows_generated,
         }
 
@@ -1043,10 +1055,11 @@ def _get_session_events(
             before_ts=before_ts,
         )
     except Exception:
-        logger.exception(
+        logger.warning(
             "Event store read failed for %s/%s, falling back to audit_log",
             user_id,
             session_id,
+            exc_info=True,
         )
         return []
 

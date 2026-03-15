@@ -273,7 +273,11 @@ async def evaluate(
                         total = _sess.get("total_calls", 0)
                         if total > 0 and total % threshold == 0:
                             tq = bg_worker._task_queue
-                            if not tq.recently_completed(
+                            if not tq.cancel_duplicate(
+                                "summary",
+                                ctx.user_id,
+                                request.session_id,
+                            ) and not tq.recently_completed(
                                 "summary",
                                 ctx.user_id,
                                 request.session_id,

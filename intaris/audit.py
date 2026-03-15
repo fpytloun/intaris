@@ -450,6 +450,7 @@ class AuditStore:
             params.extend(sorted(valid))
 
         where = "WHERE " + " AND ".join(conditions)
+        limit_clause = f"LIMIT {limit}" if limit > 0 else ""
 
         with self._db.cursor() as cur:
             cur.execute(
@@ -457,9 +458,9 @@ class AuditStore:
                 SELECT * FROM audit_log
                 {where}
                 ORDER BY timestamp ASC
-                LIMIT ?
+                {limit_clause}
                 """,
-                params + [limit],
+                params,
             )
             rows = cur.fetchall()
 

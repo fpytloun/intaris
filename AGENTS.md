@@ -878,6 +878,7 @@ File-defined servers are stored with `source="file"` in the database. On startup
 - **Session policy**: Uses fnmatch glob patterns (NOT regex) for custom allow/deny rules to prevent ReDoS attacks.
 - **Redaction immutability**: `redact()` always returns a deep copy. Never mutates input args.
 - **Sub-app state propagation**: The Starlette parent app initializes `rate_limiter`, `webhook`, `event_bus`, and `mcp_proxy` in its lifespan, then propagates them to the FastAPI sub-app's `state`. This is necessary because `request.app` in FastAPI endpoints refers to the sub-app, not the parent.
+- **Shutdown timeout budget**: Each cleanup step has a timeout to prevent hanging on unresponsive services. MCP proxy: 5s, background worker: 5s, webhook client: 2s, notification dispatcher: 2s. Worst case total: ~14s. Kubernetes `terminationGracePeriodSeconds` should be set to at least 20s.
 
 ## Integrations
 
