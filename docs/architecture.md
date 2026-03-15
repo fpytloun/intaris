@@ -76,7 +76,9 @@ Intaris is a guardrails service that sits between AI coding agents and their too
 | **Decision** | `decision.py` | Priority-ordered decision matrix |
 | **LLM** | `llm.py` | OpenAI-compatible client with structured output |
 | **Prompts** | `prompts.py` | Safety evaluation prompt templates |
-| **Background** | `background.py` | TaskQueue (SQLite-backed), BackgroundWorker (idle sweep, scheduler) |
+| **Analysis Prompts** | `prompts_analysis.py` | L2/L3 analysis prompt templates + JSON schemas (window + compaction) |
+| **Analyzer** | `analyzer.py` | L2 hierarchical summary generation (window + compaction) + L3 agent-scoped cross-session analysis |
+| **Background** | `background.py` | TaskQueue (SQLite-backed), BackgroundWorker (idle sweep, scheduler), Metrics |
 | **Redaction** | `redactor.py` | Secret redaction before audit storage |
 | **Rate Limiting** | `ratelimit.py` | In-memory sliding window rate limiter per (user_id, session_id) |
 | **Webhook** | `webhook.py` | Async webhook client with HMAC-SHA256 signing |
@@ -182,15 +184,30 @@ Sessions that never receive user messages (e.g., MCP proxy sessions) keep their 
 
 ## Behavioral Analysis
 
-Three-layer behavioral guardrails system:
+Three-layer behavioral guardrails system with hierarchical session support:
 
 | Layer | Scope | Data Source | Output |
 |---|---|---|---|
 | **L1** | Per-call | `/reasoning`, `/checkpoint`, `/evaluate` | Raw data collection |
-| **L2** | Per-session | Background worker triggers | Session summaries |
-| **L3** | Per-user | Periodic cross-session analysis | Behavioral risk profiles |
+| **L2** | Per-session | Background worker triggers | Window summaries + compacted session summaries |
+| **L3** | Per-user | Periodic cross-session analysis | Behavioral risk profiles (root sessions only) |
 
 Agent-reported data (reasoning, checkpoints, summaries) is stored but never included in Intaris analysis prompts -- it's kept for post-hoc comparison only.
+
+### Hierarchical Sessions
+
+Parent sessions incorporate child session data into their summaries. The flow:
+
+1. **Child sessions** get independent L2 window summaries (unchanged from flat sessions)
+2. **Parent sessions** collect child data (compacted > window > raw metadata fallback) and include it in both window and compaction prompts
+3. **Summary compaction** synthesizes multiple window summaries into a single session-level assessment with supersede semantics (old compacted deleted, new one inserted)
+4. **L3 analysis** operates only on root sessions (`parent_session_id IS NULL`) -- child data is already embedded in parent compacted summaries
+
+Task-queue orchestration ensures children are summarized before parents: parent tasks check for unsummarized children, enqueue child tasks at higher priority, and re-enqueue themselves with a 30s delay (max 10 re-enqueues).
+
+### Risk Indicators
+
+Risk indicators flag concerning behavioral patterns: `intent_drift`, `restriction_circumvention`, `scope_creep`, `insecure_reasoning`, `unusual_tool_pattern`, `injection_attempt`, `escalation_pattern`, and `delegation_misalignment` (sub-session divergence from parent intention).
 
 ## Database
 
@@ -198,4 +215,4 @@ SQLite with WAL mode for concurrent read/write. Thread-local connections. Foreig
 
 Key tables: `sessions`, `audit_log`, `mcp_servers`, `mcp_tool_preferences`, `session_summaries`, `agent_summaries`, `behavioral_analyses`, `behavioral_profiles`, `analysis_tasks`, `notification_channels`.
 
-Sessions use compound PK `(user_id, session_id)` for tenant isolation. Audit log uses compound FK `(user_id, session_id)` referencing sessions.
+Sessions use compound PK `(user_id, session_id)` for tenant isolation. Audit log uses compound FK `(user_id, session_id)` referencing sessions. The `session_summaries` table has a `summary_type` column (`window` or `compacted`) and a `trigger` column that includes `compaction` as a valid value. Index `idx_sessions_parent` on `sessions(user_id, parent_session_id)` supports efficient child session lookups for hierarchical analysis.

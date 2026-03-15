@@ -296,11 +296,15 @@ Manually trigger an Intaris session summary generation.
 
 ### GET /session/{session_id}/summary
 
-Retrieve both Intaris-generated and agent-reported summaries for a session.
+Retrieve both Intaris-generated and agent-reported summaries for a session. Intaris summaries are ordered with compacted summaries first, then by creation time descending.
+
+Each Intaris summary includes a `summary_type` field:
+- `"window"` -- covers a specific time range within the session
+- `"compacted"` -- synthesizes all windows into a single session-level assessment
 
 ### POST /analysis/trigger
 
-Manually trigger a cross-session behavioral analysis.
+Manually trigger a cross-session behavioral analysis. L3 analysis operates only on root sessions (`parent_session_id IS NULL`) -- child session data is already embedded in parent compacted summaries. Prefers compacted summaries when available.
 
 ### GET /analysis
 
@@ -370,6 +374,8 @@ Read events with pagination and filtering.
 | `after_seq` | `0` | Return events after this sequence number |
 | `limit` | `100` | Max events to return |
 | `type` | (all) | Filter by event type |
+| `after_ts` | (none) | Return events after this ISO 8601 timestamp |
+| `before_ts` | (none) | Return events before this ISO 8601 timestamp |
 
 **Response:**
 

@@ -46,6 +46,12 @@ class Metrics:
         self.analyses_failed_total: int = 0
         self.task_queue_depth: int = 0
         self.profile_staleness_max_seconds: float = 0.0
+        # Hierarchy observability metrics
+        self.summary_child_triggers_total: int = 0
+        self.summary_max_children_per_task: int = 0
+        self.summary_parent_recheck_count: int = 0
+        self.compaction_total: int = 0
+        self.compaction_supersede_total: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Export metrics as a dict for health check response."""
@@ -56,6 +62,11 @@ class Metrics:
             "analyses_failed_total": self.analyses_failed_total,
             "task_queue_depth": self.task_queue_depth,
             "profile_staleness_max_seconds": self.profile_staleness_max_seconds,
+            "summary_child_triggers_total": self.summary_child_triggers_total,
+            "summary_max_children_per_task": self.summary_max_children_per_task,
+            "summary_parent_recheck_count": self.summary_parent_recheck_count,
+            "compaction_total": self.compaction_total,
+            "compaction_supersede_total": self.compaction_supersede_total,
         }
 
 
@@ -549,7 +560,13 @@ class BackgroundWorker:
             try:
                 if task_type == "summary":
                     result = await self._execute_summary_task(task)
-                    self.metrics.summaries_generated_total += 1
+                    if result.get("status") != "waiting_for_children":
+                        self.metrics.summaries_generated_total += 1
+                    if result.get("compacted"):
+                        self.metrics.compaction_total += 1
+                    children_count = len(result.get("child_sessions", []))
+                    if children_count > self.metrics.summary_max_children_per_task:
+                        self.metrics.summary_max_children_per_task = children_count
                 elif task_type == "analysis":
                     result = await self._execute_analysis_task(task)
                     self.metrics.analyses_completed_total += 1
@@ -571,12 +588,97 @@ class BackgroundWorker:
         """Execute a summary generation task.
 
         Creates an analysis LLM client and delegates to the analyzer
-        for windowed session summary generation.
+        for windowed session summary generation. Handles parent/child
+        orchestration: when the analyzer signals that children need
+        summaries, enqueues child tasks and re-enqueues the parent
+        with a delay.
         """
-        from intaris.analyzer import generate_summary
+        from intaris.analyzer import (
+            _PARENT_RECHECK_DELAY_S,
+            generate_summary,
+        )
 
         llm = self._get_analysis_llm()
-        return await generate_summary(self._db, llm, task)
+        result = await generate_summary(self._db, llm, task)
+
+        # Handle parent waiting for children
+        if result.get("needs_children"):
+            child_sessions = result.get("child_sessions", [])
+            parent_check_count = result.get("parent_check_count", 0)
+
+            # Enqueue child summary tasks (higher priority than parent)
+            enqueued = 0
+            for child_user_id, child_session_id in child_sessions:
+                if not self._task_queue.cancel_duplicate(
+                    "summary", child_user_id, child_session_id
+                ):
+                    self._task_queue.enqueue(
+                        "summary",
+                        child_user_id,
+                        session_id=child_session_id,
+                        payload={"trigger": "close"},
+                        priority=3,  # Higher than parent's priority
+                    )
+                    enqueued += 1
+
+            self.metrics.summary_child_triggers_total += enqueued
+
+            logger.info(
+                "Parent session %s: enqueuing %d child summary tasks, re-enqueue #%d",
+                task.get("session_id"),
+                enqueued,
+                parent_check_count + 1,
+            )
+
+            # Re-enqueue the parent task with delay and incremented count
+            user_id = task.get("user_id", "")
+            session_id = task.get("session_id", "")
+            payload = task.get("payload") or {}
+            payload["depends_on_children"] = True
+            payload["parent_check_count"] = parent_check_count + 1
+
+            # Calculate next attempt time with delay
+            from datetime import timedelta
+
+            next_attempt = (
+                datetime.now(timezone.utc) + timedelta(seconds=_PARENT_RECHECK_DELAY_S)
+            ).isoformat()
+
+            # Enqueue as a new task (the current one will be marked complete)
+            self._task_queue.enqueue(
+                "summary",
+                user_id,
+                session_id=session_id,
+                payload=payload,
+                priority=2,
+            )
+
+            # Update the next_attempt_at for the newly enqueued task
+            # (the enqueue method sets it to now, but we want a delay)
+            with self._db.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE analysis_tasks
+                    SET next_attempt_at = ?
+                    WHERE user_id = ? AND session_id = ?
+                      AND task_type = 'summary'
+                      AND status = 'pending'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (next_attempt, user_id, session_id),
+                )
+
+            self.metrics.summary_parent_recheck_count += 1
+
+            # Return a result that marks this iteration as done
+            return {
+                "status": "waiting_for_children",
+                "children_enqueued": enqueued,
+                "parent_check_count": parent_check_count + 1,
+            }
+
+        return result
 
     async def _execute_analysis_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute a cross-session analysis task.

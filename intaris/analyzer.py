@@ -9,8 +9,14 @@ window since the last summary, analyzing three data streams:
 2. Tool calls with decisions (objective audit trail)
 3. Agent reasoning (untrusted, sandboxed for pattern detection)
 
+L2 summaries support hierarchical sessions:
+- Child sessions get their own L2 summaries (unchanged)
+- Parent sessions get enriched L2 summaries that incorporate child data
+- Summary compaction synthesizes multiple windows into one session summary
+
 L3 analysis is agent-scoped — it aggregates session summaries for a
 specific (user_id, agent_id) pair to detect cross-session patterns.
+L3 only operates on root sessions (parent_session_id IS NULL).
 """
 
 from __future__ import annotations
@@ -36,6 +42,16 @@ _MAX_PRIOR_SUMMARY_CHARS = 500
 _MIN_WINDOW_RECORDS = 3
 # Maximum sessions to include in L3 analysis prompt
 _MAX_L3_SESSIONS = 50
+# Maximum child sessions to include in parent summary (ARB M2)
+_MAX_CHILD_SESSIONS = 20
+# Maximum window summaries to include in compaction prompt (ARB m2)
+_MAX_COMPACTION_WINDOWS = 30
+# Maximum chars per child summary in compaction/parent prompt (ARB m2)
+_MAX_CHILD_SUMMARY_CHARS = 500
+# Maximum re-enqueue attempts for parent waiting on children
+_MAX_PARENT_RECHECK = 10
+# Delay between parent re-enqueue checks (seconds)
+_PARENT_RECHECK_DELAY_S = 30
 
 
 async def generate_summary(
@@ -45,8 +61,20 @@ async def generate_summary(
 ) -> dict[str, Any]:
     """Generate an Intaris session summary for an activity window.
 
-    Analyzes audit trail records within the window to produce a
-    structured summary with intent alignment and risk indicators.
+    Supports hierarchical sessions:
+    - Generates a tail window summary for unwindowed audit data
+    - For parent sessions, collects child session data
+    - Generates a compacted summary when > 1 windows exist
+
+    The task payload may contain:
+    - trigger: what triggered this summary (volume, close, manual, etc.)
+    - depends_on_children: True if this is a parent re-check
+    - parent_check_count: number of re-enqueue cycles so far
+
+    Returns a result dict. Special keys:
+    - "needs_children": True → caller should enqueue child tasks and
+      re-enqueue this task with a delay.
+    - "child_sessions": list of (user_id, session_id) needing summaries.
 
     Args:
         db: Database instance.
@@ -87,12 +115,55 @@ async def generate_summary(
     intention = session.get("intention", "")
     intention_source = session.get("intention_source", "initial")
 
-    # Determine analysis window
+    # ── Step 1: Check for child sessions (parent hierarchy) ───────
+    child_data: list[dict[str, Any]] = []
+    children = _get_child_sessions(db, user_id, session_id)
+
+    if children:
+        parent_check_count = payload.get("parent_check_count", 0)
+
+        # Check which children need summaries
+        children_needing_summaries = [
+            c
+            for c in children
+            if c.get("summary_count", 0) == 0
+            and (c.get("total_calls", 0) or 0) >= _MIN_WINDOW_RECORDS
+        ]
+
+        if children_needing_summaries and parent_check_count < _MAX_PARENT_RECHECK:
+            # Signal to the background worker to enqueue child tasks
+            # and re-enqueue this parent task with a delay
+            logger.info(
+                "Parent session %s: %d children need summaries, re-enqueue #%d",
+                session_id,
+                len(children_needing_summaries),
+                parent_check_count + 1,
+            )
+            return {
+                "needs_children": True,
+                "child_sessions": [
+                    (user_id, c["session_id"]) for c in children_needing_summaries
+                ],
+                "parent_check_count": parent_check_count,
+            }
+
+        if children_needing_summaries and parent_check_count >= _MAX_PARENT_RECHECK:
+            logger.warning(
+                "Parent session %s: max re-enqueue reached (%d), "
+                "proceeding with best-effort data",
+                session_id,
+                parent_check_count,
+            )
+
+        # Collect child data (compacted > window > raw metadata)
+        child_data = _collect_child_data(db, user_id, children)
+
+    # ── Step 2: Generate tail window summary (if needed) ──────────
     now = datetime.now(timezone.utc).isoformat()
     window_start = _get_window_start(db, user_id, session_id, session)
     window_end = now
 
-    # Fetch audit records for the window
+    # Fetch audit records for the tail window
     tool_calls = audit_store.get_window(
         session_id,
         user_id=user_id,
@@ -102,154 +173,156 @@ async def generate_summary(
         limit=500,
     )
 
-    # Early exit if not enough data
-    if len(tool_calls) < _MIN_WINDOW_RECORDS:
+    tail_window_generated = False
+    tail_result: dict[str, Any] = {}
+    tail_stats: dict[str, Any] = {}
+    tail_window_number = 0
+    if len(tool_calls) >= _MIN_WINDOW_RECORDS:
+        # Generate the tail window summary
+        reasoning_records = audit_store.get_window(
+            session_id,
+            user_id=user_id,
+            from_ts=window_start,
+            to_ts=window_end,
+            record_types={"reasoning"},
+            limit=200,
+        )
+
+        user_messages = []
+        agent_reasoning = []
+        for rec in reasoning_records:
+            content = rec.get("content", "")
+            if content.startswith("User message:"):
+                user_messages.append(rec)
+            else:
+                agent_reasoning.append(rec)
+
+        prior_summary = _get_prior_summary(db, user_id, session_id)
+        tail_window_number = _count_prior_summaries(db, user_id, session_id) + 1
+
+        user_prompt = _build_summary_prompt(
+            intention=intention,
+            intention_source=intention_source,
+            window_start=window_start,
+            window_end=window_end,
+            window_number=tail_window_number,
+            tool_calls=tool_calls,
+            user_messages=user_messages,
+            agent_reasoning=agent_reasoning,
+            prior_summary=prior_summary,
+            child_sessions=child_data,
+        )
+
+        from intaris.llm import parse_json_response
+        from intaris.prompts_analysis import (
+            SESSION_SUMMARY_EXPECTED_KEYS,
+            SESSION_SUMMARY_SCHEMA,
+            SESSION_SUMMARY_SYSTEM_PROMPT,
+        )
+        from intaris.sanitize import ANTI_INJECTION_PREAMBLE
+
+        system_prompt = SESSION_SUMMARY_SYSTEM_PROMPT.format(
+            anti_injection=ANTI_INJECTION_PREAMBLE,
+        )
+
+        try:
+            raw_response = llm.generate(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                json_schema=SESSION_SUMMARY_SCHEMA,
+            )
+            result = parse_json_response(
+                raw_response,
+                expected_keys=SESSION_SUMMARY_EXPECTED_KEYS,
+            )
+        except Exception:
+            logger.exception(
+                "LLM call failed for summary generation (user=%s session=%s)",
+                user_id,
+                session_id,
+            )
+            raise
+
+        tail_stats = audit_store.get_session_stats(
+            session_id,
+            user_id=user_id,
+            from_ts=window_start,
+            to_ts=window_end,
+        )
+        tail_result = result
+
+        _store_summary(
+            db,
+            user_id=user_id,
+            session_id=session_id,
+            window_start=window_start,
+            window_end=window_end,
+            trigger=trigger,
+            summary_type="window",
+            result=tail_result,
+            stats=tail_stats,
+        )
+        tail_window_generated = True
+
+        try:
+            session_store.increment_summary_count(session_id, user_id=user_id)
+        except Exception:
+            logger.debug("Failed to increment summary_count", exc_info=True)
+
         logger.info(
-            "Summary skipped: only %d tool calls in window "
-            "(user=%s session=%s, min=%d)",
-            len(tool_calls),
+            "Window summary generated: user=%s session=%s window=%d "
+            "alignment=%s indicators=%d calls=%d",
             user_id,
             session_id,
-            _MIN_WINDOW_RECORDS,
+            tail_window_number,
+            tail_result.get("intent_alignment"),
+            len(tail_result.get("risk_indicators", [])),
+            tail_stats["total"],
+        )
+
+    # ── Step 3: Compaction (if > 1 windows exist) ─────────────────
+    total_windows = _count_prior_summaries(db, user_id, session_id)
+
+    if total_windows > 1:
+        compaction_result = await _generate_compaction(
+            db,
+            llm,
+            user_id=user_id,
+            session_id=session_id,
+            session=session,
+            child_data=child_data,
+        )
+        if compaction_result:
+            return compaction_result
+
+    # If we only generated a tail window, return that info
+    if tail_window_generated:
+        return {
+            "summary_type": "window",
+            "intent_alignment": tail_result.get("intent_alignment"),
+            "risk_indicators_count": len(tail_result.get("risk_indicators", [])),
+            "call_count": tail_stats["total"],
+            "window_number": tail_window_number,
+            "compacted": False,
+        }
+
+    # No tail window and no compaction needed
+    if total_windows == 0:
+        logger.info(
+            "Summary skipped: insufficient data "
+            "(user=%s session=%s, %d tool calls in tail)",
+            user_id,
+            session_id,
+            len(tool_calls),
         )
         return {"status": "skipped", "reason": "Insufficient data in window"}
 
-    reasoning_records = audit_store.get_window(
-        session_id,
-        user_id=user_id,
-        from_ts=window_start,
-        to_ts=window_end,
-        record_types={"reasoning"},
-        limit=200,
-    )
-
-    # Split reasoning into user messages and agent reasoning
-    user_messages = []
-    agent_reasoning = []
-    for rec in reasoning_records:
-        content = rec.get("content", "")
-        if content.startswith("User message:"):
-            user_messages.append(rec)
-        else:
-            agent_reasoning.append(rec)
-
-    # Get prior summary for recap (if any)
-    prior_summary = _get_prior_summary(db, user_id, session_id)
-
-    # Count the window number
-    window_number = _count_prior_summaries(db, user_id, session_id) + 1
-
-    # Build the user prompt
-    user_prompt = _build_summary_prompt(
-        intention=intention,
-        intention_source=intention_source,
-        window_start=window_start,
-        window_end=window_end,
-        window_number=window_number,
-        tool_calls=tool_calls,
-        user_messages=user_messages,
-        agent_reasoning=agent_reasoning,
-        prior_summary=prior_summary,
-    )
-
-    # Call the LLM
-    from intaris.llm import parse_json_response
-    from intaris.prompts_analysis import (
-        SESSION_SUMMARY_EXPECTED_KEYS,
-        SESSION_SUMMARY_SCHEMA,
-        SESSION_SUMMARY_SYSTEM_PROMPT,
-    )
-    from intaris.sanitize import ANTI_INJECTION_PREAMBLE
-
-    system_prompt = SESSION_SUMMARY_SYSTEM_PROMPT.format(
-        anti_injection=ANTI_INJECTION_PREAMBLE,
-    )
-
-    try:
-        raw_response = llm.generate(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            json_schema=SESSION_SUMMARY_SCHEMA,
-        )
-        result = parse_json_response(
-            raw_response,
-            expected_keys=SESSION_SUMMARY_EXPECTED_KEYS,
-        )
-    except Exception:
-        logger.exception(
-            "LLM call failed for summary generation (user=%s session=%s)",
-            user_id,
-            session_id,
-        )
-        raise
-
-    # Compute window stats from audit records
-    stats = audit_store.get_session_stats(
-        session_id,
-        user_id=user_id,
-        from_ts=window_start,
-        to_ts=window_end,
-    )
-
-    # Store the summary
-    summary_id = str(uuid.uuid4())
-    tools_used = result.get("tools_used", [])
-    risk_indicators = result.get("risk_indicators", [])
-
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO session_summaries
-                (id, user_id, session_id, window_start, window_end,
-                 trigger, summary, tools_used, intent_alignment,
-                 risk_indicators, call_count, approved_count,
-                 denied_count, escalated_count, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                summary_id,
-                user_id,
-                session_id,
-                window_start,
-                window_end,
-                trigger,
-                result.get("summary", ""),
-                json.dumps(tools_used),
-                result.get("intent_alignment", "unclear"),
-                json.dumps(risk_indicators),
-                stats["total"],
-                stats["approved_count"],
-                stats["denied_count"],
-                stats["escalated_count"],
-                now,
-            ),
-        )
-
-    # Increment session summary count
-    try:
-        session_store.increment_summary_count(session_id, user_id=user_id)
-    except Exception:
-        logger.debug("Failed to increment summary_count", exc_info=True)
-
-    logger.info(
-        "Summary generated: user=%s session=%s window=%d "
-        "alignment=%s indicators=%d calls=%d",
-        user_id,
-        session_id,
-        window_number,
-        result.get("intent_alignment"),
-        len(risk_indicators),
-        stats["total"],
-    )
-
+    # Exactly 1 window exists, no compaction needed
     return {
-        "summary_id": summary_id,
-        "intent_alignment": result.get("intent_alignment"),
-        "risk_indicators_count": len(risk_indicators),
-        "call_count": stats["total"],
-        "window_number": window_number,
+        "status": "skipped",
+        "reason": "Single window exists, no compaction needed",
     }
 
 
@@ -424,14 +497,19 @@ def _get_window_start(
 ) -> str:
     """Determine the start of the analysis window.
 
-    Returns the end of the last summary's window, or the session
-    creation time if no prior summaries exist.
+    Returns the end of the last *window* summary's window_end, or the
+    session creation time if no prior window summaries exist.
+
+    Filters to summary_type='window' only (ARB M5) — compacted summaries
+    span the full session and would prevent new window generation after
+    session resume.
     """
     with db.cursor() as cur:
         cur.execute(
             """
             SELECT window_end FROM session_summaries
             WHERE user_id = ? AND session_id = ?
+              AND summary_type = 'window'
             ORDER BY window_end DESC
             LIMIT 1
             """,
@@ -449,12 +527,17 @@ def _get_prior_summary(
     user_id: str,
     session_id: str,
 ) -> str | None:
-    """Get the summary text from the most recent prior summary."""
+    """Get the summary text from the most recent prior window summary.
+
+    Only considers window summaries (not compacted) for the recap
+    context in the next window's prompt.
+    """
     with db.cursor() as cur:
         cur.execute(
             """
             SELECT summary FROM session_summaries
             WHERE user_id = ? AND session_id = ?
+              AND summary_type = 'window'
             ORDER BY window_end DESC
             LIMIT 1
             """,
@@ -473,15 +556,218 @@ def _count_prior_summaries(
     user_id: str,
     session_id: str,
 ) -> int:
-    """Count existing summaries for this session."""
+    """Count existing window summaries for this session.
+
+    Only counts summary_type='window' — compacted summaries are not
+    windows and should not affect window numbering.
+    """
     with db.cursor() as cur:
         cur.execute(
             "SELECT COUNT(*) FROM session_summaries "
-            "WHERE user_id = ? AND session_id = ?",
+            "WHERE user_id = ? AND session_id = ? "
+            "AND summary_type = 'window'",
             (user_id, session_id),
         )
         row = cur.fetchone()
     return row[0] if row else 0
+
+
+def _store_summary(
+    db: Database,
+    *,
+    user_id: str,
+    session_id: str,
+    window_start: str,
+    window_end: str,
+    trigger: str,
+    summary_type: str,
+    result: dict[str, Any],
+    stats: dict[str, Any],
+) -> str:
+    """Store a summary record in the database.
+
+    Returns the summary ID.
+    """
+    summary_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    tools_used = result.get("tools_used", [])
+    risk_indicators = result.get("risk_indicators", [])
+
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO session_summaries
+                (id, user_id, session_id, window_start, window_end,
+                 trigger, summary_type, summary, tools_used,
+                 intent_alignment, risk_indicators, call_count,
+                 approved_count, denied_count, escalated_count,
+                 created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                summary_id,
+                user_id,
+                session_id,
+                window_start,
+                window_end,
+                trigger,
+                summary_type,
+                result.get("summary", ""),
+                json.dumps(tools_used),
+                result.get("intent_alignment", "unclear"),
+                json.dumps(risk_indicators),
+                stats.get("total", 0),
+                stats.get("approved_count", 0),
+                stats.get("denied_count", 0),
+                stats.get("escalated_count", 0),
+                now,
+            ),
+        )
+
+    return summary_id
+
+
+def _get_child_sessions(
+    db: Database,
+    user_id: str,
+    parent_session_id: str,
+) -> list[dict[str, Any]]:
+    """Get child sessions for a parent, sorted by last_activity_at DESC.
+
+    Returns up to _MAX_CHILD_SESSIONS children. Logs a warning if
+    the breadth limit is hit.
+    """
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT session_id, intention, status, total_calls,
+                   approved_count, denied_count, escalated_count,
+                   created_at, last_activity_at, agent_id,
+                   intention_source, summary_count
+            FROM sessions
+            WHERE user_id = ? AND parent_session_id = ?
+            ORDER BY last_activity_at DESC
+            LIMIT ?
+            """,
+            (user_id, parent_session_id, _MAX_CHILD_SESSIONS + 1),
+        )
+        rows = [dict(row) for row in cur.fetchall()]
+
+    if len(rows) > _MAX_CHILD_SESSIONS:
+        total_children = len(rows)
+        rows = rows[:_MAX_CHILD_SESSIONS]
+        logger.warning(
+            "Parent session %s: breadth limit hit (%d children, cap %d)",
+            parent_session_id,
+            total_children,
+            _MAX_CHILD_SESSIONS,
+        )
+        # Attach metadata about omitted children
+        for row in rows:
+            row["_total_children"] = total_children
+
+    return rows
+
+
+def _collect_child_data(
+    db: Database,
+    user_id: str,
+    children: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Collect summary data for child sessions.
+
+    For each child, uses the best available data:
+    1. Compacted summary (preferred)
+    2. Latest window summary + stats
+    3. Raw metadata (no summary available)
+
+    Returns a list of child data dicts for prompt building.
+    """
+    child_data: list[dict[str, Any]] = []
+
+    for child in children:
+        child_sid = child["session_id"]
+        entry: dict[str, Any] = {
+            "session_id": child_sid,
+            "intention": child.get("intention", ""),
+            "status": child.get("status", "unknown"),
+            "total_calls": child.get("total_calls", 0),
+            "approved_count": child.get("approved_count", 0),
+            "denied_count": child.get("denied_count", 0),
+            "escalated_count": child.get("escalated_count", 0),
+            "created_at": child.get("created_at", ""),
+            "last_activity_at": child.get("last_activity_at", ""),
+        }
+
+        # Try to get the best summary
+        with db.cursor() as cur:
+            # First try compacted
+            cur.execute(
+                """
+                SELECT summary, intent_alignment, risk_indicators,
+                       tools_used
+                FROM session_summaries
+                WHERE user_id = ? AND session_id = ?
+                  AND summary_type = 'compacted'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (user_id, child_sid),
+            )
+            row = cur.fetchone()
+
+            if row:
+                entry["summary_source"] = "compacted"
+                summary_text = row["summary"] or ""
+                entry["summary"] = summary_text[:_MAX_CHILD_SUMMARY_CHARS]
+                entry["intent_alignment"] = row["intent_alignment"]
+                ri = row["risk_indicators"]
+                if ri and isinstance(ri, str):
+                    try:
+                        ri = json.loads(ri)
+                    except (json.JSONDecodeError, TypeError):
+                        ri = []
+                entry["risk_indicators"] = ri or []
+            else:
+                # Try latest window summary
+                cur.execute(
+                    """
+                    SELECT summary, intent_alignment, risk_indicators,
+                           tools_used
+                    FROM session_summaries
+                    WHERE user_id = ? AND session_id = ?
+                      AND summary_type = 'window'
+                    ORDER BY window_end DESC
+                    LIMIT 1
+                    """,
+                    (user_id, child_sid),
+                )
+                row = cur.fetchone()
+
+                if row:
+                    entry["summary_source"] = "window"
+                    summary_text = row["summary"] or ""
+                    entry["summary"] = summary_text[:_MAX_CHILD_SUMMARY_CHARS]
+                    entry["intent_alignment"] = row["intent_alignment"]
+                    ri = row["risk_indicators"]
+                    if ri and isinstance(ri, str):
+                        try:
+                            ri = json.loads(ri)
+                        except (json.JSONDecodeError, TypeError):
+                            ri = []
+                    entry["risk_indicators"] = ri or []
+                else:
+                    # Raw metadata fallback
+                    entry["summary_source"] = "metadata"
+                    logger.warning(
+                        "Child session %s summary unavailable, "
+                        "using raw metadata fallback",
+                        child_sid,
+                    )
+
+        child_data.append(entry)
+
+    return child_data
 
 
 def _compress_tool_calls(tool_calls: list[dict[str, Any]]) -> list[str]:
@@ -587,8 +873,13 @@ def _build_summary_prompt(
     user_messages: list[dict[str, Any]],
     agent_reasoning: list[dict[str, Any]],
     prior_summary: str | None,
+    child_sessions: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Build the user prompt for L2 session summary generation."""
+    """Build the user prompt for L2 session summary generation.
+
+    If child_sessions is provided, includes a "Delegated Work" section
+    with child session data for parent session summaries.
+    """
     parts: list[str] = []
 
     # Header
@@ -644,6 +935,10 @@ def _build_summary_prompt(
             )
         parts.append("")
 
+    # Delegated work (child sessions)
+    if child_sessions:
+        _append_child_section(parts, child_sessions)
+
     # Statistics
     approved = sum(1 for tc in tool_calls if tc.get("decision") == "approve")
     denied = sum(1 for tc in tool_calls if tc.get("decision") == "deny")
@@ -663,6 +958,330 @@ def _build_summary_prompt(
     return "\n".join(parts)
 
 
+def _append_child_section(
+    parts: list[str],
+    child_sessions: list[dict[str, Any]],
+) -> None:
+    """Append the 'Delegated Work' section to prompt parts.
+
+    Formats child session data for inclusion in both window and
+    compaction prompts.
+    """
+    total_children = child_sessions[0].get("_total_children") if child_sessions else 0
+
+    parts.append(
+        f"== DELEGATED WORK (SUB-SESSIONS) ==\n"
+        f"This session delegated work to {len(child_sessions)} sub-sessions. "
+        f"All are listed below."
+    )
+    if total_children and total_children > len(child_sessions):
+        parts.append(
+            f"Note: {total_children - len(child_sessions)} additional "
+            f"sub-sessions omitted (low activity). "
+            f"Total child sessions: {total_children}."
+        )
+    parts.append("")
+
+    for child in child_sessions:
+        sid = child["session_id"]
+        source = child.get("summary_source", "metadata")
+        intention = child.get("intention", "")
+        status = child.get("status", "unknown")
+
+        if source in ("compacted", "window"):
+            label = "summarized" if source == "compacted" else "partial summary"
+            parts.append(f"--- Sub-Session: {sid} ({label}) ---")
+            parts.append(f'Intention: "{intention}"')
+            alignment = child.get("intent_alignment", "unclear")
+            parts.append(f"Status: {status} | Alignment: {alignment}")
+            parts.append(
+                f"Calls: {child.get('total_calls', 0)} total "
+                f"({child.get('approved_count', 0)} approved, "
+                f"{child.get('denied_count', 0)} denied, "
+                f"{child.get('escalated_count', 0)} escalated)"
+            )
+            summary = child.get("summary", "")
+            if summary:
+                parts.append(f"Summary: {summary}")
+            indicators = child.get("risk_indicators", [])
+            if indicators:
+                ind_strs = [
+                    f"{i.get('indicator', '?')}({i.get('severity', '?')})"
+                    for i in indicators
+                ]
+                parts.append(f"Risk Indicators: {', '.join(ind_strs)}")
+            else:
+                parts.append("Risk Indicators: none")
+        else:
+            # Raw metadata fallback
+            parts.append(f"--- Sub-Session: {sid} (minimal activity) ---")
+            parts.append(f'Intention: "{intention}"')
+            parts.append(f"Status: {status}")
+            parts.append(
+                f"Calls: {child.get('total_calls', 0)} total "
+                f"({child.get('approved_count', 0)} approved, "
+                f"{child.get('denied_count', 0)} denied, "
+                f"{child.get('escalated_count', 0)} escalated)"
+            )
+            created = (child.get("created_at") or "")[:19]
+            last_active = (child.get("last_activity_at") or "")[:19]
+            parts.append(f"Created: {created}, Last Active: {last_active}")
+            parts.append(
+                "Note: Insufficient activity for full analysis. "
+                "Raw data included for completeness."
+            )
+
+        parts.append("")
+
+
+async def _generate_compaction(
+    db: Database,
+    llm: Any,
+    *,
+    user_id: str,
+    session_id: str,
+    session: dict[str, Any],
+    child_data: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Generate a compacted summary from all window summaries.
+
+    Supersedes any existing compacted summary (delete old, insert new).
+    Uses the SESSION_COMPACTION_SYSTEM_PROMPT.
+
+    Returns a result dict on success, or None if compaction was skipped.
+    """
+    from intaris.session import SessionStore
+
+    # Fetch all window summaries for this session
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, summary, intent_alignment, risk_indicators,
+                   tools_used, call_count, approved_count, denied_count,
+                   escalated_count, window_start, window_end, trigger
+            FROM session_summaries
+            WHERE user_id = ? AND session_id = ?
+              AND summary_type = 'window'
+            ORDER BY window_start ASC
+            """,
+            (user_id, session_id),
+        )
+        window_rows = [dict(row) for row in cur.fetchall()]
+
+    if len(window_rows) <= 1:
+        return None  # No compaction needed
+
+    # Parse JSON fields in window rows
+    for row in window_rows:
+        for field in ("risk_indicators", "tools_used"):
+            if row.get(field) and isinstance(row[field], str):
+                try:
+                    row[field] = json.loads(row[field])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+    # Truncate if too many windows (ARB m2)
+    if len(window_rows) > _MAX_COMPACTION_WINDOWS:
+        logger.info(
+            "Compaction for session %s: truncating %d windows to %d",
+            session_id,
+            len(window_rows),
+            _MAX_COMPACTION_WINDOWS,
+        )
+        window_rows = window_rows[-_MAX_COMPACTION_WINDOWS:]
+
+    # Build compaction prompt
+    intention = session.get("intention", "")
+    user_prompt = _build_compaction_prompt(
+        intention=intention,
+        window_summaries=window_rows,
+        child_sessions=child_data,
+        session=session,
+    )
+
+    from intaris.llm import parse_json_response
+    from intaris.prompts_analysis import (
+        SESSION_COMPACTION_SYSTEM_PROMPT,
+        SESSION_SUMMARY_EXPECTED_KEYS,
+        SESSION_SUMMARY_SCHEMA,
+    )
+    from intaris.sanitize import ANTI_INJECTION_PREAMBLE
+
+    system_prompt = SESSION_COMPACTION_SYSTEM_PROMPT.format(
+        anti_injection=ANTI_INJECTION_PREAMBLE,
+    )
+
+    try:
+        raw_response = llm.generate(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            json_schema=SESSION_SUMMARY_SCHEMA,
+        )
+        result = parse_json_response(
+            raw_response,
+            expected_keys=SESSION_SUMMARY_EXPECTED_KEYS,
+        )
+    except Exception:
+        logger.exception(
+            "LLM call failed for compaction (user=%s session=%s)",
+            user_id,
+            session_id,
+        )
+        raise
+
+    # Supersede: delete any existing compacted summary
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM session_summaries
+            WHERE user_id = ? AND session_id = ?
+              AND summary_type = 'compacted'
+            """,
+            (user_id, session_id),
+        )
+        deleted = cur.rowcount
+    if deleted:
+        logger.info(
+            "Compaction supersede: deleted %d old compacted summary for session %s",
+            deleted,
+            session_id,
+        )
+
+    # Aggregate stats across all windows
+    total_calls = sum(r.get("call_count", 0) for r in window_rows)
+    total_approved = sum(r.get("approved_count", 0) for r in window_rows)
+    total_denied = sum(r.get("denied_count", 0) for r in window_rows)
+    total_escalated = sum(r.get("escalated_count", 0) for r in window_rows)
+
+    compacted_stats = {
+        "total": total_calls,
+        "approved_count": total_approved,
+        "denied_count": total_denied,
+        "escalated_count": total_escalated,
+    }
+
+    # Window range: session start to now
+    window_start = session.get("created_at", datetime.now(timezone.utc).isoformat())
+    window_end = datetime.now(timezone.utc).isoformat()
+
+    summary_id = _store_summary(
+        db,
+        user_id=user_id,
+        session_id=session_id,
+        window_start=window_start,
+        window_end=window_end,
+        trigger="compaction",
+        summary_type="compacted",
+        result=result,
+        stats=compacted_stats,
+    )
+
+    # Increment summary count for the compacted summary
+    try:
+        session_store = SessionStore(db)
+        session_store.increment_summary_count(session_id, user_id=user_id)
+    except Exception:
+        logger.debug("Failed to increment summary_count", exc_info=True)
+
+    logger.info(
+        "Compaction for session %s: synthesized %d windows + %d children, "
+        "alignment=%s indicators=%d",
+        session_id,
+        len(window_rows),
+        len(child_data),
+        result.get("intent_alignment"),
+        len(result.get("risk_indicators", [])),
+    )
+
+    return {
+        "summary_id": summary_id,
+        "summary_type": "compacted",
+        "intent_alignment": result.get("intent_alignment"),
+        "risk_indicators_count": len(result.get("risk_indicators", [])),
+        "call_count": total_calls,
+        "windows_compacted": len(window_rows),
+        "children_included": len(child_data),
+        "compacted": True,
+    }
+
+
+def _build_compaction_prompt(
+    *,
+    intention: str,
+    window_summaries: list[dict[str, Any]],
+    child_sessions: list[dict[str, Any]] | None = None,
+    session: dict[str, Any],
+) -> str:
+    """Build the user prompt for session summary compaction.
+
+    Input: intention, all window summaries (chronological), child data,
+    session stats. Each window entry shows: time range, narrative,
+    alignment, risk indicators, tools, stats.
+    """
+    parts: list[str] = []
+
+    # Header
+    parts.append(f'Session intention: "{intention}"')
+    status = session.get("status", "unknown")
+    created = (session.get("created_at") or "")[:19]
+    parts.append(f"Session status: {status}")
+    parts.append(f"Session created: {created}")
+    parts.append(
+        f"Total calls: {session.get('total_calls', 0)} "
+        f"({session.get('approved_count', 0)} approved, "
+        f"{session.get('denied_count', 0)} denied, "
+        f"{session.get('escalated_count', 0)} escalated)"
+    )
+    parts.append(f"Windows to synthesize: {len(window_summaries)}")
+    parts.append("")
+
+    # Window summaries (chronological)
+    parts.append("== Window Summaries (chronological) ==")
+    for i, ws in enumerate(window_summaries, 1):
+        w_start = (ws.get("window_start") or "")[:19]
+        w_end = (ws.get("window_end") or "")[:19]
+        alignment = ws.get("intent_alignment", "unclear")
+        trigger = ws.get("trigger", "?")
+
+        parts.append(f"\n--- Window {i} ({w_start} -> {w_end}, trigger: {trigger}) ---")
+        parts.append(f"Alignment: {alignment}")
+        parts.append(
+            f"Calls: {ws.get('call_count', 0)} "
+            f"({ws.get('approved_count', 0)} approved, "
+            f"{ws.get('denied_count', 0)} denied, "
+            f"{ws.get('escalated_count', 0)} escalated)"
+        )
+
+        tools = ws.get("tools_used", [])
+        if isinstance(tools, list) and tools:
+            parts.append(f"Tools: {', '.join(tools)}")
+
+        summary = ws.get("summary", "")
+        if summary:
+            parts.append(f"Narrative: {summary}")
+
+        indicators = ws.get("risk_indicators", [])
+        if isinstance(indicators, list) and indicators:
+            ind_strs = [
+                f"{ind.get('indicator', '?')}({ind.get('severity', '?')}): "
+                f"{ind.get('detail', '')[:100]}"
+                for ind in indicators
+            ]
+            parts.append(f"Risk Indicators: {'; '.join(ind_strs)}")
+        else:
+            parts.append("Risk Indicators: none")
+
+    parts.append("")
+
+    # Child sessions (if any)
+    if child_sessions:
+        _append_child_section(parts, child_sessions)
+
+    return "\n".join(parts)
+
+
 def _get_session_summaries_for_analysis(
     db: Database,
     user_id: str,
@@ -672,13 +1291,15 @@ def _get_session_summaries_for_analysis(
     """Fetch session summaries grouped by session for L3 analysis.
 
     Returns a dict mapping session_id to session info with summaries.
-    Only includes sessions for the specified agent_id.
+    Only includes root sessions (parent_session_id IS NULL) — child
+    session data is already embedded in parent compacted summaries.
+    Prefers compacted summaries when available.
     """
     from datetime import timedelta
 
     cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
 
-    # Get sessions with their metadata
+    # Get root sessions only (parent_session_id IS NULL)
     with db.cursor() as cur:
         if agent_id:
             cur.execute(
@@ -689,6 +1310,7 @@ def _get_session_summaries_for_analysis(
                        s.intention_source
                 FROM sessions s
                 WHERE s.user_id = ? AND s.agent_id = ?
+                  AND s.parent_session_id IS NULL
                   AND s.created_at >= ?
                 ORDER BY s.created_at DESC
                 LIMIT ?
@@ -704,6 +1326,7 @@ def _get_session_summaries_for_analysis(
                        s.intention_source
                 FROM sessions s
                 WHERE s.user_id = ?
+                  AND s.parent_session_id IS NULL
                   AND s.created_at >= ?
                 ORDER BY s.created_at DESC
                 LIMIT ?
@@ -722,9 +1345,10 @@ def _get_session_summaries_for_analysis(
     with db.cursor() as cur:
         cur.execute(
             f"""
-            SELECT session_id, summary, intent_alignment, risk_indicators,
-                   tools_used, call_count, approved_count, denied_count,
-                   escalated_count, window_start, window_end, trigger
+            SELECT session_id, summary_type, summary, intent_alignment,
+                   risk_indicators, tools_used, call_count, approved_count,
+                   denied_count, escalated_count, window_start, window_end,
+                   trigger
             FROM session_summaries
             WHERE user_id = ? AND session_id IN ({placeholders})
             ORDER BY window_start ASC
@@ -733,12 +1357,12 @@ def _get_session_summaries_for_analysis(
         )
         summary_rows = [dict(row) for row in cur.fetchall()]
 
-    # Group summaries by session
-    summaries_by_session: dict[str, list[dict[str, Any]]] = {}
+    # Group summaries by session, preferring compacted
+    raw_by_session: dict[str, list[dict[str, Any]]] = {}
     for row in summary_rows:
         sid = row["session_id"]
-        if sid not in summaries_by_session:
-            summaries_by_session[sid] = []
+        if sid not in raw_by_session:
+            raw_by_session[sid] = []
         # Parse JSON fields
         for field in ("risk_indicators", "tools_used"):
             if row.get(field) and isinstance(row[field], str):
@@ -746,7 +1370,20 @@ def _get_session_summaries_for_analysis(
                     row[field] = json.loads(row[field])
                 except (json.JSONDecodeError, TypeError):
                     pass
-        summaries_by_session[sid].append(row)
+        raw_by_session[sid].append(row)
+
+    # For each session, prefer compacted summary if available
+    summaries_by_session: dict[str, list[dict[str, Any]]] = {}
+    for sid, rows in raw_by_session.items():
+        compacted = [r for r in rows if r.get("summary_type") == "compacted"]
+        if compacted:
+            # Use the compacted summary (should be exactly one)
+            summaries_by_session[sid] = compacted
+        else:
+            # Fall back to window summaries
+            summaries_by_session[sid] = [
+                r for r in rows if r.get("summary_type") != "compacted"
+            ]
 
     # Build result: only sessions that have summaries
     result: dict[str, dict[str, Any]] = {}

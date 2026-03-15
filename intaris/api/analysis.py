@@ -412,12 +412,14 @@ async def get_session_summaries(
         session_store.get(session_id, user_id=ctx.user_id)
 
         with db.cursor() as cur:
-            # Intaris-generated summaries
+            # Intaris-generated summaries (compacted first, then by time)
             cur.execute(
                 """
                 SELECT * FROM session_summaries
                 WHERE user_id = ? AND session_id = ?
-                ORDER BY created_at DESC
+                ORDER BY
+                    CASE WHEN summary_type = 'compacted' THEN 0 ELSE 1 END,
+                    created_at DESC
                 """,
                 (ctx.user_id, session_id),
             )

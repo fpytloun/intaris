@@ -368,6 +368,23 @@ class Database:
             )
             logger.info("Migration: added injection_detected column to audit_log")
 
+        # Migration: add summary_type to session_summaries
+        if not self._sqlite_column_exists(conn, "session_summaries", "summary_type"):
+            conn.execute(
+                "ALTER TABLE session_summaries ADD COLUMN "
+                "summary_type TEXT DEFAULT 'window'"
+            )
+            logger.info("Migration: added summary_type column to session_summaries")
+
+        # Migration: recreate session_summaries for updated CHECK constraints
+        self._migrate_session_summaries_check_sqlite(conn)
+
+        # Migration: add parent session index
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_parent "
+            "ON sessions(user_id, parent_session_id)"
+        )
+
         # Migration: add agent_id to behavioral_analyses
         if not self._sqlite_column_exists(conn, "behavioral_analyses", "agent_id"):
             conn.execute("ALTER TABLE behavioral_analyses ADD COLUMN agent_id TEXT")
@@ -499,6 +516,107 @@ class Database:
             "ON analysis_tasks(user_id, task_type, status)"
         )
 
+    @staticmethod
+    def _migrate_session_summaries_check_sqlite(conn: sqlite3.Connection) -> None:
+        """Recreate session_summaries if CHECK constraints are outdated (SQLite).
+
+        Adds 'compaction' to the trigger CHECK and ensures summary_type
+        CHECK is present. Uses the same table-recreation pattern as
+        analysis_tasks migration.
+        """
+        cursor = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='session_summaries'"
+        )
+        row = cursor.fetchone()
+        if not row:
+            return
+        create_sql = row[0]
+        # Already up to date if 'compaction' is in the CHECK constraint
+        if "compaction" in create_sql:
+            return
+
+        logger.info(
+            "Migration: recreating session_summaries table to update "
+            "CHECK constraints (trigger + summary_type)"
+        )
+        # Drop leftover temp table from a previously failed migration attempt
+        conn.execute("DROP TABLE IF EXISTS session_summaries_new")
+        conn.execute(
+            """
+            CREATE TABLE session_summaries_new (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                session_id      TEXT NOT NULL,
+                window_start    TEXT NOT NULL,
+                window_end      TEXT NOT NULL,
+                trigger         TEXT NOT NULL
+                    CHECK (trigger IN (
+                        'inactivity', 'volume', 'close', 'manual', 'compaction'
+                    )),
+                summary_type    TEXT NOT NULL DEFAULT 'window'
+                    CHECK (summary_type IN ('window', 'compacted')),
+                summary         TEXT NOT NULL,
+                tools_used      TEXT,
+                intent_alignment TEXT NOT NULL
+                    CHECK (intent_alignment IN (
+                        'aligned', 'partially_aligned', 'misaligned', 'unclear'
+                    )),
+                risk_indicators TEXT,
+                call_count      INTEGER NOT NULL,
+                approved_count  INTEGER NOT NULL DEFAULT 0,
+                denied_count    INTEGER NOT NULL DEFAULT 0,
+                escalated_count INTEGER NOT NULL DEFAULT 0,
+                created_at      TEXT NOT NULL,
+                FOREIGN KEY (user_id, session_id)
+                    REFERENCES sessions(user_id, session_id)
+            )
+            """
+        )
+        # Copy data — summary_type column may or may not exist in old table.
+        # When it exists, existing rows may have NULL (ALTER TABLE ADD COLUMN
+        # DEFAULT only applies to new inserts in SQLite), so use COALESCE.
+        old_cols = {
+            r[1]
+            for r in conn.execute("PRAGMA table_info(session_summaries)").fetchall()
+        }
+        if "summary_type" in old_cols:
+            conn.execute(
+                "INSERT INTO session_summaries_new "
+                "(id, user_id, session_id, window_start, window_end, "
+                "trigger, summary_type, summary, tools_used, "
+                "intent_alignment, risk_indicators, call_count, "
+                "approved_count, denied_count, escalated_count, created_at) "
+                "SELECT id, user_id, session_id, window_start, window_end, "
+                "trigger, COALESCE(summary_type, 'window'), summary, "
+                "tools_used, intent_alignment, risk_indicators, call_count, "
+                "approved_count, denied_count, escalated_count, created_at "
+                "FROM session_summaries"
+            )
+        else:
+            conn.execute(
+                "INSERT INTO session_summaries_new "
+                "(id, user_id, session_id, window_start, window_end, "
+                "trigger, summary_type, summary, tools_used, "
+                "intent_alignment, risk_indicators, call_count, "
+                "approved_count, denied_count, escalated_count, created_at) "
+                "SELECT id, user_id, session_id, window_start, window_end, "
+                "trigger, 'window', summary, tools_used, "
+                "intent_alignment, risk_indicators, call_count, "
+                "approved_count, denied_count, escalated_count, created_at "
+                "FROM session_summaries"
+            )
+        conn.execute("DROP TABLE session_summaries")
+        conn.execute("ALTER TABLE session_summaries_new RENAME TO session_summaries")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_summaries_user_time "
+            "ON session_summaries(user_id, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_summaries_session "
+            "ON session_summaries(user_id, session_id)"
+        )
+
     # ── PostgreSQL Migrations ─────────────────────────────────────
 
     def _migrate_pg(self, conn: Any) -> None:
@@ -525,6 +643,7 @@ class Database:
                 ("audit_log", "injection_detected", "BOOLEAN DEFAULT FALSE"),
                 ("behavioral_analyses", "agent_id", "TEXT"),
                 ("behavioral_profiles", "agent_id", "TEXT NOT NULL DEFAULT ''"),
+                ("session_summaries", "summary_type", "TEXT NOT NULL DEFAULT 'window'"),
             ]
             for table, column, col_type in migrations:
                 cur.execute(
@@ -570,6 +689,10 @@ class Database:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_analyses_agent "
                 "ON behavioral_analyses(user_id, agent_id, created_at)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_parent "
+                "ON sessions(user_id, parent_session_id)"
             )
         finally:
             cur.close()
@@ -702,7 +825,9 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     window_start    TEXT NOT NULL,
     window_end      TEXT NOT NULL,
     trigger         TEXT NOT NULL
-        CHECK (trigger IN ('inactivity', 'volume', 'close', 'manual')),
+        CHECK (trigger IN ('inactivity', 'volume', 'close', 'manual', 'compaction')),
+    summary_type    TEXT NOT NULL DEFAULT 'window'
+        CHECK (summary_type IN ('window', 'compacted')),
     summary         TEXT NOT NULL,
     tools_used      TEXT,
     intent_alignment TEXT NOT NULL
@@ -722,6 +847,7 @@ CREATE INDEX IF NOT EXISTS idx_summaries_user_time
     ON session_summaries(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_summaries_session
     ON session_summaries(user_id, session_id);
+-- idx_sessions_parent created by migration (after parent_session_id column is added)
 
 -- Behavioral guardrails: agent-reported summaries (untrusted, stored separately)
 CREATE TABLE IF NOT EXISTS agent_summaries (
@@ -916,7 +1042,9 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     window_start    TIMESTAMPTZ NOT NULL,
     window_end      TIMESTAMPTZ NOT NULL,
     trigger         TEXT NOT NULL
-        CHECK (trigger IN ('inactivity', 'volume', 'close', 'manual')),
+        CHECK (trigger IN ('inactivity', 'volume', 'close', 'manual', 'compaction')),
+    summary_type    TEXT NOT NULL DEFAULT 'window'
+        CHECK (summary_type IN ('window', 'compacted')),
     summary         TEXT NOT NULL,
     tools_used      TEXT,
     intent_alignment TEXT NOT NULL
@@ -936,6 +1064,8 @@ CREATE INDEX IF NOT EXISTS idx_summaries_user_time
     ON session_summaries(user_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_summaries_session
     ON session_summaries(user_id, session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_parent
+    ON sessions(user_id, parent_session_id);
 
 CREATE TABLE IF NOT EXISTS agent_summaries (
     id              TEXT PRIMARY KEY,

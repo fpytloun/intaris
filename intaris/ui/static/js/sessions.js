@@ -442,8 +442,16 @@ function sessionsTab() {
           tools_used: typeof s.tools_used === 'string'
             ? JSON.parse(s.tools_used) : (s.tools_used || []),
         }));
+        // Separate compacted and window summaries
+        const compacted = intarisSummaries.filter(s => s.summary_type === 'compacted');
+        const windows = intarisSummaries.filter(s => s.summary_type !== 'compacted');
+        const hasCompacted = compacted.length > 0;
         session._summaries = {
           intaris_summaries: intarisSummaries,
+          compacted_summary: hasCompacted ? compacted[0] : null,
+          window_summaries: windows,
+          // Auto-expand windows when no compacted summary exists
+          _windowsExpanded: !hasCompacted && windows.length > 0,
           agent_summaries: summaries.agent_summaries || [],
         };
         session._summaryTriggering = false;
@@ -495,8 +503,14 @@ function sessionsTab() {
               tools_used: typeof s.tools_used === 'string'
                 ? JSON.parse(s.tools_used) : (s.tools_used || []),
             }));
+            const compacted = intarisSummaries.filter(s => s.summary_type === 'compacted');
+            const windows = intarisSummaries.filter(s => s.summary_type !== 'compacted');
+            const hasCompacted = compacted.length > 0;
             session._summaries = {
               intaris_summaries: intarisSummaries,
+              compacted_summary: hasCompacted ? compacted[0] : null,
+              window_summaries: windows,
+              _windowsExpanded: !hasCompacted && windows.length > 0,
               agent_summaries: summaries.agent_summaries || [],
             };
           } catch {}

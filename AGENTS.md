@@ -108,8 +108,8 @@ intaris/
 | **Decision** | `decision.py` | Priority-ordered decision matrix |
 | **LLM** | `llm.py` | OpenAI-compatible client with structured output |
 | **Prompts** | `prompts.py` | Safety evaluation prompt templates |
-| **Analysis Prompts** | `prompts_analysis.py` | L2/L3 analysis prompt templates + JSON schemas |
-| **Analyzer** | `analyzer.py` | Stub: L2 summary generation + L3 behavioral analysis (Phase 2) |
+| **Analysis Prompts** | `prompts_analysis.py` | L2/L3 analysis prompt templates + JSON schemas (window + compaction) |
+| **Analyzer** | `analyzer.py` | L2 hierarchical summary generation (window + compaction) + L3 agent-scoped cross-session analysis |
 | **Background** | `background.py` | TaskQueue (SQLite-backed), BackgroundWorker (idle sweep, scheduler), Metrics |
 | **Redaction** | `redactor.py` | Secret redaction before audit storage |
 | **Rate Limiting** | `ratelimit.py` | In-memory sliding window rate limiter per (user_id, session_id) |
@@ -368,7 +368,7 @@ This worst case only applies to the very first evaluate call. Subsequent calls h
 
 ## Behavioral Analysis
 
-Three-layer behavioral guardrails system that evolves Intaris from a per-call firewall into a behavioral analysis platform.
+Three-layer behavioral guardrails system that evolves Intaris from a per-call firewall into a behavioral analysis platform. Supports hierarchical sessions — parent sessions incorporate child session data into their summaries and compacted session-level assessments.
 
 ### Architecture
 
@@ -378,16 +378,19 @@ L1: Data Collection (per-call)
   POST /checkpoint   — agent state snapshot → audit_log (record_type="checkpoint")
   Evaluator          — auto-updates session last_activity_at, injects behavioral context
 
-L2: Session Analysis (per-session)
+L2: Session Analysis (per-session, hierarchical)
   POST /session/{id}/agent-summary  — agent-reported summary → agent_summaries table
   POST /session/{id}/summary/trigger — manual trigger → enqueue summary task
   GET  /session/{id}/summary        — retrieve both Intaris + agent summaries
   BackgroundWorker                  — idle sweep, volume triggers, periodic scheduling
+  generate_summary()                — tail window + compaction + child orchestration
+  _generate_compaction()            — synthesize windows into session-level summary
 
-L3: Cross-Session Analysis (per-user)
+L3: Cross-Session Analysis (per-user, root sessions only)
   POST /analysis/trigger — manual trigger → enqueue analysis task
   GET  /analysis         — list behavioral analyses
   GET  /profile          — behavioral risk profile (user-bound API key only)
+  run_analysis()         — agent-scoped, parent_session_id IS NULL filter
 ```
 
 ### Key design principles
@@ -404,15 +407,85 @@ L3: Cross-Session Analysis (per-user)
 
 6. **Behavioral context injection**: The evaluator looks up the pre-computed behavioral profile (~1ms DB read) and injects `behavioral_alert` into the evaluation context for high/critical risk profiles.
 
+7. **Hierarchical summaries**: Parent sessions collect child session data (compacted > window > raw metadata) and include it in both window and compaction prompts. Child sessions are summarized independently first, then their data flows up to the parent.
+
+8. **Summary compaction**: Multiple window summaries are synthesized into a single session-level compacted summary. Compaction uses supersede semantics — old compacted summaries are deleted and replaced. Compaction runs automatically when a session has > 1 window summaries.
+
+9. **Task-queue orchestration**: Parent summary tasks check for unsummarized children, enqueue child tasks at higher priority, and re-enqueue themselves with a 30s delay (max 10 re-enqueues). This avoids recursive LLM calls blocking the single-threaded task queue.
+
+### Hierarchical summary flow
+
+```
+Session close / idle / volume trigger
+  → generate_summary(parent_session)
+    → Check children: any need summaries?
+      → YES: return needs_children signal
+        → BackgroundWorker enqueues child tasks (priority 3)
+        → BackgroundWorker re-enqueues parent (priority 2, 30s delay)
+      → NO: proceed
+    → Generate tail window summary (if enough data)
+    → Collect child data (compacted > window > metadata fallback)
+    → Generate compaction (if > 1 windows exist)
+      → Delete old compacted summary (supersede)
+      → Insert new compacted summary
+```
+
+### Summary types
+
+| Type | Description | When created |
+|---|---|---|
+| `window` | Covers a time range since the last window summary | During active sessions (volume trigger, idle, manual) |
+| `compacted` | Synthesizes all windows into one session-level summary | On session close, idle, or when > 1 windows exist |
+
+The `_get_window_start()` function filters to `summary_type='window'` only — compacted summaries span the full session and must not prevent new window generation after session resume.
+
+### Risk indicator categories
+
+- **intent_drift**: Agent gradually shifting away from declared intention
+- **restriction_circumvention**: Attempts to work around denied operations
+- **scope_creep**: Accessing resources beyond the expected project scope
+- **insecure_reasoning**: Agent reasoning that suggests unsafe decision-making
+- **unusual_tool_pattern**: Unexpected tool usage sequences or frequencies
+- **injection_attempt**: Signs of prompt injection in tool args or reasoning
+- **escalation_pattern**: Increasing frequency of denied or escalated calls
+- **delegation_misalignment**: A sub-session's actions or intention diverge from the parent session's declared intention
+
+### L3 cross-session analysis
+
+L3 analysis operates only on **root sessions** (`parent_session_id IS NULL`) in both the agent-scoped and all-agents query paths. Child session data is already embedded in parent compacted summaries, so including children separately would double-count.
+
+When fetching session summaries for L3, compacted summaries are preferred over window summaries. If a session has a compacted summary, only that is included. Otherwise, all window summaries are used.
+
 ### Database tables (analysis)
 
-| Table | Description |
+| Table | Key columns | Description |
+|---|---|---|
+| `session_summaries` | `summary_type` (window/compacted), `trigger` (incl. compaction) | Intaris-generated L2 session summaries |
+| `agent_summaries` | | Agent-reported session summaries (isolated from analysis) |
+| `behavioral_analyses` | `agent_id` | L3 cross-session analysis results |
+| `behavioral_profiles` | `(user_id, agent_id)` | Pre-computed per-user risk profiles |
+| `analysis_tasks` | | SQLite-backed task queue for background processing |
+
+Key indexes: `idx_sessions_parent ON sessions(user_id, parent_session_id)` for efficient child session lookups.
+
+### Hierarchy constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `_MAX_CHILD_SESSIONS` | 20 | Max children included in parent summary (breadth limit) |
+| `_MAX_COMPACTION_WINDOWS` | 30 | Max window summaries in compaction prompt (token budget) |
+| `_MAX_CHILD_SUMMARY_CHARS` | 500 | Max chars per child summary in prompts |
+| `_MAX_PARENT_RECHECK` | 10 | Max re-enqueue attempts for parent waiting on children |
+| `_PARENT_RECHECK_DELAY_S` | 30 | Seconds between parent re-enqueue checks |
+
+### Observability metrics
+
+| Metric | Description |
 |---|---|
-| `session_summaries` | Intaris-generated L2 session summaries |
-| `agent_summaries` | Agent-reported session summaries (isolated from analysis) |
-| `behavioral_analyses` | L3 cross-session analysis results |
-| `behavioral_profiles` | Pre-computed per-user risk profiles |
-| `analysis_tasks` | SQLite-backed task queue for background processing |
+| `summary_child_triggers_total` | Total child summary tasks enqueued by parent orchestration |
+| `summary_max_children_per_task` | High-water mark of children per parent task |
+| `summary_parent_recheck_count` | Total parent re-enqueue cycles |
+| `compaction_total` | Total compacted summaries generated |
 
 ### Session lifecycle extensions
 
@@ -420,15 +493,16 @@ L3: Cross-Session Analysis (per-user)
 - **`completed` denial**: Completed, suspended, and terminated sessions deny all evaluations.
 - **`last_activity_at`**: Updated on every evaluate, reasoning, and checkpoint call.
 - **`parent_session_id`**: Optional field for session continuation chains.
-- **`summary_count`**: Tracks number of summaries generated for a session.
+- **`summary_count`**: Tracks number of summaries generated for a session (both window and compacted).
 - **`intention_source`**: Tracks how the intention was set (`initial`, `user`, `bootstrap`). See [Intention Model](#intention-model).
 
 ### Phase status
 
 - **Phase 1 (Foundation)**: Complete — infrastructure, data collection endpoints, background worker, evaluator integration.
-- **Phase 2 (LLM Analysis)**: Complete — `generate_summary()` implements windowed, iterative session summaries analyzing three data streams (user messages, tool calls, agent reasoning with anti-injection sandboxing).
-- **Phase 3 (Profile Updates)**: Complete — `run_analysis()` implements agent-scoped cross-session analysis. Profiles keyed by `(user_id, agent_id)`. Evaluator injects `behavioral_alert` for high/critical profiles.
-- **Phase 4 (UI Integration)**: Complete — Analysis tab (profile + analysis history), session summaries in Sessions detail, behavioral risk indicator in Dashboard.
+- **Phase 2 (LLM Analysis)**: Complete — `generate_summary()` implements windowed, iterative session summaries analyzing three data streams (user messages, tool calls, agent reasoning with anti-injection sandboxing). Hierarchical session support with child data collection and task-queue orchestration.
+- **Phase 2.5 (Summary Compaction)**: Complete — `_generate_compaction()` synthesizes multiple window summaries into a single session-level assessment with supersede semantics. Parent sessions incorporate child session data. New `delegation_misalignment` risk indicator for sub-session divergence.
+- **Phase 3 (Profile Updates)**: Complete — `run_analysis()` implements agent-scoped cross-session analysis. Profiles keyed by `(user_id, agent_id)`. Evaluator injects `behavioral_alert` for high/critical profiles. L3 filters to root sessions only and prefers compacted summaries.
+- **Phase 4 (UI Integration)**: Complete — Analysis tab (profile + analysis history), session summaries in Sessions detail (compacted prominent, windows expandable), behavioral risk indicator in Dashboard.
 - **Phase 5 (Tuning)**: Not started — threshold tuning, alert rules, notification integration from analysis findings.
 
 ## Filesystem Path Protection

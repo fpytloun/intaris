@@ -337,6 +337,7 @@ class SessionSummaryRecord(BaseModel):
     window_start: str
     window_end: str
     trigger: str
+    summary_type: str = "window"
     summary: str
     tools_used: list[str] | None = None
     intent_alignment: str

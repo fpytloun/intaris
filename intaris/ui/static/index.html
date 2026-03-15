@@ -447,59 +447,116 @@
                       </button>
                     </div>
 
-                    <!-- Intaris Summaries -->
-                    <template x-if="session._summaries.intaris_summaries && session._summaries.intaris_summaries.length > 0">
-                      <div class="space-y-2 mb-3">
-                        <template x-for="summary in session._summaries.intaris_summaries" :key="summary.id">
-                          <div class="bg-brand-elevated rounded-lg p-3">
-                            <!-- Header: window range, alignment badge, call count -->
-                            <div class="flex items-center gap-2 flex-wrap">
-                              <span class="text-xs text-secondary"
-                                    x-text="'Window ' + (summary.window_start || '').substring(0,16) + ' \u2192 ' + (summary.window_end || '').substring(0,16)"></span>
-                              <span class="text-xs px-1.5 py-0.5 rounded"
-                                    :class="{
-                                      'badge-approve': summary.intent_alignment === 'aligned',
-                                      'badge-escalate': summary.intent_alignment === 'partially_aligned',
-                                      'badge-deny': summary.intent_alignment === 'misaligned',
-                                      'badge-fast': summary.intent_alignment === 'unclear',
-                                    }"
-                                    x-text="summary.intent_alignment"></span>
-                              <span class="text-xs text-secondary" x-text="summary.call_count + ' calls'"></span>
-                            </div>
-                            <!-- Summary text (always visible) -->
-                            <div class="text-sm mt-2 text-secondary" x-text="summary.summary"></div>
-                            <!-- Footer: risk indicators toggle + Console/Events buttons -->
-                            <div class="flex items-center justify-between mt-2">
-                              <div>
-                                <template x-if="summary.risk_indicators && summary.risk_indicators.length > 0">
-                                  <button @click.stop="summary._expanded = !summary._expanded"
-                                          class="text-xs text-yellow-400 hover:text-yellow-300">
-                                    <span x-text="(summary._expanded ? '\u25BE' : '\u25B8') + ' ' + summary.risk_indicators.length + ' risk indicators'"></span>
-                                  </button>
-                                </template>
+                    <!-- Compacted Session Summary (prominent) -->
+                    <template x-if="session._summaries.compacted_summary">
+                      <div class="bg-brand-elevated rounded-lg p-3 mb-2 border border-brand-border">
+                        <div class="flex items-center gap-2 flex-wrap">
+                          <span class="text-xs font-medium text-primary">Session Summary</span>
+                          <span class="text-xs px-1.5 py-0.5 rounded"
+                                :class="{
+                                  'badge-approve': session._summaries.compacted_summary.intent_alignment === 'aligned',
+                                  'badge-escalate': session._summaries.compacted_summary.intent_alignment === 'partially_aligned',
+                                  'badge-deny': session._summaries.compacted_summary.intent_alignment === 'misaligned',
+                                  'badge-fast': session._summaries.compacted_summary.intent_alignment === 'unclear',
+                                }"
+                                x-text="session._summaries.compacted_summary.intent_alignment"></span>
+                          <span class="text-xs text-secondary" x-text="session._summaries.compacted_summary.call_count + ' calls'"></span>
+                        </div>
+                        <div class="text-sm mt-2 text-secondary" x-text="session._summaries.compacted_summary.summary"></div>
+                        <div class="flex items-center justify-between mt-2">
+                          <div>
+                            <template x-if="session._summaries.compacted_summary.risk_indicators && session._summaries.compacted_summary.risk_indicators.length > 0">
+                              <button @click.stop="session._summaries.compacted_summary._expanded = !session._summaries.compacted_summary._expanded"
+                                      class="text-xs text-yellow-400 hover:text-yellow-300">
+                                <span x-text="(session._summaries.compacted_summary._expanded ? '\u25BE' : '\u25B8') + ' ' + session._summaries.compacted_summary.risk_indicators.length + ' risk indicators'"></span>
+                              </button>
+                            </template>
+                          </div>
+                          <div class="flex gap-1">
+                            <button @click.stop="openSummaryConsole(session, session._summaries.compacted_summary)"
+                                    class="btn-primary text-xs py-0.5 px-2">Console</button>
+                            <button @click.stop="openSummaryEvents(session, session._summaries.compacted_summary)"
+                                    class="btn-secondary text-xs py-0.5 px-2">Events</button>
+                          </div>
+                        </div>
+                        <template x-if="session._summaries.compacted_summary._expanded && session._summaries.compacted_summary.risk_indicators && session._summaries.compacted_summary.risk_indicators.length > 0">
+                          <div class="mt-2 space-y-1">
+                            <template x-for="(ind, i) in session._summaries.compacted_summary.risk_indicators" :key="i">
+                              <div class="text-xs flex items-center gap-1">
+                                <span class="px-1.5 py-0.5 rounded"
+                                      :class="{
+                                        'badge-low': ind.severity === 'low',
+                                        'badge-medium': ind.severity === 'medium',
+                                        'badge-high': ind.severity === 'high',
+                                        'badge-critical': ind.severity === 'critical',
+                                      }"
+                                      x-text="ind.severity"></span>
+                                <span class="font-medium" x-text="ind.indicator"></span>
+                                <span class="text-secondary" x-text="ind.detail"></span>
                               </div>
-                              <div class="flex gap-1">
-                                <button @click.stop="openSummaryConsole(session, summary)"
-                                        class="btn-primary text-xs py-0.5 px-2">Console</button>
-                                <button @click.stop="openSummaryEvents(session, summary)"
-                                        class="btn-secondary text-xs py-0.5 px-2">Events</button>
-                              </div>
-                            </div>
-                            <!-- Expanded risk indicators -->
-                            <template x-if="summary._expanded && summary.risk_indicators && summary.risk_indicators.length > 0">
-                              <div class="mt-2 space-y-1">
-                                <template x-for="(ind, i) in summary.risk_indicators" :key="i">
-                                  <div class="text-xs flex items-center gap-1">
-                                    <span class="px-1.5 py-0.5 rounded"
-                                          :class="{
-                                            'badge-low': ind.severity === 'low',
-                                            'badge-medium': ind.severity === 'medium',
-                                            'badge-high': ind.severity === 'high',
-                                            'badge-critical': ind.severity === 'critical',
-                                          }"
-                                          x-text="ind.severity"></span>
-                                    <span class="font-medium" x-text="ind.indicator"></span>
-                                    <span class="text-secondary" x-text="ind.detail"></span>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- Window Summaries (expandable) -->
+                    <template x-if="session._summaries.window_summaries && session._summaries.window_summaries.length > 0">
+                      <div class="mb-2">
+                        <button @click.stop="session._summaries._windowsExpanded = !session._summaries._windowsExpanded"
+                                class="text-xs text-secondary hover:text-primary mb-1">
+                          <span x-text="(session._summaries._windowsExpanded ? '\u25BE' : '\u25B8') + ' Windows (' + session._summaries.window_summaries.length + ')'"></span>
+                        </button>
+                        <template x-if="session._summaries._windowsExpanded">
+                          <div class="space-y-2">
+                            <template x-for="summary in session._summaries.window_summaries" :key="summary.id">
+                              <div class="bg-brand-elevated rounded-lg p-3">
+                                <div class="flex items-center gap-2 flex-wrap">
+                                  <span class="text-xs text-secondary"
+                                        x-text="(summary.window_start || '').substring(0,16) + ' \u2192 ' + (summary.window_end || '').substring(0,16)"></span>
+                                  <span class="text-xs px-1.5 py-0.5 rounded"
+                                        :class="{
+                                          'badge-approve': summary.intent_alignment === 'aligned',
+                                          'badge-escalate': summary.intent_alignment === 'partially_aligned',
+                                          'badge-deny': summary.intent_alignment === 'misaligned',
+                                          'badge-fast': summary.intent_alignment === 'unclear',
+                                        }"
+                                        x-text="summary.intent_alignment"></span>
+                                  <span class="text-xs text-secondary" x-text="summary.call_count + ' calls'"></span>
+                                </div>
+                                <div class="text-sm mt-2 text-secondary" x-text="summary.summary"></div>
+                                <div class="flex items-center justify-between mt-2">
+                                  <div>
+                                    <template x-if="summary.risk_indicators && summary.risk_indicators.length > 0">
+                                      <button @click.stop="summary._expanded = !summary._expanded"
+                                              class="text-xs text-yellow-400 hover:text-yellow-300">
+                                        <span x-text="(summary._expanded ? '\u25BE' : '\u25B8') + ' ' + summary.risk_indicators.length + ' risk indicators'"></span>
+                                      </button>
+                                    </template>
+                                  </div>
+                                  <div class="flex gap-1">
+                                    <button @click.stop="openSummaryConsole(session, summary)"
+                                            class="btn-primary text-xs py-0.5 px-2">Console</button>
+                                    <button @click.stop="openSummaryEvents(session, summary)"
+                                            class="btn-secondary text-xs py-0.5 px-2">Events</button>
+                                  </div>
+                                </div>
+                                <template x-if="summary._expanded && summary.risk_indicators && summary.risk_indicators.length > 0">
+                                  <div class="mt-2 space-y-1">
+                                    <template x-for="(ind, i) in summary.risk_indicators" :key="i">
+                                      <div class="text-xs flex items-center gap-1">
+                                        <span class="px-1.5 py-0.5 rounded"
+                                              :class="{
+                                                'badge-low': ind.severity === 'low',
+                                                'badge-medium': ind.severity === 'medium',
+                                                'badge-high': ind.severity === 'high',
+                                                'badge-critical': ind.severity === 'critical',
+                                              }"
+                                              x-text="ind.severity"></span>
+                                        <span class="font-medium" x-text="ind.indicator"></span>
+                                        <span class="text-secondary" x-text="ind.detail"></span>
+                                      </div>
+                                    </template>
                                   </div>
                                 </template>
                               </div>
@@ -508,6 +565,8 @@
                         </template>
                       </div>
                     </template>
+
+
 
                     <!-- Agent-Reported Summary -->
                     <template x-if="session._summaries.agent_summaries && session._summaries.agent_summaries.length > 0">

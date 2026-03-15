@@ -62,9 +62,27 @@ Approve or deny this call in the Intaris UI, then retry.
 - When user resumes auto-suspended session it gets suspended again. There should be also reason and overall it should be same as for tool escalate
 Reason for suspending session was: "Session is suspended — evaluation denied. Reason: Child intention conflicts with parent session: Investigating system prompt tuning is about prompt/LLM behavior, which does not support or decompose the task of designing a session storage architecture for Intaris; therefore it is outside the parent's scope." where intention was "Investigating system-prompt tuning for the Intaris project by examining evaluator, decision, and prompts code to inform the session storage architecture design." and it was child session to "Intaris session storage architecture design"
 
+- opencode does not notify user on escalate action
+
+- User message was "Do it, then create commit. When done, build docker image with `docker-buildx build --platform linux/amd64 -t genunix/intaris:latest --push -f Dockerfile .` .. finally when successful, do `kubectx domecek` and `kubectl -n openwebui delete pods -l app=intaris` to deploy new image version."
+but intention stayed "Chart context null on tab switch" (same as openwebui session title) and action was escalated (bash, arguments `{"command":"kubectx domecek && kubectl -n openwebui delete pods -l app=intaris","description":"Switch context and restart intaris pods"}`) with reasoning `Not aligned with intention. The command switches Kubernetes context and deletes pods in a namespace, which is a disruptive operational action not clearly required by the stated intention of fixing charting on tab switch.`
+Only later when task was done, there was reasoning update to `Fixing a bug in the Intaris UI where Chart.js throws "can't access property 'save', t is null" when switching tabs (preventing chart corruption), committing the dashboard.js fix, building and pushing a Docker image, and redeploying to the domecek Kubernetes context.`
+
+- checkpoint and reasoning details are not visible on UI
+- Sessions are jumping position as last activity gets updated
+
 ## Major
 
-- opencode does not notify user on escalate action
+- Approve/deny from Sessions "Recent Evaluations"
+
+- add e2e tests for behavioral analysis
+- don't forget to update docs
+- check if behavioral analysis L2 works with parts if session recording is enabled (it should be enabled by default)
+- consider adding assistant/user turn into reasoning (eg. Assistant: should I delete this directory, User: yes do it) for better intention generation including user answers on assistant proposals
+
+## Issues
+
+- "High risk — requires human review. The tool call edits a local project file (db.py) to modify database schema by adding/adjusting tables and indexes related to agent/session guardrails. This is an operational change with potential systemic impact on data integrity and migrations, and thus should be reviewed." Intention: "Implementing UI controls and a trustworthy hierarchical analysis workflow in intaris where console/events views coexist, analysis history sessions are clickable (open modals), child-session analyses are run first and incorporated into parent-session conclusions so no subsession is omitted, with metadata rules for agent_id/agent_type and L3 only operating on parent sessions."
 
 ## Minor
 
@@ -77,3 +95,11 @@ Reason for suspending session was: "Session is suspended — evaluation denied. 
 - Grafana dashboard
 
 - Add Judge, model which will auto-resume suspended or auto-approve escalated actions by looking more thoroughly at the session. Further behavior could be configured in 3 modes: no judge, judge that can review deny/escalate/suspend session actions and perform final action - approve or deny so no human involved, judge that just review and can still do escalate action
+
+- AI chat to examine session
+- Review async analytics of cross-sessions
+
+- guardrails involving memories (facts, preferences) as another policy layer - eg. memory sais never run git push without user instruction and agent runs git push without explicit instruction
+- overall think about introducing configurable policies
+
+## Issues
