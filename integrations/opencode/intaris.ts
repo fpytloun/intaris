@@ -761,7 +761,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
               content: `User message: ${userText}`,
               ...(assistantContext && { context: assistantContext }),
             },
-            2000,
+            10000, // 10s timeout — must survive event loop blocking from concurrent LLM calls
           ).catch(() => {})
 
           // Signal that an intention update is in flight. The next

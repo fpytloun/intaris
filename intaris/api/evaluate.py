@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from datetime import datetime
 from datetime import timezone as tz
@@ -77,13 +78,25 @@ async def evaluate(
         evaluator = _get_evaluator()
         # agent_id: request body overrides header if provided
         agent_id = request.agent_id or ctx.agent_id
-        result = evaluator.evaluate(
-            user_id=ctx.user_id,
-            session_id=request.session_id,
-            agent_id=agent_id,
-            tool=request.tool,
-            args=request.args,
-            context=request.context,
+
+        # Run the synchronous evaluator in a thread executor to avoid
+        # blocking the asyncio event loop. The evaluator makes synchronous
+        # LLM calls (via the OpenAI SDK) that can take up to 4 seconds.
+        # Without run_in_executor, these block the event loop and prevent
+        # concurrent request processing — including /reasoning calls that
+        # the intention barrier is waiting for.
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(
+                evaluator.evaluate,
+                user_id=ctx.user_id,
+                session_id=request.session_id,
+                agent_id=agent_id,
+                tool=request.tool,
+                args=request.args,
+                context=request.context,
+            ),
         )
 
         # Fire-and-forget webhook on escalation (Cognis integration)
