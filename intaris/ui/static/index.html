@@ -1492,9 +1492,9 @@
 
         <template x-if="config">
           <div class="space-y-4">
-            <!-- LLM Configuration -->
+            <!-- Evaluation LLM -->
             <div class="card">
-              <h3 class="text-sm font-medium text-secondary mb-3">LLM Configuration</h3>
+              <h3 class="text-sm font-medium text-secondary mb-3">Evaluation LLM</h3>
               <div class="grid grid-cols-2 gap-3 text-sm">
                 <div>
                   <div class="text-xs text-muted">Model</div>
@@ -1519,6 +1519,70 @@
               </div>
             </div>
 
+            <!-- Analysis LLM -->
+            <template x-if="config.llm_analysis">
+              <div class="card">
+                <h3 class="text-sm font-medium text-secondary mb-3">Analysis LLM</h3>
+                <p class="text-xs text-muted mb-3">Separate LLM for L2 session summaries and L3 cross-session analysis.</p>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <div class="text-xs text-muted">Model</div>
+                    <div class="font-mono" x-text="config.llm_analysis.model"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Provider</div>
+                    <div class="font-mono" x-text="config.llm_analysis.base_url"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Temperature</div>
+                    <div x-text="config.llm_analysis.temperature"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Reasoning Effort</div>
+                    <div x-text="config.llm_analysis.reasoning_effort || 'default'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Timeout</div>
+                    <div x-text="config.llm_analysis.timeout_ms + 'ms'"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- Behavioral Analysis -->
+            <template x-if="config.analysis">
+              <div class="card">
+                <h3 class="text-sm font-medium text-secondary mb-3">Behavioral Analysis</h3>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <div class="text-xs text-muted">Enabled</div>
+                    <div x-text="config.analysis.enabled ? 'Yes' : 'No'"
+                         :class="config.analysis.enabled ? 'text-green-400' : 'text-red-400'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Session Idle Timeout</div>
+                    <div x-text="config.analysis.session_idle_timeout_min + ' min'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Summary Volume Threshold</div>
+                    <div x-text="config.analysis.summary_volume_threshold + ' calls'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Analysis Interval</div>
+                    <div x-text="config.analysis.analysis_interval_min + ' min'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Lookback Window</div>
+                    <div x-text="config.analysis.lookback_days + ' days'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Worker Count</div>
+                    <div x-text="config.analysis.worker_count"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
             <!-- Server Configuration -->
             <div class="card">
               <h3 class="text-sm font-medium text-secondary mb-3">Server Configuration</h3>
@@ -1534,6 +1598,10 @@
                 <div>
                   <div class="text-xs text-muted">Authentication</div>
                   <div x-text="config.auth_configured ? 'Enabled' : 'Disabled (dev mode)'"></div>
+                </div>
+                <div>
+                  <div class="text-xs text-muted">Database</div>
+                  <div class="font-mono" x-text="config.db ? config.db.backend : 'sqlite'"></div>
                 </div>
                 <div>
                   <div class="text-xs text-muted">Version</div>
@@ -1562,6 +1630,49 @@
                   <div>
                     <div class="text-xs text-muted">Upstream Timeout</div>
                     <div x-text="config.mcp.upstream_timeout_ms + 'ms'"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- Event Store -->
+            <template x-if="config.event_store">
+              <div class="card">
+                <h3 class="text-sm font-medium text-secondary mb-3">Event Store</h3>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <div class="text-xs text-muted">Enabled</div>
+                    <div x-text="config.event_store.enabled ? 'Yes' : 'No'"
+                         :class="config.event_store.enabled ? 'text-green-400' : 'text-red-400'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Backend</div>
+                    <div class="font-mono" x-text="config.event_store.backend"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Flush Size</div>
+                    <div x-text="config.event_store.flush_size + ' events'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Flush Interval</div>
+                    <div x-text="config.event_store.flush_interval + 's'"></div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- Notifications -->
+            <template x-if="config.notification">
+              <div class="card">
+                <h3 class="text-sm font-medium text-secondary mb-3">Notifications</h3>
+                <div class="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <div class="text-xs text-muted">Action Link TTL</div>
+                    <div x-text="config.notification.action_ttl_minutes + ' min'"></div>
+                  </div>
+                  <div>
+                    <div class="text-xs text-muted">Encryption</div>
+                    <div x-text="config.notification.encryption_configured ? 'Configured (action links enabled)' : 'Not configured (no action links)'"></div>
                   </div>
                 </div>
               </div>
@@ -1650,6 +1761,8 @@
                       <span x-text="ch.provider" class="uppercase"></span>
                       <span class="mx-1">&middot;</span>
                       <span :class="channelHealthColor(ch)" x-text="channelHealthLabel(ch)"></span>
+                      <span class="mx-1">&middot;</span>
+                      <span x-text="channelEventsLabel(ch)"></span>
                     </div>
                   </div>
                 </div>
@@ -1699,6 +1812,35 @@
                   <input type="checkbox" x-model="channelForm.enabled" id="ch-enabled">
                   <label for="ch-enabled" class="text-sm text-secondary">Enabled</label>
                 </div>
+
+                <!-- Event Types -->
+                <div>
+                  <div class="flex items-center justify-between mb-2">
+                    <label class="block text-xs text-muted">Event Types</label>
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs text-muted" x-text="channelForm.useCustomEvents ? 'Custom' : 'Default (escalation, resolution, suspended)'"></span>
+                      <button @click="channelForm.useCustomEvents = !channelForm.useCustomEvents"
+                              :class="channelForm.useCustomEvents ? 'bg-green-600' : 'bg-gray-600'"
+                              class="relative inline-flex h-4 w-7 flex-shrink-0 cursor-pointer rounded-full transition-colors">
+                        <span :class="channelForm.useCustomEvents ? 'translate-x-3' : 'translate-x-0'"
+                              class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform"></span>
+                      </button>
+                    </div>
+                  </div>
+                  <div x-show="channelForm.useCustomEvents" x-cloak
+                       class="bg-slate-800 border border-slate-600 rounded p-3 space-y-2">
+                    <template x-for="et in allEventTypes()" :key="et.key">
+                      <div class="flex items-center justify-between">
+                        <div>
+                          <label :for="'ch-evt-' + et.key" class="text-xs text-secondary cursor-pointer" x-text="et.label"></label>
+                          <div class="text-xs text-muted" x-text="et.desc"></div>
+                        </div>
+                        <input type="checkbox" :id="'ch-evt-' + et.key" x-model="channelForm.events[et.key]">
+                      </div>
+                    </template>
+                  </div>
+                </div>
+
                 <div class="flex gap-2 pt-1">
                   <button @click="saveChannel()" class="btn btn-sm btn-primary">Save</button>
                   <button @click="cancelChannelForm()" class="btn btn-sm btn-secondary">Cancel</button>

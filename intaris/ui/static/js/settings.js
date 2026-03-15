@@ -17,6 +17,8 @@ function settingsTab() {
       provider: 'pushover',
       enabled: true,
       config: {},
+      useCustomEvents: false,
+      events: {},
     },
     testing: null,
 
@@ -55,6 +57,52 @@ function settingsTab() {
       }
     },
 
+    /** All supported event types with labels and default-on state */
+    allEventTypes() {
+      return [
+        { key: 'escalation', label: 'Escalations', desc: 'Tool call requires approval', defaultOn: true },
+        { key: 'resolution', label: 'Resolutions', desc: 'Escalation resolved', defaultOn: true },
+        { key: 'session_suspended', label: 'Session suspended', desc: 'Session was suspended', defaultOn: true },
+        { key: 'denial', label: 'Denials', desc: 'Tool call denied', defaultOn: false },
+        { key: 'summary_alert', label: 'Summary alerts (L2)', desc: 'Misaligned or high-risk session summary', defaultOn: false },
+        { key: 'analysis_alert', label: 'Analysis alerts (L3)', desc: 'High/critical behavioral risk from cross-session analysis', defaultOn: false },
+      ];
+    },
+
+    /** Build default events checkbox state */
+    _defaultEventsState() {
+      const state = {};
+      for (const et of this.allEventTypes()) {
+        state[et.key] = et.defaultOn;
+      }
+      return state;
+    },
+
+    /** Build events checkbox state from an array of event keys */
+    _eventsFromArray(arr) {
+      const state = {};
+      for (const et of this.allEventTypes()) {
+        state[et.key] = arr.includes(et.key);
+      }
+      return state;
+    },
+
+    /** Convert events checkbox state to array (or null for defaults) */
+    _eventsToPayload() {
+      if (!this.channelForm.useCustomEvents) return undefined;
+      const selected = [];
+      for (const et of this.allEventTypes()) {
+        if (this.channelForm.events[et.key]) selected.push(et.key);
+      }
+      return selected;
+    },
+
+    /** Format event count label for channel list */
+    channelEventsLabel(ch) {
+      if (!ch.events) return 'Default events';
+      return ch.events.length + '/' + this.allEventTypes().length + ' events';
+    },
+
     openAddChannel() {
       this.editingChannel = null;
       this.channelForm = {
@@ -62,17 +110,22 @@ function settingsTab() {
         provider: 'pushover',
         enabled: true,
         config: {},
+        useCustomEvents: false,
+        events: this._defaultEventsState(),
       };
       this.showChannelForm = true;
     },
 
     openEditChannel(ch) {
       this.editingChannel = ch.name;
+      const hasCustomEvents = Array.isArray(ch.events);
       this.channelForm = {
         name: ch.name,
         provider: ch.provider,
         enabled: ch.enabled,
         config: {},
+        useCustomEvents: hasCustomEvents,
+        events: hasCustomEvents ? this._eventsFromArray(ch.events) : this._defaultEventsState(),
       };
       this.showChannelForm = true;
     },
@@ -118,11 +171,14 @@ function settingsTab() {
       }
 
       try {
-        await IntarisAPI.upsertNotificationChannel(name, {
+        const payload = {
           provider: this.channelForm.provider,
           enabled: this.channelForm.enabled,
           config: Object.keys(config).length > 0 ? config : undefined,
-        });
+        };
+        const events = this._eventsToPayload();
+        if (events !== undefined) payload.events = events;
+        await IntarisAPI.upsertNotificationChannel(name, payload);
         Alpine.store('notify').success('Channel saved');
         this.showChannelForm = false;
         this.editingChannel = null;

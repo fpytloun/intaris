@@ -358,6 +358,9 @@ async def config(
         llm_base_url_display = (
             "openai" if cfg.llm.base_url == default_openai else "custom"
         )
+        analysis_llm_base_url_display = (
+            "openai" if cfg.llm_analysis.base_url == default_openai else "custom"
+        )
 
         return {
             "version": __version__,
@@ -368,6 +371,21 @@ async def config(
                 "reasoning_effort": cfg.llm.reasoning_effort,
                 "timeout_ms": cfg.llm.timeout_ms,
             },
+            "llm_analysis": {
+                "model": cfg.llm_analysis.model,
+                "base_url": analysis_llm_base_url_display,
+                "temperature": cfg.llm_analysis.temperature,
+                "reasoning_effort": cfg.llm_analysis.reasoning_effort,
+                "timeout_ms": cfg.llm_analysis.timeout_ms,
+            },
+            "analysis": {
+                "enabled": cfg.analysis.enabled,
+                "session_idle_timeout_min": cfg.analysis.session_idle_timeout_min,
+                "summary_volume_threshold": cfg.analysis.summary_volume_threshold,
+                "analysis_interval_min": cfg.analysis.analysis_interval_min,
+                "lookback_days": cfg.analysis.lookback_days,
+                "worker_count": cfg.analysis.worker_count,
+            },
             "rate_limit": cfg.server.rate_limit,
             "webhook_configured": bool(cfg.webhook.url),
             "auth_configured": bool(cfg.server.api_keys or cfg.server.api_key),
@@ -376,6 +394,19 @@ async def config(
                 "allow_stdio": cfg.mcp.allow_stdio,
                 "encryption_configured": bool(cfg.mcp.encryption_key),
                 "upstream_timeout_ms": cfg.mcp.upstream_timeout_ms,
+            },
+            "event_store": {
+                "enabled": cfg.event_store.enabled,
+                "backend": cfg.event_store.backend,
+                "flush_size": cfg.event_store.flush_size,
+                "flush_interval": cfg.event_store.flush_interval,
+            },
+            "notification": {
+                "action_ttl_minutes": cfg.notification.action_ttl_minutes,
+                "encryption_configured": bool(cfg.mcp.encryption_key),
+            },
+            "db": {
+                "backend": cfg.db.backend,
             },
         }
     except Exception:
