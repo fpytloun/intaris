@@ -38,6 +38,7 @@ _BOUNDARY_TAGS = {
     "user_messages": ("⟨user_messages⟩", "⟨/user_messages⟩"),
     "tool_summary": ("⟨tool_summary⟩", "⟨/tool_summary⟩"),
     "assistant_text": ("⟨assistant_text⟩", "⟨/assistant_text⟩"),
+    "assistant_context": ("⟨assistant_context⟩", "⟨/assistant_context⟩"),
 }
 
 
