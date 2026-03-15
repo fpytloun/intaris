@@ -7,7 +7,10 @@
  *
  * Chart data strategy:
  * - Doughnut charts: show data from the LATEST analysis only (current state).
+ *   Counts are based on unique sessions (from finding.session_ids), not
+ *   finding count.
  * - Time series charts: per-day bucketed, using the last analysis of each day.
+ *   Session counts per severity/category.
  */
 
 /* global Alpine, IntarisAPI, Chart */
@@ -117,14 +120,40 @@ if (typeof Chart !== 'undefined' && !Chart.registry.plugins.get(_analysisCenterT
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/** Count occurrences by key in an array of objects. */
-function _countBy(items, key) {
+/**
+ * Count unique sessions per value of a given key across findings.
+ * Each finding has a session_ids[] array. Returns { key_value: session_count }.
+ */
+function _countSessionsByKey(findings, key) {
+  const sessionSets = {}; // key_value -> Set<session_id>
+  for (const f of findings) {
+    const val = f[key] || 'unknown';
+    if (!sessionSets[val]) sessionSets[val] = new Set();
+    for (const sid of (f.session_ids || [])) {
+      sessionSets[val].add(sid);
+    }
+  }
   const counts = {};
-  for (const item of items) {
-    const val = item[key] || 'unknown';
-    counts[val] = (counts[val] || 0) + 1;
+  for (const [k, s] of Object.entries(sessionSets)) {
+    counts[k] = s.size;
   }
   return counts;
+}
+
+/**
+ * Count unique sessions for a specific value of a key within findings.
+ * Returns the number of unique session_ids across matching findings.
+ */
+function _countSessionsForValue(findings, key, value) {
+  const sessions = new Set();
+  for (const f of findings) {
+    if ((f[key] || 'unknown') === value) {
+      for (const sid of (f.session_ids || [])) {
+        sessions.add(sid);
+      }
+    }
+  }
+  return sessions.size;
 }
 
 /**
@@ -183,9 +212,12 @@ function analysisTab() {
     init() {
       this.loadData();
 
-      // Refresh on tab change
+      // Refresh on tab change — destroy stale charts and reload
       window.addEventListener('intaris:tab-changed', (e) => {
-        if (e.detail.tab === 'analysis') this.loadData();
+        if (e.detail.tab === 'analysis') {
+          this._destroyAllCharts();
+          this.loadData();
+        }
       });
 
       // Refresh on user/agent change
@@ -205,7 +237,12 @@ function analysisTab() {
     async loadData() {
       await Promise.all([this.loadProfile(), this.loadAnalyses()]);
       this.initialized = true;
-      requestAnimationFrame(() => this._renderAllCharts());
+
+      // Only render charts when the tab is visible — Chart.js needs
+      // non-zero canvas dimensions to render correctly.
+      if (Alpine.store('nav').activeTab === 'analysis') {
+        requestAnimationFrame(() => this._renderAllCharts());
+      }
     },
 
     _agentFilter() {
@@ -281,30 +318,28 @@ function analysisTab() {
     _renderAllCharts() {
       if (!this.analyses.length || typeof Chart === 'undefined') return;
 
+      // Safety: skip if canvases are not visible (hidden tab)
+      const testCanvas = document.getElementById('analysisCategoriesChart');
+      if (!testCanvas || testCanvas.offsetParent === null) return;
+
       const latest = this._latestAnalysis();
       const latestFindings = latest?.findings || [];
 
-      // Doughnut charts — latest analysis only
+      // Doughnut charts — latest analysis, counting unique sessions
       this._renderDoughnut(
         'analysisCategoriesChart',
-        _countBy(latestFindings, 'category'),
+        _countSessionsByKey(latestFindings, 'category'),
         null, // use _categoryColor for dynamic coloring
-        'categories',
+        'sessions',
       );
       this._renderDoughnut(
         'analysisSeverityChart',
-        _countBy(latestFindings, 'severity'),
+        _countSessionsByKey(latestFindings, 'severity'),
         ANALYSIS_SEVERITY_COLORS,
-        'findings',
-      );
-      this._renderDoughnut(
-        'analysisRiskLevelsChart',
-        _countBy(this.analyses, 'risk_level'),
-        ANALYSIS_RISK_COLORS,
-        'analyses',
+        'sessions',
       );
 
-      // Time series (per-day bucketed)
+      // Time series (per-day bucketed, session counts)
       this._renderRiskTimeline();
       this._renderFindingsTimeline();
       this._renderCategoriesTimeline();
@@ -379,7 +414,7 @@ function analysisTab() {
               callbacks: {
                 label(ctx) {
                   const pct = total > 0 ? Math.round((ctx.raw / total) * 100) : 0;
-                  return ' ' + ctx.label + ': ' + ctx.raw + ' (' + pct + '%)';
+                  return ' ' + ctx.label + ': ' + ctx.raw + ' sessions (' + pct + '%)';
                 },
               },
             },
@@ -501,14 +536,13 @@ function analysisTab() {
 
       const labels = buckets.map(b => _formatDayLabel(b.day));
 
-      // Build stacked datasets by severity
+      // Build stacked datasets by severity — counting unique sessions
       const severities = ['low', 'medium', 'high', 'critical'];
       const datasets = severities.map(sev => ({
         label: sev.charAt(0).toUpperCase() + sev.slice(1),
-        data: buckets.map(b => {
-          const findings = b.analysis.findings || [];
-          return findings.filter(f => f.severity === sev).length;
-        }),
+        data: buckets.map(b =>
+          _countSessionsForValue(b.analysis.findings || [], 'severity', sev),
+        ),
         backgroundColor: ANALYSIS_SEVERITY_COLORS[sev] + 'CC',
         borderRadius: 2,
         borderSkipped: false,
@@ -532,13 +566,12 @@ function analysisTab() {
       }
       const categories = [...allCategories].sort();
 
-      // Build stacked datasets by category
+      // Build stacked datasets by category — counting unique sessions
       const datasets = categories.map((cat, i) => ({
         label: cat,
-        data: buckets.map(b => {
-          const findings = b.analysis.findings || [];
-          return findings.filter(f => (f.category || 'unknown') === cat).length;
-        }),
+        data: buckets.map(b =>
+          _countSessionsForValue(b.analysis.findings || [], 'category', cat),
+        ),
         backgroundColor: _categoryColor(cat, i) + 'CC',
         borderRadius: 2,
         borderSkipped: false,
@@ -588,7 +621,7 @@ function analysisTab() {
               callbacks: {
                 label(ctx) {
                   if (ctx.raw === 0) return null; // hide zero entries
-                  return ' ' + ctx.dataset.label + ': ' + ctx.raw;
+                  return ' ' + ctx.dataset.label + ': ' + ctx.raw + ' sessions';
                 },
               },
             },

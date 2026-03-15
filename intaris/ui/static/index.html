@@ -1134,24 +1134,18 @@
         <div class="card mb-6" x-show="hasChartData" x-cloak>
           <h2 class="text-lg font-medium mb-4">Analysis Trends</h2>
 
-          <!-- Doughnut row -->
-          <div class="grid grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+          <!-- Doughnut row (latest analysis, session counts) -->
+          <div class="grid grid-cols-2 gap-4 mb-6">
             <div class="chart-card">
-              <h3 class="chart-title">Finding Categories</h3>
+              <h3 class="chart-title">Sessions by Category</h3>
               <div class="chart-container-doughnut">
                 <canvas id="analysisCategoriesChart"></canvas>
               </div>
             </div>
             <div class="chart-card">
-              <h3 class="chart-title">Finding Severity</h3>
+              <h3 class="chart-title">Sessions by Severity</h3>
               <div class="chart-container-doughnut">
                 <canvas id="analysisSeverityChart"></canvas>
-              </div>
-            </div>
-            <div class="chart-card">
-              <h3 class="chart-title">Risk Levels</h3>
-              <div class="chart-container-doughnut">
-                <canvas id="analysisRiskLevelsChart"></canvas>
               </div>
             </div>
           </div>
@@ -1167,9 +1161,9 @@
             </div>
           </div>
 
-          <!-- Findings Over Time -->
+          <!-- Sessions by Severity Over Time -->
           <div class="mb-6">
-            <h3 class="chart-title">Findings Over Time</h3>
+            <h3 class="chart-title">Sessions by Severity Over Time</h3>
             <div class="chart-container-bar">
               <canvas id="analysisFindingsTimeChart"></canvas>
             </div>
@@ -1178,9 +1172,9 @@
             </div>
           </div>
 
-          <!-- Finding Categories Over Time -->
+          <!-- Sessions by Category Over Time -->
           <div>
-            <h3 class="chart-title">Finding Categories Over Time</h3>
+            <h3 class="chart-title">Sessions by Category Over Time</h3>
             <div class="chart-container-bar">
               <canvas id="analysisCategoriesTimeChart"></canvas>
             </div>
