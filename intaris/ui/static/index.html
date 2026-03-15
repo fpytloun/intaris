@@ -1151,36 +1151,31 @@
           </div>
 
           <!-- Risk Level Over Time -->
-          <div class="mb-6">
+          <div class="mb-6" x-show="analyses.length >= 2">
             <h3 class="chart-title">Risk Level Over Time</h3>
             <div class="chart-container-timeline">
               <canvas id="analysisRiskTimeChart"></canvas>
             </div>
-            <div x-show="analyses.length < 2" class="text-xs text-muted text-center py-4">
-              Needs at least 2 analyses to show trend
-            </div>
           </div>
 
           <!-- Sessions by Severity Over Time -->
-          <div class="mb-6">
+          <div class="mb-6" x-show="analyses.length >= 2">
             <h3 class="chart-title">Sessions by Severity Over Time</h3>
             <div class="chart-container-bar">
               <canvas id="analysisFindingsTimeChart"></canvas>
             </div>
-            <div x-show="analyses.length < 2" class="text-xs text-muted text-center py-4">
-              Needs at least 2 analyses to show trend
-            </div>
           </div>
 
           <!-- Sessions by Category Over Time -->
-          <div>
+          <div x-show="analyses.length >= 2">
             <h3 class="chart-title">Sessions by Category Over Time</h3>
             <div class="chart-container-bar">
               <canvas id="analysisCategoriesTimeChart"></canvas>
             </div>
-            <div x-show="analyses.length < 2" class="text-xs text-muted text-center py-4">
-              Needs at least 2 analyses to show trend
-            </div>
+          </div>
+
+          <div x-show="analyses.length < 2" class="text-xs text-muted text-center py-4">
+            Needs at least 2 analyses to show trends
           </div>
         </div>
 

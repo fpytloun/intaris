@@ -9,13 +9,19 @@
  * - Doughnut charts: show data from the LATEST analysis only (current state).
  *   Counts are based on unique sessions (from finding.session_ids), not
  *   finding count.
- * - Time series charts: per-day bucketed, using the last analysis of each day.
+ * - Time series charts: one data point per analysis, sorted chronologically.
  *   Session counts per severity/category.
+ *
+ * Chart.js + Alpine.js compatibility:
+ * - Chart instances are stored in a module-level Map (not on the Alpine
+ *   reactive proxy) to prevent Alpine from wrapping Chart.js internals.
+ * - Canvas elements are unwrapped with Alpine.raw() before passing to
+ *   Chart.js constructor.
  */
 
 /* global Alpine, IntarisAPI, Chart */
 
-// ── Color constants (shared with dashboard.js) ──────────────────────
+// ── Color constants ─────────────────────────────────────────────────
 
 const ANALYSIS_COLORS = {
   cyan:    '#22D3EE',
@@ -55,7 +61,7 @@ const CATEGORY_COLORS = {
   scope_creep:                ANALYSIS_COLORS.orange,
   insecure_reasoning:         ANALYSIS_COLORS.pink,
   unusual_tool_pattern:       ANALYSIS_COLORS.amber,
-  injection_attempt:          '#EF4444', // distinct red
+  injection_attempt:          '#EF4444',
   escalation_pattern:         ANALYSIS_COLORS.teal,
   delegation_misalignment:    ANALYSIS_COLORS.slate,
   // L3 cross-session findings
@@ -67,65 +73,62 @@ const CATEGORY_COLORS = {
   insecure_reasoning_pattern: ANALYSIS_COLORS.teal,
 };
 
-// Fallback palette for unknown categories (cycles through distinct colors)
 const _FALLBACK_PALETTE = [
   '#818CF8', '#FB7185', '#38BDF8', '#A3E635', '#E879F9',
   '#FACC15', '#4ADE80', '#F97316', '#67E8F9', '#C084FC',
 ];
 
-/** Get color for a category, with fallback cycling for unknown ones. */
 function _categoryColor(name, index) {
   if (CATEGORY_COLORS[name]) return CATEGORY_COLORS[name];
   return _FALLBACK_PALETTE[index % _FALLBACK_PALETTE.length];
 }
 
-// Numeric mapping for risk level line chart
 const RISK_LEVEL_VALUE = { low: 1, medium: 2, high: 3, critical: 4 };
 
-// ── Center-text plugin (reuse if already registered by dashboard) ────
+// ── Module-level chart storage (outside Alpine reactivity) ──────────
+//
+// Chart.js instances MUST NOT be stored on the Alpine reactive proxy.
+// Alpine wraps objects in Proxy, which breaks Chart.js internal property
+// access (e.g., plugin.events becomes undefined through the proxy,
+// causing "can't access property 'includes' of undefined").
 
-const _analysisCenterTextId = 'analysisCenterText';
-if (typeof Chart !== 'undefined' && !Chart.registry.plugins.get(_analysisCenterTextId)) {
-  Chart.register({
-    id: _analysisCenterTextId,
-    afterDraw(chart) {
-      const centerText = chart.options.plugins?.[_analysisCenterTextId];
-      if (!centerText?.text) return;
+const _analysisCharts = new Map();
 
-      const { ctx, chartArea } = chart;
-      if (!ctx || !chartArea) return;
-
-      const { left, right, top, bottom } = chartArea;
-      const cx = (left + right) / 2;
-      const cy = (top + bottom) / 2;
-
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-
-      ctx.font = 'bold 20px ' + Chart.defaults.font.family;
-      ctx.fillStyle = ANALYSIS_COLORS.text;
-      ctx.fillText(centerText.text, cx, cy - 6);
-
-      if (centerText.subtext) {
-        ctx.font = '10px ' + Chart.defaults.font.family;
-        ctx.fillStyle = ANALYSIS_COLORS.muted;
-        ctx.fillText(centerText.subtext, cx, cy + 12);
-      }
-
-      ctx.restore();
-    },
+function _destroyAllAnalysisCharts() {
+  _analysisCharts.forEach((chart) => {
+    try { chart.destroy(); } catch (e) { /* ignore */ }
   });
+  _analysisCharts.clear();
+}
+
+function _getChart(id) {
+  return _analysisCharts.get(id);
+}
+
+function _setChart(id, chart) {
+  _analysisCharts.set(id, chart);
+}
+
+function _deleteChart(id) {
+  const c = _analysisCharts.get(id);
+  if (c) {
+    try { c.destroy(); } catch (e) { /* ignore */ }
+    _analysisCharts.delete(id);
+  }
+}
+
+/** Get a raw (non-proxied) canvas element by ID. */
+function _getCanvas(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  // Unwrap Alpine proxy if present
+  return typeof Alpine !== 'undefined' && Alpine.raw ? Alpine.raw(el) : el;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/**
- * Count unique sessions per value of a given key across findings.
- * Each finding has a session_ids[] array. Returns { key_value: session_count }.
- */
 function _countSessionsByKey(findings, key) {
-  const sessionSets = {}; // key_value -> Set<session_id>
+  const sessionSets = {};
   for (const f of findings) {
     const val = f[key] || 'unknown';
     if (!sessionSets[val]) sessionSets[val] = new Set();
@@ -140,10 +143,6 @@ function _countSessionsByKey(findings, key) {
   return counts;
 }
 
-/**
- * Count unique sessions for a specific value of a key within findings.
- * Returns the number of unique session_ids across matching findings.
- */
 function _countSessionsForValue(findings, key, value) {
   const sessions = new Set();
   for (const f of findings) {
@@ -156,34 +155,17 @@ function _countSessionsForValue(findings, key, value) {
   return sessions.size;
 }
 
-/**
- * Bucket analyses by day (YYYY-MM-DD), keeping only the LAST analysis
- * per day (most recent created_at). Returns array sorted chronologically.
- */
-function _bucketByDay(analyses) {
-  // Sort chronologically first
-  const sorted = [...analyses].sort(
+function _sortChronological(analyses) {
+  return [...analyses].sort(
     (a, b) => new Date(a.created_at) - new Date(b.created_at),
   );
-
-  const dayMap = new Map(); // day string -> analysis (last wins)
-  for (const a of sorted) {
-    const day = new Date(a.created_at).toISOString().slice(0, 10);
-    dayMap.set(day, a);
-  }
-
-  // Return in chronological order
-  return [...dayMap.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([day, analysis]) => ({ day, analysis }));
 }
 
-/**
- * Format a YYYY-MM-DD string as a short date label.
- */
-function _formatDayLabel(dayStr) {
-  const d = new Date(dayStr + 'T00:00:00');
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+function _formatAnalysisLabel(createdAt) {
+  const d = new Date(createdAt);
+  return d.toLocaleDateString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -206,31 +188,26 @@ function analysisTab() {
     // Actions
     triggeringAnalysis: false,
 
-    // Chart instances
-    _charts: {},
-
     init() {
       this.loadData();
 
-      // Refresh on tab change — destroy stale charts and reload
       window.addEventListener('intaris:tab-changed', (e) => {
         if (e.detail.tab === 'analysis') {
-          this._destroyAllCharts();
+          _destroyAllAnalysisCharts();
           this.loadData();
         }
       });
 
-      // Refresh on user/agent change
       window.addEventListener('intaris:user-changed', () => {
-        this._destroyAllCharts();
+        _destroyAllAnalysisCharts();
         this.loadData();
       });
       window.addEventListener('intaris:agent-changed', () => {
-        this._destroyAllCharts();
+        _destroyAllAnalysisCharts();
         this.loadData();
       });
       window.addEventListener('intaris:logout', () => {
-        this._destroyAllCharts();
+        _destroyAllAnalysisCharts();
       });
     },
 
@@ -238,8 +215,6 @@ function analysisTab() {
       await Promise.all([this.loadProfile(), this.loadAnalyses()]);
       this.initialized = true;
 
-      // Only render charts when the tab is visible — Chart.js needs
-      // non-zero canvas dimensions to render correctly.
       if (Alpine.store('nav').activeTab === 'analysis') {
         requestAnimationFrame(() => this._renderAllCharts());
       }
@@ -258,7 +233,6 @@ function analysisTab() {
         if (agent) params.agent_id = agent;
         this.profile = await IntarisAPI.getProfile(params);
       } catch (e) {
-        // Profile may not exist yet — show defaults
         this.profile = { risk_level: 'low', profile_version: 0, active_alerts: [], context_summary: null, updated_at: null };
       } finally {
         this.profileLoading = false;
@@ -291,7 +265,6 @@ function analysisTab() {
         if (agent) params.agent_id = agent;
         await IntarisAPI.triggerAnalysis(params);
         Alpine.store('notify')?.success('Analysis triggered');
-        // Reload after a short delay to pick up results
         setTimeout(() => this.loadData(), 3000);
       } catch (e) {
         Alpine.store('notify')?.error(e.message || 'Failed to trigger analysis');
@@ -302,56 +275,76 @@ function analysisTab() {
 
     // ── Chart data helpers ─────────────────────────────────────────
 
-    /** Get the latest (most recent) analysis, or null. */
     _latestAnalysis() {
       if (!this.analyses.length) return null;
-      // analyses are sorted by created_at DESC from the API
       return this.analyses[0];
     },
 
     // ── Chart rendering ────────────────────────────────────────────
 
     _renderAllCharts() {
-      if (!this.analyses.length || typeof Chart === 'undefined') return;
+      // Copy analyses out of Alpine proxy for chart rendering
+      const analyses = Alpine.raw(this.analyses);
+      if (!analyses.length || typeof Chart === 'undefined') return;
 
-      const latest = this._latestAnalysis();
+      const latest = analyses[0];
       const latestFindings = latest?.findings || [];
 
-      // Doughnut charts — latest analysis, counting unique sessions
-      this._renderDoughnut(
-        'analysisCategoriesChart',
-        _countSessionsByKey(latestFindings, 'category'),
-        null, // use _categoryColor for dynamic coloring
-        'sessions',
-      );
-      this._renderDoughnut(
-        'analysisSeverityChart',
-        _countSessionsByKey(latestFindings, 'severity'),
-        ANALYSIS_SEVERITY_COLORS,
-        'sessions',
-      );
+      // Each chart is wrapped in try/catch so one failure doesn't
+      // prevent the others from rendering.
+      try {
+        this._renderDoughnut(
+          'analysisCategoriesChart',
+          _countSessionsByKey(latestFindings, 'category'),
+          null,
+          'sessions',
+        );
+      } catch (e) { console.warn('analysisCategoriesChart error:', e); }
 
-      // Time series (per-day bucketed, session counts)
-      this._renderRiskTimeline();
-      this._renderFindingsTimeline();
-      this._renderCategoriesTimeline();
+      try {
+        this._renderDoughnut(
+          'analysisSeverityChart',
+          _countSessionsByKey(latestFindings, 'severity'),
+          ANALYSIS_SEVERITY_COLORS,
+          'sessions',
+        );
+      } catch (e) { console.warn('analysisSeverityChart error:', e); }
+
+      try { this._renderRiskTimeline(analyses); }
+      catch (e) { console.warn('analysisRiskTimeChart error:', e); }
+
+      try { this._renderFindingsTimeline(analyses); }
+      catch (e) { console.warn('analysisFindingsTimeChart error:', e); }
+
+      try { this._renderCategoriesTimeline(analyses); }
+      catch (e) { console.warn('analysisCategoriesTimeChart error:', e); }
     },
 
     _renderDoughnut(canvasId, data, colorMap, subtext) {
-      // Update existing chart in-place if possible
-      const existing = this._charts[canvasId];
+      const existing = _getChart(canvasId);
       if (existing && existing.canvas && existing.canvas.isConnected) {
-        this._updateDoughnut(canvasId, data, colorMap);
+        // Update in-place
+        const labels = Object.keys(data);
+        const values = Object.values(data);
+        const total = values.reduce((a, b) => a + b, 0);
+        const colors = colorMap
+          ? labels.map(l => colorMap[l] || ANALYSIS_COLORS.muted)
+          : labels.map((l, i) => _categoryColor(l, i));
+
+        existing.data.labels = labels;
+        existing.data.datasets[0].data = values;
+        existing.data.datasets[0].backgroundColor = colors;
+        if (existing.options?.plugins?.centerText) {
+          existing.options.plugins.centerText.text = total.toString();
+        }
+        try { existing.update('none'); } catch (e) { /* stale */ }
         return;
       }
 
-      const canvas = document.getElementById(canvasId);
+      const canvas = _getCanvas(canvasId);
       if (!canvas || !canvas.getContext('2d')) return;
 
-      if (existing) {
-        existing.destroy();
-        delete this._charts[canvasId];
-      }
+      _deleteChart(canvasId);
 
       const labels = Object.keys(data);
       const values = Object.values(data);
@@ -360,7 +353,7 @@ function analysisTab() {
         ? labels.map(l => colorMap[l] || ANALYSIS_COLORS.muted)
         : labels.map((l, i) => _categoryColor(l, i));
 
-      this._charts[canvasId] = new Chart(canvas, {
+      _setChart(canvasId, new Chart(canvas, {
         type: 'doughnut',
         data: {
           labels,
@@ -399,7 +392,7 @@ function analysisTab() {
                 },
               },
             },
-            [_analysisCenterTextId]: {
+            centerText: {
               text: total.toString(),
               subtext: subtext || 'total',
             },
@@ -413,40 +406,19 @@ function analysisTab() {
             },
           },
         },
-      });
+      }));
     },
 
-    _updateDoughnut(canvasId, data, colorMap) {
-      const chart = this._charts[canvasId];
-      if (!chart || !data) return;
-      if (!chart.canvas || !chart.canvas.isConnected) return;
+    _renderRiskTimeline(analyses) {
+      const sorted = _sortChronological(analyses);
+      if (sorted.length < 2) return;
 
-      const labels = Object.keys(data);
-      const values = Object.values(data);
-      const total = values.reduce((a, b) => a + b, 0);
-      const colors = colorMap
-        ? labels.map(l => colorMap[l] || ANALYSIS_COLORS.muted)
-        : labels.map((l, i) => _categoryColor(l, i));
-
-      chart.data.labels = labels;
-      chart.data.datasets[0].data = values;
-      chart.data.datasets[0].backgroundColor = colors;
-      if (chart.options?.plugins?.[_analysisCenterTextId]) {
-        chart.options.plugins[_analysisCenterTextId].text = total.toString();
-      }
-      try { chart.update('none'); } catch (e) { /* stale layout */ }
-    },
-
-    _renderRiskTimeline() {
-      const buckets = _bucketByDay(this.analyses);
-      if (buckets.length < 2) return;
-
-      const labels = buckets.map(b => _formatDayLabel(b.day));
-      const values = buckets.map(b => RISK_LEVEL_VALUE[b.analysis.risk_level] || 0);
-      const pointColors = buckets.map(b => ANALYSIS_RISK_COLORS[b.analysis.risk_level] || ANALYSIS_COLORS.muted);
+      const labels = sorted.map(a => _formatAnalysisLabel(a.created_at));
+      const values = sorted.map(a => RISK_LEVEL_VALUE[a.risk_level] || 0);
+      const pointColors = sorted.map(a => ANALYSIS_RISK_COLORS[a.risk_level] || ANALYSIS_COLORS.muted);
 
       const canvasId = 'analysisRiskTimeChart';
-      const existing = this._charts[canvasId];
+      const existing = _getChart(canvasId);
       if (existing && existing.canvas && existing.canvas.isConnected) {
         existing.data.labels = labels;
         existing.data.datasets[0].data = values;
@@ -455,15 +427,12 @@ function analysisTab() {
         return;
       }
 
-      const canvas = document.getElementById(canvasId);
+      const canvas = _getCanvas(canvasId);
       if (!canvas || !canvas.getContext('2d')) return;
 
-      if (existing) {
-        existing.destroy();
-        delete this._charts[canvasId];
-      }
+      _deleteChart(canvasId);
 
-      this._charts[canvasId] = new Chart(canvas, {
+      _setChart(canvasId, new Chart(canvas, {
         type: 'line',
         data: {
           labels,
@@ -498,44 +467,32 @@ function analysisTab() {
           scales: {
             x: {
               grid: { display: false },
-              ticks: {
-                maxRotation: 0,
-                autoSkip: true,
-                maxTicksLimit: 12,
-                font: { size: 10 },
-              },
+              ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 10, font: { size: 10 } },
             },
             y: {
-              min: 0.5,
-              max: 4.5,
+              min: 0.5, max: 4.5,
               grid: { color: ANALYSIS_COLORS.border },
               ticks: {
-                stepSize: 1,
-                font: { size: 10 },
+                stepSize: 1, font: { size: 10 },
                 callback(value) {
-                  const labels = { 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Critical' };
-                  return labels[value] || '';
+                  return { 1: 'Low', 2: 'Medium', 3: 'High', 4: 'Critical' }[value] || '';
                 },
               },
             },
           },
         },
-      });
+      }));
     },
 
-    _renderFindingsTimeline() {
-      const buckets = _bucketByDay(this.analyses);
-      if (buckets.length < 2) return;
+    _renderFindingsTimeline(analyses) {
+      const sorted = _sortChronological(analyses);
+      if (sorted.length < 2) return;
 
-      const labels = buckets.map(b => _formatDayLabel(b.day));
-
-      // Build stacked datasets by severity — counting unique sessions
+      const labels = sorted.map(a => _formatAnalysisLabel(a.created_at));
       const severities = ['low', 'medium', 'high', 'critical'];
       const datasets = severities.map(sev => ({
         label: sev.charAt(0).toUpperCase() + sev.slice(1),
-        data: buckets.map(b =>
-          _countSessionsForValue(b.analysis.findings || [], 'severity', sev),
-        ),
+        data: sorted.map(a => _countSessionsForValue(a.findings || [], 'severity', sev)),
         backgroundColor: ANALYSIS_SEVERITY_COLORS[sev] + 'CC',
         borderRadius: 2,
         borderSkipped: false,
@@ -544,27 +501,23 @@ function analysisTab() {
       this._renderStackedBar('analysisFindingsTimeChart', labels, datasets);
     },
 
-    _renderCategoriesTimeline() {
-      const buckets = _bucketByDay(this.analyses);
-      if (buckets.length < 2) return;
+    _renderCategoriesTimeline(analyses) {
+      const sorted = _sortChronological(analyses);
+      if (sorted.length < 2) return;
 
-      const labels = buckets.map(b => _formatDayLabel(b.day));
+      const labels = sorted.map(a => _formatAnalysisLabel(a.created_at));
 
-      // Collect all unique categories across all bucketed analyses
       const allCategories = new Set();
-      for (const b of buckets) {
-        for (const f of (b.analysis.findings || [])) {
+      for (const a of sorted) {
+        for (const f of (a.findings || [])) {
           allCategories.add(f.category || 'unknown');
         }
       }
       const categories = [...allCategories].sort();
 
-      // Build stacked datasets by category — counting unique sessions
       const datasets = categories.map((cat, i) => ({
         label: cat,
-        data: buckets.map(b =>
-          _countSessionsForValue(b.analysis.findings || [], 'category', cat),
-        ),
+        data: sorted.map(a => _countSessionsForValue(a.findings || [], 'category', cat)),
         backgroundColor: _categoryColor(cat, i) + 'CC',
         borderRadius: 2,
         borderSkipped: false,
@@ -573,9 +526,8 @@ function analysisTab() {
       this._renderStackedBar('analysisCategoriesTimeChart', labels, datasets);
     },
 
-    /** Shared renderer for stacked bar charts (findings + categories timelines). */
     _renderStackedBar(canvasId, labels, datasets) {
-      const existing = this._charts[canvasId];
+      const existing = _getChart(canvasId);
       if (existing && existing.canvas && existing.canvas.isConnected) {
         existing.data.labels = labels;
         existing.data.datasets = datasets;
@@ -583,15 +535,12 @@ function analysisTab() {
         return;
       }
 
-      const canvas = document.getElementById(canvasId);
+      const canvas = _getCanvas(canvasId);
       if (!canvas || !canvas.getContext('2d')) return;
 
-      if (existing) {
-        existing.destroy();
-        delete this._charts[canvasId];
-      }
+      _deleteChart(canvasId);
 
-      this._charts[canvasId] = new Chart(canvas, {
+      _setChart(canvasId, new Chart(canvas, {
         type: 'bar',
         data: { labels, datasets },
         options: {
@@ -613,7 +562,7 @@ function analysisTab() {
               intersect: false,
               callbacks: {
                 label(ctx) {
-                  if (ctx.raw === 0) return null; // hide zero entries
+                  if (ctx.raw === 0) return null;
                   return ' ' + ctx.dataset.label + ': ' + ctx.raw + ' sessions';
                 },
               },
@@ -623,32 +572,21 @@ function analysisTab() {
             x: {
               stacked: true,
               grid: { display: false },
-              ticks: {
-                maxRotation: 0,
-                autoSkip: true,
-                maxTicksLimit: 12,
-                font: { size: 10 },
-              },
+              ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 10, font: { size: 10 } },
             },
             y: {
               stacked: true,
               beginAtZero: true,
               grid: { color: ANALYSIS_COLORS.border },
-              ticks: {
-                precision: 0,
-                font: { size: 10 },
-              },
+              ticks: { precision: 0, font: { size: 10 } },
             },
           },
         },
-      });
+      }));
     },
 
     _destroyAllCharts() {
-      Object.values(this._charts).forEach(c => {
-        if (c && typeof c.destroy === 'function') c.destroy();
-      });
-      this._charts = {};
+      _destroyAllAnalysisCharts();
     },
   };
 }
