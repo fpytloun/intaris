@@ -2299,59 +2299,46 @@ def _update_profile(
         f for f in findings if coerce_risk_score(f.get("severity", 1)) >= 7
     ]
 
-    # Get current profile version (if exists)
+    # Atomic upsert — avoids TOCTOU race on PostgreSQL where
+    # concurrent analysis tasks for the same (user_id, agent_id)
+    # could both attempt INSERT and hit a duplicate key violation.
+    alerts_json = json.dumps(active_alerts) if active_alerts else None
     with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO behavioral_profiles
+                (user_id, agent_id, risk_level, active_alerts,
+                 context_summary, profile_version, last_analysis_id,
+                 updated_at)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT (user_id, agent_id) DO UPDATE SET
+                risk_level = excluded.risk_level,
+                active_alerts = excluded.active_alerts,
+                context_summary = excluded.context_summary,
+                profile_version = behavioral_profiles.profile_version + 1,
+                last_analysis_id = excluded.last_analysis_id,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                agent_id or "",
+                risk_level,
+                alerts_json,
+                context_summary or None,
+                analysis_id,
+                now,
+            ),
+        )
+
+        # Read back the version for logging
         cur.execute(
             "SELECT profile_version FROM behavioral_profiles "
             "WHERE user_id = ? AND agent_id = ?",
             (user_id, agent_id or ""),
         )
-        row = cur.fetchone()
+        version_row = cur.fetchone()
 
-    current_version = row["profile_version"] if row else 0
-    new_version = current_version + 1
-
-    # Upsert the profile
-    with db.cursor() as cur:
-        if row:
-            cur.execute(
-                """
-                UPDATE behavioral_profiles
-                SET risk_level = ?, active_alerts = ?, context_summary = ?,
-                    profile_version = ?, last_analysis_id = ?, updated_at = ?
-                WHERE user_id = ? AND agent_id = ?
-                """,
-                (
-                    risk_level,
-                    json.dumps(active_alerts) if active_alerts else None,
-                    context_summary or None,
-                    new_version,
-                    analysis_id,
-                    now,
-                    user_id,
-                    agent_id or "",
-                ),
-            )
-        else:
-            cur.execute(
-                """
-                INSERT INTO behavioral_profiles
-                    (user_id, agent_id, risk_level, active_alerts,
-                     context_summary, profile_version, last_analysis_id,
-                     updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    agent_id or "",
-                    risk_level,
-                    json.dumps(active_alerts) if active_alerts else None,
-                    context_summary or None,
-                    new_version,
-                    analysis_id,
-                    now,
-                ),
-            )
+    new_version = version_row["profile_version"] if version_row else 1
 
     logger.info(
         "Behavioral profile updated: user=%s agent=%s risk=%d (%s) version=%d",
