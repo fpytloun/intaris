@@ -7,7 +7,7 @@
 - **Language**: Python 3.11+
 - **Framework**: FastAPI/Starlette for HTTP, OpenAI-compatible API for LLM
 - **Core dependencies**: fastapi, uvicorn, starlette, openai
-- **License**: Apache 2.0
+- **License**: BSL 1.1 (converts to Apache 2.0 on 2030-03-15)
 - **Repository**: https://github.com/fpytloun/intaris
 - **Part of**: Cognara platform (Cognis controller, Intaris guardrails, Mnemory memory)
 

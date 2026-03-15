@@ -105,4 +105,8 @@ See the [Architecture](docs/architecture.md) and [Evaluation Pipeline](docs/eval
 
 ## License
 
-Apache 2.0
+Business Source License 1.1 — see [LICENSE](LICENSE) for the full text.
+
+The Licensed Work is (c) 2026 Filip Pytloun. You may use the Software for your own internal business operations free of charge. Commercial use (SaaS, managed services, or as a component of a commercial product) requires a separate license. On the Change Date (2030-03-15), the license converts to Apache License 2.0.
+
+For alternative licensing arrangements, contact: filip@pytloun.cz
