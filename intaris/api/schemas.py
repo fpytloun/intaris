@@ -169,6 +169,7 @@ class SessionResponse(BaseModel):
     last_activity_at: str | None = None
     parent_session_id: str | None = None
     summary_count: int = 0
+    last_alignment: str | None = None
     created_at: str
     updated_at: str
 

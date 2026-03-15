@@ -810,6 +810,8 @@ def _store_summary(
     tools_used = result.get("tools_used", [])
     risk_indicators = result.get("risk_indicators", [])
 
+    alignment = result.get("intent_alignment", "unclear")
+
     with db.cursor() as cur:
         cur.execute(
             """
@@ -831,7 +833,7 @@ def _store_summary(
                 summary_type,
                 result.get("summary", ""),
                 json.dumps(tools_used),
-                result.get("intent_alignment", "unclear"),
+                alignment,
                 json.dumps(risk_indicators),
                 stats.get("total", 0),
                 stats.get("approved_count", 0),
@@ -839,6 +841,13 @@ def _store_summary(
                 stats.get("escalated_count", 0),
                 now,
             ),
+        )
+
+        # Cache alignment on the session for list-level display
+        cur.execute(
+            "UPDATE sessions SET last_alignment = ? "
+            "WHERE user_id = ? AND session_id = ?",
+            (alignment, user_id, session_id),
         )
 
     return summary_id

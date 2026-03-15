@@ -143,7 +143,10 @@ class LLMClient:
 
         assert response is not None
 
-        # Retry on empty content
+        # Retry on empty content.
+        # When finish_reason=length and content is empty, the model ran out
+        # of tokens before producing any output (all budget consumed by
+        # reasoning). Double max_tokens on each retry to give it more room.
         content_retries = 2
         for retry in range(content_retries):
             choice = response.choices[0]
@@ -158,14 +161,35 @@ class LLMClient:
                 break
 
             refusal = getattr(choice.message, "refusal", None)
-            logger.warning(
-                "LLM returned empty content (finish_reason=%s, refusal=%s), "
-                "retrying (%d/%d)",
-                choice.finish_reason,
-                refusal,
-                retry + 1,
-                content_retries,
-            )
+
+            # If the model hit the token limit, double max_tokens for retry
+            if choice.finish_reason == "length":
+                old_max = params.get(
+                    "max_completion_tokens", params.get("max_tokens", max_tokens)
+                )
+                new_max = old_max * 2
+                if "max_completion_tokens" in params:
+                    params["max_completion_tokens"] = new_max
+                elif "max_tokens" in params:
+                    params["max_tokens"] = new_max
+                logger.warning(
+                    "LLM returned empty content (finish_reason=length), "
+                    "retrying with increased max_tokens %d→%d (%d/%d)",
+                    old_max,
+                    new_max,
+                    retry + 1,
+                    content_retries,
+                )
+            else:
+                logger.warning(
+                    "LLM returned empty content (finish_reason=%s, refusal=%s), "
+                    "retrying (%d/%d)",
+                    choice.finish_reason,
+                    refusal,
+                    retry + 1,
+                    content_retries,
+                )
+
             response = self._client.chat.completions.create(**params)
         else:
             choice = response.choices[0]

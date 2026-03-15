@@ -368,6 +368,10 @@ class Database:
             )
             logger.info("Migration: added injection_detected column to audit_log")
 
+        if not self._sqlite_column_exists(conn, "sessions", "last_alignment"):
+            conn.execute("ALTER TABLE sessions ADD COLUMN last_alignment TEXT")
+            logger.info("Migration: added last_alignment column to sessions")
+
         # Migration: add summary_type to session_summaries
         if not self._sqlite_column_exists(conn, "session_summaries", "summary_type"):
             conn.execute(
@@ -640,6 +644,7 @@ class Database:
                 ("sessions", "agent_id", "TEXT"),
                 ("notification_channels", "events", "TEXT"),
                 ("sessions", "alignment_overridden", "BOOLEAN DEFAULT FALSE"),
+                ("sessions", "last_alignment", "TEXT"),
                 ("audit_log", "injection_detected", "BOOLEAN DEFAULT FALSE"),
                 ("behavioral_analyses", "agent_id", "TEXT"),
                 ("behavioral_profiles", "agent_id", "TEXT NOT NULL DEFAULT ''"),
@@ -959,6 +964,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     status_reason TEXT,
     agent_id TEXT,
     alignment_overridden BOOLEAN DEFAULT FALSE,
+    last_alignment TEXT,
     PRIMARY KEY (user_id, session_id)
 );
 

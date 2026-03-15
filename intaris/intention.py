@@ -199,7 +199,7 @@ def generate_intention(
     ]
 
     try:
-        raw = llm.generate(messages, max_tokens=150)
+        raw = llm.generate(messages, max_tokens=500)
         intention = raw.strip().strip('"').strip("'")
         if not intention or len(intention) < 5:
             return None
