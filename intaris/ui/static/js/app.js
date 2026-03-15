@@ -258,6 +258,7 @@ document.addEventListener('alpine:init', () => {
     sessionModal: null,
     sessionModalAudit: [],
     sessionModalChildren: [],
+    sessionModalSummaries: null,
     sessionModalLoading: false,
     sessionModalAuditExpandedId: null,
     sessionModalAuditRecord: null,
@@ -286,17 +287,39 @@ document.addEventListener('alpine:init', () => {
       this.sessionModal = null;
       this.sessionModalAudit = [];
       this.sessionModalChildren = [];
+      this.sessionModalSummaries = null;
       this.sessionModalAuditExpandedId = null;
       this.sessionModalAuditRecord = null;
       try {
-        const [session, audit, children] = await Promise.all([
+        const [session, audit, children, summaries] = await Promise.all([
           IntarisAPI.getSession(sessionId),
           IntarisAPI.listAudit({ session_id: sessionId, limit: 20 }),
           IntarisAPI.listSessions({ parent_session_id: sessionId, limit: 50 }),
+          IntarisAPI.getSessionSummaries(sessionId).catch(() => ({
+            intaris_summaries: [],
+            agent_summaries: [],
+          })),
         ]);
-        this.sessionModal = session;
+        this.sessionModal = { ...session, _detailsExpanded: false, _policyExpanded: false };
         this.sessionModalAudit = audit.items || [];
         this.sessionModalChildren = children.items || [];
+        // Parse summaries — same logic as sessions.js
+        const intarisSummaries = (summaries.intaris_summaries || []).map(s => ({
+          ...s,
+          _expanded: false,
+          risk_indicators: typeof s.risk_indicators === 'string'
+            ? JSON.parse(s.risk_indicators) : (s.risk_indicators || []),
+          tools_used: typeof s.tools_used === 'string'
+            ? JSON.parse(s.tools_used) : (s.tools_used || []),
+        }));
+        const compacted = intarisSummaries.filter(s => s.summary_type === 'compacted');
+        const windows = intarisSummaries.filter(s => s.summary_type !== 'compacted');
+        this.sessionModalSummaries = {
+          compacted_summary: compacted.length > 0 ? compacted[0] : null,
+          window_summaries: windows,
+          _windowsExpanded: !compacted.length && windows.length > 0,
+          agent_summaries: summaries.agent_summaries || [],
+        };
       } catch (e) {
         Alpine.store('notify').error('Session not found: ' + sessionId);
         this.sessionModalLoading = false;
@@ -309,6 +332,7 @@ document.addEventListener('alpine:init', () => {
       this.sessionModal = null;
       this.sessionModalAudit = [];
       this.sessionModalChildren = [];
+      this.sessionModalSummaries = null;
       this.sessionModalLoading = false;
       this.sessionModalAuditExpandedId = null;
       this.sessionModalAuditRecord = null;

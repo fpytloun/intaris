@@ -490,13 +490,13 @@
                           </div>
                         </div>
                         <template x-if="session._summaries.compacted_summary._expanded && session._summaries.compacted_summary.risk_indicators && session._summaries.compacted_summary.risk_indicators.length > 0">
-                          <div class="mt-2 space-y-1">
+                          <div class="mt-2 text-xs grid grid-cols-[5rem_auto_1fr] gap-x-2 gap-y-1 items-start">
                             <template x-for="(ind, i) in session._summaries.compacted_summary.risk_indicators" :key="i">
-                              <div class="text-xs flex items-center gap-1">
-                                <span class="px-1.5 py-0.5 rounded"
+                              <div class="contents">
+                                <span class="px-1.5 py-0.5 rounded text-center"
                                       :class="severityBadgeClass(ind.severity)"
                                       x-text="riskBand(ind.severity).toUpperCase()"></span>
-                                <span class="font-medium" x-text="ind.indicator"></span>
+                                <span class="font-medium whitespace-nowrap" x-text="ind.indicator"></span>
                                 <span class="text-secondary" x-text="ind.detail"></span>
                               </div>
                             </template>
@@ -547,13 +547,13 @@
                                   </div>
                                 </div>
                                 <template x-if="summary._expanded && summary.risk_indicators && summary.risk_indicators.length > 0">
-                                  <div class="mt-2 space-y-1">
+                                  <div class="mt-2 text-xs grid grid-cols-[5rem_auto_1fr] gap-x-2 gap-y-1 items-start">
                                     <template x-for="(ind, i) in summary.risk_indicators" :key="i">
-                                      <div class="text-xs flex items-center gap-1">
-                                        <span class="px-1.5 py-0.5 rounded"
+                                      <div class="contents">
+                                        <span class="px-1.5 py-0.5 rounded text-center"
                                               :class="severityBadgeClass(ind.severity)"
                                               x-text="riskBand(ind.severity).toUpperCase()"></span>
-                                        <span class="font-medium" x-text="ind.indicator"></span>
+                                        <span class="font-medium whitespace-nowrap" x-text="ind.indicator"></span>
                                         <span class="text-secondary" x-text="ind.detail"></span>
                                       </div>
                                     </template>
@@ -1050,12 +1050,12 @@
               <span x-show="profile.agent_id" class="text-xs font-mono text-muted px-2 py-0.5 rounded bg-surface-tertiary" x-text="profile.agent_id"></span>
             </div>
             <div class="flex items-center gap-2">
-              <!-- Trigger Analysis: button or progress -->
+              <!-- Run Analysis: button or progress -->
               <template x-if="!analysisTracking">
                 <button @click="triggerAnalysis()" class="btn-primary text-sm"
                         :disabled="triggeringAnalysis">
-                  <span x-show="!triggeringAnalysis">Trigger Analysis</span>
-                  <span x-show="triggeringAnalysis">Triggering...</span>
+                  <span x-show="!triggeringAnalysis">Run Analysis</span>
+                  <span x-show="triggeringAnalysis">Starting...</span>
                 </button>
               </template>
               <template x-if="analysisTracking">
@@ -1068,10 +1068,10 @@
                 </div>
               </template>
 
-              <!-- Backfill Summaries: button or progress bar -->
+              <!-- Generate Summaries: button or progress bar -->
               <template x-if="!backfillTracking">
                 <button @click="showBackfillModal = true; backfillResult = null" class="btn-secondary text-sm">
-                  Backfill Summaries
+                  Generate Summaries
                 </button>
               </template>
               <template x-if="backfillTracking">
@@ -1157,7 +1157,7 @@
 
             <template x-if="!profile.context_summary && (!profile.active_alerts || profile.active_alerts.length === 0) && profile.profile_version === 0">
               <div class="text-center py-4 text-secondary text-sm">
-                No behavioral analysis has been run yet. Click "Trigger Analysis" to start.
+                No behavioral analysis has been run yet. Click "Run Analysis" to start.
               </div>
             </template>
           </div>
@@ -1322,11 +1322,11 @@
           </div>
         </div>
 
-        <!-- Backfill Summaries Modal -->
+        <!-- Generate Summaries Modal -->
         <div x-show="showBackfillModal" x-cloak
              class="modal-overlay" @click.self="showBackfillModal = false" @keydown.escape.window="showBackfillModal = false">
           <div class="modal-content max-w-md" @click.stop>
-            <h3 class="text-lg font-medium mb-3">Backfill Session Summaries</h3>
+            <h3 class="text-lg font-medium mb-3">Generate Session Summaries</h3>
             <p class="text-sm text-secondary mb-4">
               Generate summaries for sessions within the lookback window.
               Summaries are processed in the background.
@@ -1987,19 +1987,135 @@
             <div class="text-sm" x-text="$store.nav.sessionModal.intention"></div>
           </div>
 
-          <!-- Details -->
-          <template x-if="$store.nav.sessionModal.details">
-            <div class="mb-3">
-              <div class="text-xs text-muted mb-1">Details</div>
-              <pre class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto" x-text="JSON.stringify($store.nav.sessionModal.details, null, 2)"></pre>
+          <!-- Session Summaries -->
+          <template x-if="$store.nav.sessionModalSummaries">
+            <div class="mb-4">
+              <div class="text-xs text-muted font-medium mb-2">Session Summaries</div>
+
+              <!-- Compacted Summary (prominent) -->
+              <template x-if="$store.nav.sessionModalSummaries.compacted_summary">
+                <div class="bg-brand-elevated rounded-lg p-3 mb-2 border border-brand-border">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-xs font-medium text-primary">Session Summary</span>
+                    <span class="text-xs px-1.5 py-0.5 rounded"
+                          :class="{
+                            'badge-approve': $store.nav.sessionModalSummaries.compacted_summary.intent_alignment === 'aligned',
+                            'badge-escalate': $store.nav.sessionModalSummaries.compacted_summary.intent_alignment === 'partially_aligned',
+                            'badge-deny': $store.nav.sessionModalSummaries.compacted_summary.intent_alignment === 'misaligned',
+                            'badge-fast': $store.nav.sessionModalSummaries.compacted_summary.intent_alignment === 'unclear',
+                          }"
+                          x-text="$store.nav.sessionModalSummaries.compacted_summary.intent_alignment"></span>
+                    <span class="text-xs text-secondary" x-text="$store.nav.sessionModalSummaries.compacted_summary.call_count + ' calls'"></span>
+                  </div>
+                  <div class="text-sm mt-2 text-secondary" x-text="$store.nav.sessionModalSummaries.compacted_summary.summary"></div>
+                  <div class="mt-2">
+                    <template x-if="$store.nav.sessionModalSummaries.compacted_summary.risk_indicators && $store.nav.sessionModalSummaries.compacted_summary.risk_indicators.length > 0">
+                      <div>
+                        <button @click.stop="$store.nav.sessionModalSummaries.compacted_summary._expanded = !$store.nav.sessionModalSummaries.compacted_summary._expanded"
+                                class="text-xs text-yellow-400 hover:text-yellow-300 mb-1">
+                          <span x-text="($store.nav.sessionModalSummaries.compacted_summary._expanded ? '\u25BE' : '\u25B8') + ' ' + $store.nav.sessionModalSummaries.compacted_summary.risk_indicators.length + ' risk indicators'"></span>
+                        </button>
+                        <template x-if="$store.nav.sessionModalSummaries.compacted_summary._expanded">
+                          <div class="text-xs grid grid-cols-[5rem_auto_1fr] gap-x-2 gap-y-1 items-start">
+                            <template x-for="(ind, i) in $store.nav.sessionModalSummaries.compacted_summary.risk_indicators" :key="i">
+                              <div class="contents">
+                                <span class="px-1.5 py-0.5 rounded text-center"
+                                      :class="severityBadgeClass(ind.severity)"
+                                      x-text="riskBand(ind.severity).toUpperCase()"></span>
+                                <span class="font-medium whitespace-nowrap" x-text="ind.indicator"></span>
+                                <span class="text-secondary" x-text="ind.detail || ind.summary || ''"></span>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Window Summaries (expandable) -->
+              <template x-if="$store.nav.sessionModalSummaries.window_summaries && $store.nav.sessionModalSummaries.window_summaries.length > 0">
+                <div class="mb-2">
+                  <button @click.stop="$store.nav.sessionModalSummaries._windowsExpanded = !$store.nav.sessionModalSummaries._windowsExpanded"
+                          class="text-xs text-secondary hover:text-primary mb-1">
+                    <span x-text="($store.nav.sessionModalSummaries._windowsExpanded ? '\u25BE' : '\u25B8') + ' Windows (' + $store.nav.sessionModalSummaries.window_summaries.length + ')'"></span>
+                  </button>
+                  <template x-if="$store.nav.sessionModalSummaries._windowsExpanded">
+                    <div class="space-y-2">
+                      <template x-for="ws in $store.nav.sessionModalSummaries.window_summaries" :key="ws.id">
+                        <div class="bg-brand-elevated rounded-lg p-3">
+                          <div class="flex items-center gap-2 flex-wrap">
+                            <span class="text-xs text-secondary"
+                                  x-text="(ws.window_start || '').substring(0,16) + ' \u2192 ' + (ws.window_end || '').substring(0,16)"></span>
+                            <span class="text-xs px-1.5 py-0.5 rounded"
+                                  :class="{
+                                    'badge-approve': ws.intent_alignment === 'aligned',
+                                    'badge-escalate': ws.intent_alignment === 'partially_aligned',
+                                    'badge-deny': ws.intent_alignment === 'misaligned',
+                                    'badge-fast': ws.intent_alignment === 'unclear',
+                                  }"
+                                  x-text="ws.intent_alignment"></span>
+                            <span class="text-xs text-secondary" x-text="ws.call_count + ' calls'"></span>
+                          </div>
+                          <div class="text-sm mt-2 text-secondary" x-text="ws.summary"></div>
+                          <div class="mt-2">
+                            <template x-if="ws.risk_indicators && ws.risk_indicators.length > 0">
+                              <div>
+                                <button @click.stop="ws._expanded = !ws._expanded"
+                                        class="text-xs text-yellow-400 hover:text-yellow-300 mb-1">
+                                  <span x-text="(ws._expanded ? '\u25BE' : '\u25B8') + ' ' + ws.risk_indicators.length + ' risk indicators'"></span>
+                                </button>
+                                <template x-if="ws._expanded">
+                                  <div class="text-xs grid grid-cols-[5rem_auto_1fr] gap-x-2 gap-y-1 items-start">
+                                    <template x-for="(ind, i) in ws.risk_indicators" :key="i">
+                                      <div class="contents">
+                                        <span class="px-1.5 py-0.5 rounded text-center"
+                                              :class="severityBadgeClass(ind.severity)"
+                                              x-text="riskBand(ind.severity).toUpperCase()"></span>
+                                        <span class="font-medium whitespace-nowrap" x-text="ind.indicator"></span>
+                                        <span class="text-secondary" x-text="ind.detail || ind.summary || ''"></span>
+                                      </div>
+                                    </template>
+                                  </div>
+                                </template>
+                              </div>
+                            </template>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+              </template>
+
+              <!-- No summaries -->
+              <div x-show="!$store.nav.sessionModalSummaries.compacted_summary && (!$store.nav.sessionModalSummaries.window_summaries || $store.nav.sessionModalSummaries.window_summaries.length === 0)"
+                   class="text-xs text-muted">No summaries generated yet.</div>
             </div>
           </template>
 
-          <!-- Policy -->
+          <!-- Details (collapsed by default) -->
+          <template x-if="$store.nav.sessionModal.details">
+            <div class="mb-3">
+              <button @click.stop="$store.nav.sessionModal._detailsExpanded = !$store.nav.sessionModal._detailsExpanded"
+                      class="text-xs text-secondary hover:text-primary">
+                <span x-text="($store.nav.sessionModal._detailsExpanded ? '\u25BE' : '\u25B8') + ' Details'"></span>
+              </button>
+              <pre x-show="$store.nav.sessionModal._detailsExpanded" x-cloak
+                   class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto mt-1" x-text="JSON.stringify($store.nav.sessionModal.details, null, 2)"></pre>
+            </div>
+          </template>
+
+          <!-- Policy (collapsed by default) -->
           <template x-if="$store.nav.sessionModal.policy">
             <div class="mb-3">
-              <div class="text-xs text-muted mb-1">Policy</div>
-              <pre class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto" x-text="JSON.stringify($store.nav.sessionModal.policy, null, 2)"></pre>
+              <button @click.stop="$store.nav.sessionModal._policyExpanded = !$store.nav.sessionModal._policyExpanded"
+                      class="text-xs text-secondary hover:text-primary">
+                <span x-text="($store.nav.sessionModal._policyExpanded ? '\u25BE' : '\u25B8') + ' Policy'"></span>
+              </button>
+              <pre x-show="$store.nav.sessionModal._policyExpanded" x-cloak
+                   class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto mt-1" x-text="JSON.stringify($store.nav.sessionModal.policy, null, 2)"></pre>
             </div>
           </template>
 
