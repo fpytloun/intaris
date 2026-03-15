@@ -282,7 +282,13 @@ def _get_analysis_stats(
             else:
                 cur.execute(
                     "SELECT risk_level, profile_version FROM behavioral_profiles "
-                    "WHERE user_id = ? ORDER BY profile_version DESC LIMIT 1",
+                    "WHERE user_id = ? "
+                    "ORDER BY CASE risk_level "
+                    "  WHEN 'critical' THEN 0 "
+                    "  WHEN 'high' THEN 1 "
+                    "  WHEN 'medium' THEN 2 "
+                    "  ELSE 3 END "
+                    "LIMIT 1",
                     (user_id,),
                 )
             row = cur.fetchone()

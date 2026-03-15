@@ -897,7 +897,8 @@
                   <span class="font-mono text-sm" x-text="item.tool"></span>
                   <span :class="riskBadgeClass(item.risk)" x-text="item.risk" x-show="item.risk"></span>
                 </div>
-                <div class="text-xs text-muted">
+                <div class="flex items-center gap-2 text-xs text-muted">
+                  <span x-show="item.agent_id" class="font-mono px-1.5 py-0.5 rounded bg-surface-tertiary" x-text="item.agent_id"></span>
                   <span class="text-brand-accent hover:underline cursor-pointer"
                         @click.stop="goToSession(item.session_id)"
                         x-text="item.session_id"></span> &middot;
@@ -967,6 +968,7 @@
                     <span :class="riskBadgeClass(item.risk)" x-text="item.risk" x-show="item.risk"></span>
                   </div>
                   <div class="flex items-center gap-3 text-xs text-muted">
+                    <span x-show="item.agent_id" class="font-mono px-1.5 py-0.5 rounded bg-surface-tertiary" x-text="item.agent_id"></span>
                     <span class="text-brand-accent hover:underline cursor-pointer"
                           @click.stop="goToSession(item.session_id)"
                           x-text="item.session_id"></span>
@@ -1052,7 +1054,10 @@
         <!-- Behavioral Profile Card -->
         <div class="card mb-6">
           <div class="flex items-center justify-between mb-4">
-            <h2 class="text-lg font-medium">Behavioral Profile</h2>
+            <div class="flex items-center gap-2">
+              <h2 class="text-lg font-medium">Behavioral Profile</h2>
+              <span x-show="profile.agent_id" class="text-xs font-mono text-muted px-2 py-0.5 rounded bg-surface-tertiary" x-text="profile.agent_id"></span>
+            </div>
             <button @click="triggerAnalysis()" class="btn-primary text-sm"
                     :disabled="triggeringAnalysis">
               <span x-show="!triggeringAnalysis">Trigger Analysis</span>
@@ -1125,6 +1130,55 @@
           </div>
         </div>
 
+        <!-- Analysis Charts -->
+        <div class="card mb-6" x-show="hasChartData" x-cloak>
+          <h2 class="text-lg font-medium mb-4">Analysis Trends</h2>
+
+          <!-- Doughnut row -->
+          <div class="grid grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+            <div class="chart-card">
+              <h3 class="chart-title">Finding Categories</h3>
+              <div class="chart-container-doughnut">
+                <canvas id="analysisCategoriesChart"></canvas>
+              </div>
+            </div>
+            <div class="chart-card">
+              <h3 class="chart-title">Finding Severity</h3>
+              <div class="chart-container-doughnut">
+                <canvas id="analysisSeverityChart"></canvas>
+              </div>
+            </div>
+            <div class="chart-card">
+              <h3 class="chart-title">Risk Levels</h3>
+              <div class="chart-container-doughnut">
+                <canvas id="analysisRiskLevelsChart"></canvas>
+              </div>
+            </div>
+          </div>
+
+          <!-- Risk Level Over Time -->
+          <div class="mb-6">
+            <h3 class="chart-title">Risk Level Over Time</h3>
+            <div class="chart-container-timeline">
+              <canvas id="analysisRiskTimeChart"></canvas>
+            </div>
+            <div x-show="analyses.length < 2" class="text-xs text-muted text-center py-4">
+              Needs at least 2 analyses to show trend
+            </div>
+          </div>
+
+          <!-- Findings Over Time -->
+          <div>
+            <h3 class="chart-title">Findings Over Time</h3>
+            <div class="chart-container-bar">
+              <canvas id="analysisFindingsTimeChart"></canvas>
+            </div>
+            <div x-show="analyses.length < 2" class="text-xs text-muted text-center py-4">
+              Needs at least 2 analyses to show trend
+            </div>
+          </div>
+        </div>
+
         <!-- Analysis History -->
         <div class="card">
           <h2 class="text-lg font-medium mb-4">Analysis History</h2>
@@ -1143,6 +1197,7 @@
                   <div class="flex items-center gap-3">
                     <span class="text-sm" x-text="new Date(analysis.created_at).toLocaleString()"></span>
                     <span class="text-xs px-2 py-0.5 rounded bg-surface-tertiary" x-text="analysis.analysis_type"></span>
+                    <span x-show="analysis.agent_id" class="text-xs font-mono px-2 py-0.5 rounded bg-surface-tertiary" x-text="analysis.agent_id"></span>
                     <span class="text-xs font-medium px-2 py-0.5 rounded"
                           :class="{
                             'badge-low': analysis.risk_level === 'low',
