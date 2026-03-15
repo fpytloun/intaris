@@ -4,10 +4,15 @@ Provides session summary generation (L2) and cross-session behavioral
 analysis (L3). Uses the analysis LLM client for structured output.
 
 L2 summaries are windowed and iterative — each summary covers a time
-window since the last summary, analyzing three data streams:
+window since the last summary, analyzing up to four data streams:
 1. User messages / intentions (trusted)
 2. Tool calls with decisions (objective audit trail)
 3. Agent reasoning (untrusted, sandboxed for pattern detection)
+4. Assistant text (untrusted, from event store — event-enriched path only)
+
+When event store data is available, L2 uses the event-enriched path
+with turn-based partitioning. Falls back to audit_log-only (streams
+1-3) when no events exist.
 
 L2 summaries support hierarchical sessions:
 - Child sessions get their own L2 summaries (unchanged)
@@ -204,32 +209,35 @@ async def generate_summary(
         limit=200,
     )
 
-    user_messages = []
-    agent_reasoning = []
-    for rec in reasoning_records:
-        content = rec.get("content", "")
-        if content.startswith("User message:"):
-            user_messages.append(rec)
-        else:
-            agent_reasoning.append(rec)
-
     # ── Step 3: Try event-enriched path ───────────────────────────
-    conversation = _get_session_events(
+    conversation, event_read_truncated = _get_session_events(
         event_store, user_id, session_id, window_start, window_end
     )
     event_enriched = bool(conversation)
 
-    # For event-enriched path: minimum 0 tool calls (M2 fix)
-    # For audit_log-only path: minimum _MIN_WINDOW_RECORDS tool calls
-    min_records = 0 if event_enriched else _MIN_WINDOW_RECORDS
-    has_sufficient_data = len(tool_calls) >= min_records and (
-        len(tool_calls) > 0 or event_enriched
-    )
+    # Split reasoning records into user messages and agent reasoning.
+    # In the event-enriched path, user messages come from the event store
+    # so we skip extracting them from reasoning records.
+    user_messages: list[dict[str, Any]] = []
+    agent_reasoning: list[dict[str, Any]] = []
+    for rec in reasoning_records:
+        content = rec.get("content", "")
+        if content.startswith("User message:"):
+            if not event_enriched:
+                user_messages.append(rec)
+        else:
+            agent_reasoning.append(rec)
+
+    # For event-enriched path: conversation alone is sufficient (M2 fix).
+    # For audit_log-only path: need at least _MIN_WINDOW_RECORDS tool calls.
+    has_sufficient_data = event_enriched or len(tool_calls) >= _MIN_WINDOW_RECORDS
+
+    # Count existing windows once (used for both early-exit and window numbering)
+    prior_window_count = _count_prior_summaries(db, user_id, session_id)
 
     if not has_sufficient_data:
         # Check if compaction is possible even without new data
-        total_windows = _count_prior_summaries(db, user_id, session_id)
-        if total_windows > 1:
+        if prior_window_count > 1:
             compaction_result = await _generate_compaction(
                 db,
                 llm,
@@ -241,7 +249,7 @@ async def generate_summary(
             if compaction_result:
                 return compaction_result
 
-        if total_windows == 0:
+        if prior_window_count == 0:
             logger.info(
                 "Summary skipped: insufficient data "
                 "(user=%s session=%s, %d tool calls, %d conversation entries)",
@@ -268,7 +276,7 @@ async def generate_summary(
     from intaris.sanitize import ANTI_INJECTION_PREAMBLE
 
     prior_summary = _get_prior_summary(db, user_id, session_id)
-    base_window_number = _count_prior_summaries(db, user_id, session_id) + 1
+    base_window_number = prior_window_count + 1
 
     # Choose system prompt based on whether we have conversation data
     if event_enriched:
@@ -510,6 +518,7 @@ async def generate_summary(
             # Annotate with event-enriched info
             compaction_result["event_enriched"] = event_enriched
             compaction_result["windows_generated"] = windows_generated
+            compaction_result["event_read_truncated"] = event_read_truncated
             return compaction_result
 
     # If we only generated tail window(s), return that info
@@ -523,6 +532,7 @@ async def generate_summary(
             "compacted": False,
             "event_enriched": event_enriched,
             "windows_generated": windows_generated,
+            "event_read_truncated": event_read_truncated,
         }
 
     # Exactly 1 window exists, no compaction needed
@@ -982,7 +992,7 @@ def _get_session_events(
     session_id: str,
     after_ts: str | None,
     before_ts: str | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Fetch and process session events for L2 analysis enrichment.
 
     Reads ``part`` and ``message`` events from the event store, deduplicates
@@ -1000,10 +1010,11 @@ def _get_session_events(
         before_ts: Window end timestamp (ISO 8601).
 
     Returns:
-        List of ``{ts, role, text, seq}`` dicts sorted by seq.
+        Tuple of (conversation entries, event_read_truncated flag).
+        Conversation entries are ``{ts, role, text, seq}`` dicts sorted by seq.
     """
     if event_store is None:
-        return []
+        return [], False
 
     try:
         raw_events = event_store.read(
@@ -1020,13 +1031,14 @@ def _get_session_events(
             user_id,
             session_id,
         )
-        return []
+        return [], False
 
     if not raw_events:
-        return []
+        return [], False
 
-    # Log if we hit the read limit (C2 — truncation warning)
-    if len(raw_events) >= _MAX_EVENT_READ:
+    # Log if we hit the read limit (C2 — truncation warning).
+    event_read_truncated = len(raw_events) >= _MAX_EVENT_READ
+    if event_read_truncated:
         logger.warning(
             "Event store read hit limit (%d) for %s/%s — "
             "some events may be missing from analysis",
@@ -1035,7 +1047,7 @@ def _get_session_events(
             session_id,
         )
 
-    from intaris.sanitize import escape_markdown_headers
+    from intaris.sanitize import sanitize_for_prompt
 
     # Deduplicate part events by data.part.id — keep last by seq (m1 fix).
     # OpenCode streams part updates; many events per part with the same id.
@@ -1113,8 +1125,8 @@ def _get_session_events(
         text = part.get("text", "")
         if not text:
             continue
-        # Sanitize: escape markdown headers and boundary tags (C1 fix)
-        text = escape_markdown_headers(text)
+        # Sanitize: escape markdown headers and code fences (C1 fix)
+        text = sanitize_for_prompt(text)
         # Escape boundary tags to prevent tag breakout
         text = text.replace("⟨assistant_text⟩", "⟨\u200bassistant_text⟩")
         text = text.replace("⟨/assistant_text⟩", "⟨\u200b/assistant_text⟩")
@@ -1130,7 +1142,7 @@ def _get_session_events(
     # Sort by seq (primary ordering key)
     conversation.sort(key=lambda e: e["seq"])
 
-    return conversation
+    return conversation, event_read_truncated
 
 
 def _partition_into_windows(
@@ -1217,16 +1229,29 @@ def _partition_into_windows(
 
         turn["ts_start"] = t_start
         turn["ts_end"] = t_end
+        turn["is_last"] = i == len(turns) - 1
 
-        # Assign tool_calls by timestamp range
-        turn["tool_calls"] = [
-            tc for tc in tool_calls if t_start <= (tc.get("timestamp") or "") <= t_end
-        ]
-
-        # Assign reasoning by timestamp range
-        turn["reasoning"] = [
-            r for r in reasoning if t_start <= (r.get("timestamp") or "") <= t_end
-        ]
+        # Assign tool_calls by timestamp range.
+        # Non-last turns use strict < on upper bound to prevent
+        # double-counting at turn boundaries.
+        if turn["is_last"]:
+            turn["tool_calls"] = [
+                tc
+                for tc in tool_calls
+                if t_start <= (tc.get("timestamp") or "") <= t_end
+            ]
+            turn["reasoning"] = [
+                r for r in reasoning if t_start <= (r.get("timestamp") or "") <= t_end
+            ]
+        else:
+            turn["tool_calls"] = [
+                tc
+                for tc in tool_calls
+                if t_start <= (tc.get("timestamp") or "") < t_end
+            ]
+            turn["reasoning"] = [
+                r for r in reasoning if t_start <= (r.get("timestamp") or "") < t_end
+            ]
 
     # ── Step 3: Assign any unassigned tool_calls/reasoning ────────
     # (timestamps outside all turn ranges → last turn)

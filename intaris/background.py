@@ -576,13 +576,15 @@ class BackgroundWorker:
                     children_count = len(result.get("child_sessions", []))
                     if children_count > self.metrics.summary_max_children_per_task:
                         self.metrics.summary_max_children_per_task = children_count
-                    # Event-aware metrics (m3 fix)
+                    # Event-aware metrics
                     if result.get("event_enriched"):
                         self.metrics.summary_event_enriched_total += 1
                         windows_gen = result.get("windows_generated", 0)
                         self.metrics.summary_partitions_total += windows_gen
                     elif result.get("status") != "skipped":
                         self.metrics.summary_audit_only_total += 1
+                    if result.get("event_read_truncated"):
+                        self.metrics.event_read_truncated_total += 1
                 elif task_type == "analysis":
                     result = await self._execute_analysis_task(task)
                     self.metrics.analyses_completed_total += 1
