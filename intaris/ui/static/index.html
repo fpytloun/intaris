@@ -675,7 +675,7 @@
                             </div>
                           </template>
 
-                          <!-- Resolution (if escalated) -->
+                          <!-- Resolution (if escalated and resolved) -->
                           <template x-if="expandedAuditRecord?.user_decision">
                             <div class="mb-2">
                               <div class="text-xs text-muted mb-1">Resolution</div>
@@ -683,6 +683,28 @@
                                 <span :class="decisionBadgeClass(expandedAuditRecord.user_decision)" x-text="expandedAuditRecord.user_decision"></span>
                                 <span class="text-sm" x-text="expandedAuditRecord.user_note" x-show="expandedAuditRecord.user_note"></span>
                                 <span class="text-xs text-muted" x-text="formatTime(expandedAuditRecord.resolved_at)"></span>
+                              </div>
+                            </div>
+                          </template>
+
+                          <!-- Approve/Deny actions (if escalated and NOT yet resolved) -->
+                          <template x-if="expandedAuditRecord?.decision === 'escalate' && !expandedAuditRecord?.user_decision">
+                            <div class="mb-2 pt-2 border-t border-brand-border">
+                              <div class="flex items-end gap-2">
+                                <div class="flex-1">
+                                  <input type="text" placeholder="Optional note..."
+                                         class="input text-sm w-full"
+                                         @click.stop
+                                         x-model="auditNoteText[expandedAuditRecord.call_id]">
+                                </div>
+                                <button @click.stop="resolveEscalation(expandedAuditRecord.call_id, 'approve')"
+                                        :disabled="resolvingAudit[expandedAuditRecord.call_id]"
+                                        class="btn-success text-sm"
+                                        x-text="resolvingAudit[expandedAuditRecord.call_id] ? 'Approving...' : 'Approve'"></button>
+                                <button @click.stop="resolveEscalation(expandedAuditRecord.call_id, 'deny')"
+                                        :disabled="resolvingAudit[expandedAuditRecord.call_id]"
+                                        class="btn-danger text-sm"
+                                        x-text="resolvingAudit[expandedAuditRecord.call_id] ? 'Denying...' : 'Deny'"></button>
                               </div>
                             </div>
                           </template>
@@ -1818,6 +1840,27 @@
                           <span :class="'badge badge-' + ($store.nav.sessionModalAuditRecord.user_decision || 'low')" x-text="$store.nav.sessionModalAuditRecord.user_decision"></span>
                           <span class="text-sm" x-text="$store.nav.sessionModalAuditRecord.user_note" x-show="$store.nav.sessionModalAuditRecord.user_note"></span>
                           <span class="text-xs text-muted" x-text="new Date($store.nav.sessionModalAuditRecord.resolved_at).toLocaleString()"></span>
+                        </div>
+                      </div>
+                    </template>
+                    <!-- Approve/Deny actions (if escalated and NOT yet resolved) -->
+                    <template x-if="$store.nav.sessionModalAuditRecord?.decision === 'escalate' && !$store.nav.sessionModalAuditRecord?.user_decision">
+                      <div class="mb-2 pt-2 border-t border-brand-border">
+                        <div class="flex items-end gap-2">
+                          <div class="flex-1">
+                            <input type="text" placeholder="Optional note..."
+                                   class="input text-sm w-full"
+                                   @click.stop
+                                   x-model="$store.nav.sessionModalNoteText[$store.nav.sessionModalAuditRecord.call_id]">
+                          </div>
+                          <button @click.stop="$store.nav.resolveModalEscalation($store.nav.sessionModalAuditRecord.call_id, 'approve')"
+                                  :disabled="$store.nav.sessionModalResolving[$store.nav.sessionModalAuditRecord.call_id]"
+                                  class="btn-success text-sm"
+                                  x-text="$store.nav.sessionModalResolving[$store.nav.sessionModalAuditRecord.call_id] ? 'Approving...' : 'Approve'"></button>
+                          <button @click.stop="$store.nav.resolveModalEscalation($store.nav.sessionModalAuditRecord.call_id, 'deny')"
+                                  :disabled="$store.nav.sessionModalResolving[$store.nav.sessionModalAuditRecord.call_id]"
+                                  class="btn-danger text-sm"
+                                  x-text="$store.nav.sessionModalResolving[$store.nav.sessionModalAuditRecord.call_id] ? 'Denying...' : 'Deny'"></button>
                         </div>
                       </div>
                     </template>

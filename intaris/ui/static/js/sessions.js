@@ -21,6 +21,8 @@ function sessionsTab() {
     expandedAuditRecord: null,
     auditLimit: 5,
     auditTotal: 0,
+    resolvingAudit: {},
+    auditNoteText: {},
     treeView: true,
     collapsedSessions: {},
 
@@ -533,6 +535,38 @@ function sessionsTab() {
         this.expandedAuditRecord = await IntarisAPI.getAuditRecord(record.call_id);
       } catch (e) {
         this.expandedAuditRecord = record;
+      }
+    },
+
+    /**
+     * Resolve an escalated audit record (approve/deny) from the session detail.
+     */
+    async resolveEscalation(callId, decision) {
+      if (!callId || !decision) return;
+      if (this.resolvingAudit[callId]) return;
+      this.resolvingAudit = { ...this.resolvingAudit, [callId]: true };
+      try {
+        const note = this.auditNoteText[callId] || null;
+        await IntarisAPI.resolveDecision(callId, decision, note);
+        Alpine.store('notify').success(
+          `Call ${decision === 'approve' ? 'approved' : 'denied'}`
+        );
+        // Update the record in-place so the UI reflects the resolution
+        const record = this.sessionAudit.find(r => r.call_id === callId);
+        if (record) {
+          record.user_decision = decision;
+        }
+        if (this.expandedAuditRecord && this.expandedAuditRecord.call_id === callId) {
+          this.expandedAuditRecord.user_decision = decision;
+          this.expandedAuditRecord.user_note = note;
+          this.expandedAuditRecord.resolved_at = new Date().toISOString();
+        }
+        delete this.auditNoteText[callId];
+      } catch (e) {
+        Alpine.store('notify').error('Failed to resolve: ' + (e.message || String(e)));
+      } finally {
+        const { [callId]: _, ...rest } = this.resolvingAudit;
+        this.resolvingAudit = rest;
       }
     },
 

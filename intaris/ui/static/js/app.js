@@ -146,6 +146,8 @@ document.addEventListener('alpine:init', () => {
     sessionModalLoading: false,
     sessionModalAuditExpandedId: null,
     sessionModalAuditRecord: null,
+    sessionModalResolving: {},
+    sessionModalNoteText: {},
 
     setTab(tab) {
       this.activeTab = tab;
@@ -208,6 +210,32 @@ document.addEventListener('alpine:init', () => {
         this.sessionModalAuditRecord = await IntarisAPI.getAuditRecord(record.call_id);
       } catch (e) {
         this.sessionModalAuditRecord = record;
+      }
+    },
+
+    async resolveModalEscalation(callId, decision) {
+      if (!callId || !decision) return;
+      if (this.sessionModalResolving[callId]) return;
+      this.sessionModalResolving = { ...this.sessionModalResolving, [callId]: true };
+      try {
+        const note = this.sessionModalNoteText[callId] || null;
+        await IntarisAPI.resolveDecision(callId, decision, note);
+        Alpine.store('notify').success(
+          `Call ${decision === 'approve' ? 'approved' : 'denied'}`
+        );
+        const record = this.sessionModalAudit.find(r => r.call_id === callId);
+        if (record) record.user_decision = decision;
+        if (this.sessionModalAuditRecord && this.sessionModalAuditRecord.call_id === callId) {
+          this.sessionModalAuditRecord.user_decision = decision;
+          this.sessionModalAuditRecord.user_note = note;
+          this.sessionModalAuditRecord.resolved_at = new Date().toISOString();
+        }
+        delete this.sessionModalNoteText[callId];
+      } catch (e) {
+        Alpine.store('notify').error('Failed to resolve: ' + (e.message || String(e)));
+      } finally {
+        const { [callId]: _, ...rest } = this.sessionModalResolving;
+        this.sessionModalResolving = rest;
       }
     },
 
