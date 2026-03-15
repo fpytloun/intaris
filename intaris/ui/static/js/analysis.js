@@ -311,23 +311,8 @@ function analysisTab() {
 
     // ── Chart rendering ────────────────────────────────────────────
 
-    get hasChartData() {
-      return this.analyses.length > 0;
-    },
-
-    _renderAllCharts(retries = 5) {
+    _renderAllCharts() {
       if (!this.analyses.length || typeof Chart === 'undefined') return;
-
-      // Wait for canvases to become visible — Alpine x-show may not
-      // have flushed yet after reactive updates.  Retry a few times
-      // with a short delay instead of silently skipping.
-      const testCanvas = document.getElementById('analysisCategoriesChart');
-      if (!testCanvas || testCanvas.offsetParent === null) {
-        if (retries > 0) {
-          setTimeout(() => this._renderAllCharts(retries - 1), 50);
-        }
-        return;
-      }
 
       const latest = this._latestAnalysis();
       const latestFindings = latest?.findings || [];
@@ -434,7 +419,7 @@ function analysisTab() {
     _updateDoughnut(canvasId, data, colorMap) {
       const chart = this._charts[canvasId];
       if (!chart || !data) return;
-      if (!chart.canvas || !chart.canvas.isConnected || chart.canvas.offsetParent === null) return;
+      if (!chart.canvas || !chart.canvas.isConnected) return;
 
       const labels = Object.keys(data);
       const values = Object.values(data);

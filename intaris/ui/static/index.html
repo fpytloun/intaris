@@ -1131,7 +1131,7 @@
         </div>
 
         <!-- Analysis Charts -->
-        <div class="card mb-6" x-show="hasChartData" x-cloak>
+        <div class="card mb-6" x-show="initialized && analyses.length > 0">
           <h2 class="text-lg font-medium mb-4">Analysis Trends</h2>
 
           <!-- Doughnut row (latest analysis, session counts) -->

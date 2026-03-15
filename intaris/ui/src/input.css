@@ -205,7 +205,7 @@
 
   .chart-container-doughnut-wide {
     @apply w-full;
-    height: 200px;
+    height: 250px;
   }
 
   .chart-container-timeline {
