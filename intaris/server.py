@@ -356,12 +356,20 @@ async def lifespan(app):
     logger.info("EventBus initialized")
 
     # Initialize intention barrier for immediate user-driven updates
-    from intaris.intention import IntentionBarrier
+    from intaris.intention import (
+        _DEFAULT_POLL_TIMEOUT_MS,
+        _DEFAULT_TIMEOUT_MS,
+        IntentionBarrier,
+    )
     from intaris.llm import LLMClient
 
-    barrier_timeout_ms = int(os.environ.get("INTENTION_BARRIER_TIMEOUT_MS", "1000"))
+    barrier_timeout_ms = int(
+        os.environ.get("INTENTION_BARRIER_TIMEOUT_MS", str(_DEFAULT_TIMEOUT_MS))
+    )
     barrier_poll_timeout_ms = int(
-        os.environ.get("INTENTION_BARRIER_POLL_TIMEOUT_MS", "2000")
+        os.environ.get(
+            "INTENTION_BARRIER_POLL_TIMEOUT_MS", str(_DEFAULT_POLL_TIMEOUT_MS)
+        )
     )
     analysis_llm: LLMClient | None = None
     if cfg.analysis.enabled and cfg.llm_analysis.api_key:
