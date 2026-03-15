@@ -305,6 +305,19 @@ const IntarisAPI = {
     return this.post(`/analysis/trigger${query ? '?' + query : ''}`);
   },
 
+  /**
+   * Backfill session summaries for recent sessions.
+   * @param {Object} params - { lookback_days, force, agent_id }
+   */
+  backfillSummaries(params = {}) {
+    const qs = new URLSearchParams();
+    if (params.lookback_days != null) qs.set('lookback_days', params.lookback_days);
+    if (params.force) qs.set('force', 'true');
+    if (params.agent_id) qs.set('agent_id', params.agent_id);
+    const query = qs.toString();
+    return this.post(`/summaries/backfill${query ? '?' + query : ''}`);
+  },
+
   // ── WebSocket ───────────────────────────────────────────────
 
   /**

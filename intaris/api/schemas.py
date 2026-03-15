@@ -339,6 +339,13 @@ class SummaryTriggerResponse(BaseModel):
     task_id: str | None = Field(None, description="Enqueued task ID")
 
 
+class BackfillSummariesResponse(BaseModel):
+    """Response from summary backfill trigger."""
+
+    enqueued: int = Field(description="Number of summary tasks enqueued")
+    skipped: int = Field(description="Number of sessions skipped (duplicate pending)")
+
+
 class SessionSummaryRecord(BaseModel):
     """Intaris-generated session summary."""
 

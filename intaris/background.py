@@ -1289,7 +1289,6 @@ class BackgroundWorker:
                         WHERE status IN ('idle', 'completed',
                                          'terminated', 'suspended')
                           AND summary_count = 0
-                          AND total_calls > 0
                           AND last_activity_at >= ?
                         """,
                         (cutoff,),

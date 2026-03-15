@@ -219,6 +219,11 @@ function analysisTab() {
 
     // Actions
     triggeringAnalysis: false,
+    backfillingSummaries: false,
+    showBackfillModal: false,
+    backfillDays: 7,
+    backfillForce: false,
+    backfillResult: null,
 
     init() {
       this.loadData();
@@ -302,6 +307,28 @@ function analysisTab() {
         Alpine.store('notify')?.error(e.message || 'Failed to trigger analysis');
       } finally {
         this.triggeringAnalysis = false;
+      }
+    },
+
+    async backfillSummaries() {
+      this.backfillingSummaries = true;
+      this.backfillResult = null;
+      try {
+        const params = {
+          lookback_days: this.backfillDays,
+          force: this.backfillForce,
+        };
+        const agent = this._agentFilter();
+        if (agent) params.agent_id = agent;
+        const result = await IntarisAPI.backfillSummaries(params);
+        this.backfillResult = result;
+        Alpine.store('notify')?.success(
+          `Backfill: ${result.enqueued} enqueued, ${result.skipped} skipped`
+        );
+      } catch (e) {
+        Alpine.store('notify')?.error(e.message || 'Backfill failed');
+      } finally {
+        this.backfillingSummaries = false;
       }
     },
 

@@ -1043,11 +1043,16 @@
               <h2 class="text-lg font-medium">Behavioral Profile</h2>
               <span x-show="profile.agent_id" class="text-xs font-mono text-muted px-2 py-0.5 rounded bg-surface-tertiary" x-text="profile.agent_id"></span>
             </div>
-            <button @click="triggerAnalysis()" class="btn-primary text-sm"
-                    :disabled="triggeringAnalysis">
-              <span x-show="!triggeringAnalysis">Trigger Analysis</span>
-              <span x-show="triggeringAnalysis">Running...</span>
-            </button>
+            <div class="flex items-center gap-2">
+              <button @click="triggerAnalysis()" class="btn-primary text-sm"
+                      :disabled="triggeringAnalysis">
+                <span x-show="!triggeringAnalysis">Trigger Analysis</span>
+                <span x-show="triggeringAnalysis">Running...</span>
+              </button>
+              <button @click="showBackfillModal = true; backfillResult = null" class="btn-secondary text-sm">
+                Backfill Summaries
+              </button>
+            </div>
           </div>
 
           <div x-show="profileLoading" class="text-center py-8 text-secondary">Loading profile...</div>
@@ -1263,6 +1268,55 @@
               <span class="text-xs text-secondary py-1" x-text="`${analysesPage} / ${analysesPages}`"></span>
               <button @click="loadAnalyses(analysesPage + 1)" :disabled="analysesPage >= analysesPages"
                       class="btn-ghost text-xs">Next</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Backfill Summaries Modal -->
+        <div x-show="showBackfillModal" x-cloak
+             class="modal-overlay" @click.self="showBackfillModal = false" @keydown.escape.window="showBackfillModal = false">
+          <div class="modal-content max-w-md" @click.stop>
+            <h3 class="text-lg font-medium mb-3">Backfill Session Summaries</h3>
+            <p class="text-sm text-secondary mb-4">
+              Generate summaries for sessions within the lookback window.
+              Summaries are processed in the background.
+            </p>
+
+            <div class="space-y-3 mb-4">
+              <div>
+                <label class="block text-xs text-secondary mb-1">Lookback days</label>
+                <input type="number" x-model.number="backfillDays" min="1" max="365"
+                       class="w-full bg-surface-secondary border border-border rounded px-3 py-1.5 text-sm">
+              </div>
+
+              <label class="flex items-center gap-2 text-sm">
+                <input type="checkbox" x-model="backfillForce"
+                       class="rounded border-border bg-surface-secondary">
+                <span>Force re-evaluation</span>
+                <span class="text-xs text-muted">(include sessions that already have summaries)</span>
+              </label>
+
+              <div class="text-xs text-muted">
+                Scope:
+                <span x-text="$store.nav.selectedAgent ? 'Agent: ' + $store.nav.selectedAgent : 'All agents'"></span>
+              </div>
+            </div>
+
+            <!-- Result display -->
+            <template x-if="backfillResult">
+              <div class="text-sm mb-3 px-3 py-2 rounded bg-surface-tertiary">
+                Enqueued <span class="font-medium" x-text="backfillResult.enqueued"></span> sessions,
+                skipped <span class="font-medium" x-text="backfillResult.skipped"></span>
+              </div>
+            </template>
+
+            <div class="flex justify-end gap-2">
+              <button @click="showBackfillModal = false" class="btn-ghost text-sm">Cancel</button>
+              <button @click="backfillSummaries()" class="btn-primary text-sm"
+                      :disabled="backfillingSummaries">
+                <span x-show="!backfillingSummaries">Run Backfill</span>
+                <span x-show="backfillingSummaries">Running...</span>
+              </button>
             </div>
           </div>
         </div>

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -22,6 +23,7 @@ from intaris.api.schemas import (
     AnalysisListResponse,
     AnalysisRecord,
     AnalysisTriggerResponse,
+    BackfillSummariesResponse,
     CheckpointRequest,
     CheckpointResponse,
     ProfileResponse,
@@ -300,8 +302,6 @@ async def submit_agent_summary(
     Stored in a separate table (agent_summaries) — NEVER mixed into
     Intaris analysis prompts. Used for post-hoc comparison only.
     """
-    from datetime import datetime, timezone
-
     from intaris.server import _get_db
 
     try:
@@ -515,6 +515,99 @@ async def trigger_analysis(
         raise HTTPException(
             status_code=500,
             detail="Internal error triggering analysis",
+        )
+
+
+@router.post("/summaries/backfill", response_model=BackfillSummariesResponse)
+async def backfill_summaries(
+    http_request: Request,
+    ctx: SessionContext = Depends(get_session_context),
+    lookback_days: int = Query(7, ge=1, le=365, description="Days to look back"),
+    force: bool = Query(
+        False, description="Include sessions that already have summaries"
+    ),
+    agent_id: str | None = Query(None, description="Filter by agent ID"),
+) -> BackfillSummariesResponse:
+    """Backfill session summaries for recent sessions.
+
+    Enqueues summary tasks for sessions within the lookback window that
+    are missing summaries. When *force* is set, also re-evaluates
+    sessions that already have summaries.
+    """
+    from intaris.server import _get_db
+
+    worker = getattr(http_request.app.state, "background_worker", None)
+    if worker is None or not worker._config.enabled:
+        raise HTTPException(
+            status_code=404,
+            detail="Behavioral analysis is not enabled",
+        )
+
+    try:
+        db = _get_db()
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=lookback_days)
+        ).isoformat()
+
+        # Build query — find sessions needing summaries.
+        # Unlike _startup_catchup (which skips active sessions), the
+        # manual backfill includes ALL statuses since the user
+        # explicitly requested it.
+        _MAX_BACKFILL = 1000
+        conditions = ["user_id = ?", "last_activity_at >= ?"]
+        params: list[str | int] = [ctx.user_id, cutoff]
+
+        if not force:
+            conditions.append("summary_count = 0")
+
+        if agent_id:
+            conditions.append("agent_id = ?")
+            params.append(agent_id)
+
+        where = " AND ".join(conditions)
+        with db.cursor() as cur:
+            cur.execute(
+                f"SELECT user_id, session_id FROM sessions WHERE {where} LIMIT ?",
+                (*params, _MAX_BACKFILL),
+            )
+            rows = cur.fetchall()
+
+        task_queue = worker._task_queue
+        enqueued = 0
+        skipped = 0
+
+        for row in rows:
+            uid = row["user_id"] if isinstance(row, dict) else row[0]
+            sid = row["session_id"] if isinstance(row, dict) else row[1]
+            if task_queue.cancel_duplicate("summary", uid, sid):
+                skipped += 1
+            else:
+                task_queue.enqueue(
+                    "summary",
+                    uid,
+                    session_id=sid,
+                    payload={"trigger": "manual"},
+                    priority=1,
+                )
+                enqueued += 1
+
+        logger.info(
+            "Summary backfill: user=%s agent=%s lookback=%dd force=%s "
+            "enqueued=%d skipped=%d",
+            ctx.user_id,
+            agent_id or "all",
+            lookback_days,
+            force,
+            enqueued,
+            skipped,
+        )
+
+        return BackfillSummariesResponse(enqueued=enqueued, skipped=skipped)
+    except Exception:
+        logger.exception("Error in /summaries/backfill")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error during summary backfill",
         )
 
 
