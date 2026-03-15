@@ -556,12 +556,11 @@ async def backfill_summaries(
         # Build query — find sessions needing summaries.
         # Unlike _startup_catchup (which skips active sessions), the
         # manual backfill includes ALL statuses since the user
-        # explicitly requested it.
+        # explicitly requested it. We always fetch all sessions and
+        # filter by summary_count in Python so that `skipped` reflects
+        # sessions that already have summaries.
         conditions = ["user_id = ?", "last_activity_at >= ?"]
         params: list[str | int] = [ctx.user_id, cutoff]
-
-        if not force:
-            conditions.append("summary_count = 0")
 
         if agent_id:
             conditions.append("agent_id = ?")
@@ -570,7 +569,8 @@ async def backfill_summaries(
         where = " AND ".join(conditions)
         with db.cursor() as cur:
             cur.execute(
-                f"SELECT user_id, session_id FROM sessions WHERE {where} LIMIT ?",
+                f"SELECT user_id, session_id, summary_count "
+                f"FROM sessions WHERE {where} LIMIT ?",
                 (*params, _BACKFILL_SESSION_LIMIT),
             )
             rows = cur.fetchall()
@@ -582,9 +582,13 @@ async def backfill_summaries(
         for row in rows:
             uid = row["user_id"] if isinstance(row, dict) else row[0]
             sid = row["session_id"] if isinstance(row, dict) else row[1]
-            if task_queue.cancel_duplicate("summary", uid, sid):
+            sc = row["summary_count"] if isinstance(row, dict) else row[2]
+
+            if not force and (sc or 0) > 0:
                 skipped += 1
-            else:
+                continue
+
+            if not task_queue.cancel_duplicate("summary", uid, sid):
                 task_queue.enqueue(
                     "summary",
                     uid,
