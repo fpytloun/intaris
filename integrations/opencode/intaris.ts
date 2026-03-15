@@ -347,10 +347,14 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
    */
   function buildPolicy(): Record<string, any> | null {
     const home = process.env.HOME || process.env.USERPROFILE || ""
-    // Always allow reads from OpenCode's tool output directory
-    const builtinPaths = home
-      ? [`${home}/.local/share/opencode/*`]
-      : []
+    // Always allow reads from OpenCode's tool output directory and the project directory
+    const builtinPaths: string[] = []
+    if (home) {
+      builtinPaths.push(`${home}/.local/share/opencode/*`)
+    }
+    if (workingDirectory) {
+      builtinPaths.push(`${workingDirectory}/*`)
+    }
     const userPatterns = allowPathsRaw
       ? allowPathsRaw
           .split(",")
