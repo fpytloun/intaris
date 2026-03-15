@@ -357,7 +357,7 @@
                           'badge-fast': session.last_alignment === 'unclear',
                         }"
                         x-text="session.last_alignment"
-                        class="text-xs"></span>
+                        class="badge"></span>
                   <span class="font-mono text-sm text-brand-accent" x-html="highlightMatch(session.session_id)"></span>
                   <span x-show="session.parent_session_id && !session.details?.agent_type" class="text-xs text-muted">(child)</span>
                   <!-- Child count indicator when collapsed -->
