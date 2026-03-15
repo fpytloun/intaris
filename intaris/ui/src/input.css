@@ -181,6 +181,35 @@
            shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6;
   }
 
+  /* Tooltip on hover — reusable via .has-tooltip + data-tooltip attribute */
+  .has-tooltip {
+    position: relative;
+  }
+  .has-tooltip::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 0;
+    background: theme('colors.slate.800');
+    color: theme('colors.slate.300');
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: normal;
+    white-space: normal;
+    max-width: 300px;
+    width: max-content;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+    z-index: 50;
+    border: 1px solid theme('colors.slate.600');
+    line-height: 1.4;
+  }
+  .has-tooltip:hover::after {
+    opacity: 1;
+  }
+
   /* Tree display styles for parent/child sessions */
   .session-child {
     @apply ml-6 border-l-2 border-brand-border;

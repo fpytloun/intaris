@@ -496,7 +496,7 @@
                                 <span class="px-1.5 py-0.5 rounded text-center"
                                       :class="severityBadgeClass(ind.severity)"
                                       x-text="riskBand(ind.severity).toUpperCase()"></span>
-                                <span class="font-medium whitespace-nowrap" x-text="ind.indicator"></span>
+                                <span class="font-medium whitespace-nowrap"><span x-text="ind.indicator"></span><span x-show="riskTooltip(ind.indicator)" class="has-tooltip text-muted/60 cursor-help ml-0.5" :data-tooltip="riskTooltip(ind.indicator)">?</span></span>
                                 <span class="text-secondary" x-text="ind.detail"></span>
                               </div>
                             </template>
@@ -553,7 +553,7 @@
                                         <span class="px-1.5 py-0.5 rounded text-center"
                                               :class="severityBadgeClass(ind.severity)"
                                               x-text="riskBand(ind.severity).toUpperCase()"></span>
-                                        <span class="font-medium whitespace-nowrap" x-text="ind.indicator"></span>
+                                        <span class="font-medium whitespace-nowrap"><span x-text="ind.indicator"></span><span x-show="riskTooltip(ind.indicator)" class="has-tooltip text-muted/60 cursor-help ml-0.5" :data-tooltip="riskTooltip(ind.indicator)">?</span></span>
                                         <span class="text-secondary" x-text="ind.detail"></span>
                                       </div>
                                     </template>
@@ -1148,7 +1148,7 @@
                             :class="severityBadgeClass(alert.severity)"
                             x-text="riskBand(alert.severity).toUpperCase()"></span>
                       <div>
-                        <div class="text-sm font-medium" x-text="alert.category"></div>
+                        <div class="text-sm font-medium"><span x-text="alert.category"></span><span x-show="riskTooltip(alert.category)" class="has-tooltip text-muted/60 cursor-help ml-0.5 text-xs" :data-tooltip="riskTooltip(alert.category)">?</span></div>
                         <div class="text-xs text-secondary" x-text="alert.detail || alert.summary || ''"></div>
                       </div>
                     </div>
@@ -1282,7 +1282,7 @@
                                       ...severityBadgeClass(finding.severity),
                                     }"
                                     x-text="riskBand(finding.severity).toUpperCase()"></span>
-                              <span class="text-sm font-medium" x-text="finding.category"></span>
+                              <span class="text-sm font-medium"><span x-text="finding.category"></span><span x-show="riskTooltip(finding.category)" class="has-tooltip text-muted/60 cursor-help ml-0.5 text-xs" :data-tooltip="riskTooltip(finding.category)">?</span></span>
                             </div>
                             <div class="text-xs text-secondary" x-text="finding.detail || finding.summary || ''"></div>
                             <template x-if="finding.session_ids && finding.session_ids.length > 0">
@@ -2034,7 +2034,7 @@
                                 <span class="px-1.5 py-0.5 rounded text-center"
                                       :class="severityBadgeClass(ind.severity)"
                                       x-text="riskBand(ind.severity).toUpperCase()"></span>
-                                <span class="font-medium whitespace-nowrap" x-text="ind.indicator"></span>
+                                <span class="font-medium whitespace-nowrap"><span x-text="ind.indicator"></span><span x-show="riskTooltip(ind.indicator)" class="has-tooltip text-muted/60 cursor-help ml-0.5" :data-tooltip="riskTooltip(ind.indicator)">?</span></span>
                                 <span class="text-secondary" x-text="ind.detail || ind.summary || ''"></span>
                               </div>
                             </template>
@@ -2085,7 +2085,7 @@
                                         <span class="px-1.5 py-0.5 rounded text-center"
                                               :class="severityBadgeClass(ind.severity)"
                                               x-text="riskBand(ind.severity).toUpperCase()"></span>
-                                        <span class="font-medium whitespace-nowrap" x-text="ind.indicator"></span>
+                                        <span class="font-medium whitespace-nowrap"><span x-text="ind.indicator"></span><span x-show="riskTooltip(ind.indicator)" class="has-tooltip text-muted/60 cursor-help ml-0.5" :data-tooltip="riskTooltip(ind.indicator)">?</span></span>
                                         <span class="text-secondary" x-text="ind.detail || ind.summary || ''"></span>
                                       </div>
                                     </template>

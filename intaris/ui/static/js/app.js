@@ -66,6 +66,38 @@ function riskScoreChartColor(score) {
   return '#F87171'; // red
 }
 
+// ── Risk indicator / finding category tooltips ──────────────────────
+// Descriptions for hover tooltips on risk indicator and finding category names.
+// Used with the .has-tooltip CSS class and data-tooltip attribute.
+
+const RISK_TOOLTIPS = {
+  // L2 session risk indicators
+  intent_drift: 'Agent gradually shifting away from declared intention',
+  restriction_circumvention: 'Attempts to bypass safety denials (retrying denied operations)',
+  scope_creep: 'Accessing resources beyond expected project scope',
+  insecure_reasoning: 'Reasoning that suggests unsafe decision-making',
+  unusual_tool_pattern: 'Unexpected tool usage sequences or frequencies',
+  injection_attempt: 'Signs of prompt injection in tool args or reasoning',
+  escalation_pattern: 'Increasing frequency of denied or escalated calls',
+  delegation_misalignment: 'Sub-session actions diverge from parent session intention',
+  // L3 cross-session finding categories (positive)
+  consistent_alignment: 'Agent consistently follows declared intentions across sessions',
+  normal_development: 'Standard development activity with no concerning patterns',
+  improving_posture: 'Risk indicators or misalignment decreasing over time',
+  // L3 cross-session finding categories (concerning)
+  coordinated_access: 'Sessions together access broader resources than any single intention justifies',
+  progressive_escalation: 'Behavior becoming measurably riskier over time',
+  intent_masking: 'Individual intentions appear benign but collectively suggest a different goal',
+  tool_abuse: 'Repeated misuse of specific tools across sessions',
+  persistent_misalignment: 'Consistent partial or full misalignment across multiple sessions',
+  insecure_reasoning_pattern: 'Recurring patterns of unsafe or confused reasoning across sessions',
+};
+
+/** Get tooltip description for a risk indicator or finding category name. */
+function riskTooltip(name) {
+  return RISK_TOOLTIPS[name] || '';
+}
+
 // ── Task progress polling helper ─────────────────────────────────────
 
 /**
