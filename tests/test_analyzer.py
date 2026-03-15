@@ -208,12 +208,11 @@ class TestGenerateSummary:
         assert result["status"] == "skipped"
         assert "No LLM client" in result["reason"]
 
-    def test_skips_when_insufficient_data(
-        self, db, session_store, audit_store, mock_llm
-    ):
-        """Returns skipped when fewer than _MIN_WINDOW_RECORDS tool calls."""
+    def test_skips_when_no_data(self, db, session_store, audit_store, mock_llm):
+        """Returns skipped when the window has zero data (no tool calls,
+        no events, no reasoning records)."""
         _create_session(session_store)
-        _insert_tool_calls(audit_store, count=2)
+        # No tool calls, no reasoning — truly empty window
         from intaris.analyzer import generate_summary
 
         result = asyncio.run(generate_summary(db, mock_llm, _make_task()))

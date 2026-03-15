@@ -43,8 +43,6 @@ _MAX_REASONING_ENTRIES = 20
 _MAX_REASONING_CHARS = 300
 _MAX_USER_MESSAGES = 30
 _MAX_PRIOR_SUMMARY_CHARS = 500
-# Minimum tool_call records in a window to generate a summary
-_MIN_WINDOW_RECORDS = 3
 # Maximum sessions to include in L3 analysis prompt
 _MAX_L3_SESSIONS = 50
 # Maximum child sessions to include in parent summary (ARB M2)
@@ -153,8 +151,7 @@ async def generate_summary(
         children_needing_summaries = [
             c
             for c in children
-            if c.get("summary_count", 0) == 0
-            and (c.get("total_calls", 0) or 0) >= _MIN_WINDOW_RECORDS
+            if c.get("summary_count", 0) == 0 and (c.get("total_calls", 0) or 0) > 0
         ]
 
         if children_needing_summaries and parent_check_count < _MAX_PARENT_RECHECK:
@@ -228,9 +225,11 @@ async def generate_summary(
         else:
             agent_reasoning.append(rec)
 
-    # For event-enriched path: conversation alone is sufficient (M2 fix).
-    # For audit_log-only path: need at least _MIN_WINDOW_RECORDS tool calls.
-    has_sufficient_data = event_enriched or len(tool_calls) >= _MIN_WINDOW_RECORDS
+    # Any data in the window is sufficient to generate a summary.
+    # Even a single tool call or user message is worth analyzing.
+    has_sufficient_data = bool(
+        conversation or tool_calls or user_messages or agent_reasoning
+    )
 
     # Count existing windows once (used for both early-exit and window numbering)
     prior_window_count = _count_prior_summaries(db, user_id, session_id)

@@ -57,6 +57,9 @@ class Metrics:
         self.summary_audit_only_total: int = 0
         self.summary_partitions_total: int = 0
         self.event_read_truncated_total: int = 0
+        # Liveness timestamps (ISO 8601)
+        self.last_worker_poll: str = ""
+        self.last_idle_sweep: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         """Export metrics as a dict for health check response."""
@@ -76,6 +79,8 @@ class Metrics:
             "summary_audit_only_total": self.summary_audit_only_total,
             "summary_partitions_total": self.summary_partitions_total,
             "event_read_truncated_total": self.event_read_truncated_total,
+            "last_worker_poll": self.last_worker_poll,
+            "last_idle_sweep": self.last_idle_sweep,
         }
 
 
@@ -275,28 +280,54 @@ class TaskQueue:
                     error,
                 )
 
-    def reset_stale_running(self) -> int:
+    def reset_stale_running(self, max_age_minutes: int = 0) -> int:
         """Reset tasks stuck in 'running' state back to 'pending'.
 
-        Called on startup to recover from server crashes that left
-        tasks in an incomplete state.
+        Called on startup (max_age_minutes=0 resets all) and periodically
+        by the worker loop (max_age_minutes>0 resets only tasks stuck
+        longer than the threshold).
+
+        Args:
+            max_age_minutes: Only reset tasks whose next_attempt_at is
+                older than this many minutes. 0 = reset all running tasks
+                (startup behavior).
 
         Returns:
             Number of tasks reset.
         """
         now = datetime.now(timezone.utc).isoformat()
-        with self._db.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE analysis_tasks
-                SET status = 'pending', next_attempt_at = ?
-                WHERE status = 'running'
-                """,
-                (now,),
-            )
-            count = cur.rowcount
+        if max_age_minutes > 0:
+            cutoff = (
+                datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+            ).isoformat()
+            with self._db.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE analysis_tasks
+                    SET status = 'pending', next_attempt_at = ?
+                    WHERE status = 'running'
+                      AND next_attempt_at < ?
+                    """,
+                    (now, cutoff),
+                )
+                count = cur.rowcount
+        else:
+            with self._db.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE analysis_tasks
+                    SET status = 'pending', next_attempt_at = ?
+                    WHERE status = 'running'
+                    """,
+                    (now,),
+                )
+                count = cur.rowcount
         if count > 0:
-            logger.info("Reset %d stale running tasks to pending", count)
+            logger.info(
+                "Reset %d stale running tasks to pending (max_age=%dm)",
+                count,
+                max_age_minutes,
+            )
         return count
 
     def cancel_duplicate(
@@ -553,12 +584,29 @@ class BackgroundWorker:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, max_backoff)
             else:
-                # Normal exit (shouldn't happen for infinite loops)
-                return
+                # Normal exit — loop functions should run forever while
+                # self._running is True. Log and restart (indicates a bug).
+                logger.warning(
+                    "Background loop '%s' exited normally (unexpected), restarting",
+                    name,
+                )
+                backoff = 5  # Reset backoff on normal exit
 
     async def _worker_loop(self) -> None:
         """Poll task queue and execute tasks."""
+        stale_check_counter = 0
+
         while self._running:
+            self.metrics.last_worker_poll = datetime.now(timezone.utc).isoformat()
+
+            # Periodically reset tasks stuck in 'running' state.
+            # Every ~50 iterations (~500s / ~8 min) check for tasks
+            # that have been running for more than 10 minutes.
+            stale_check_counter += 1
+            if stale_check_counter >= 50:
+                stale_check_counter = 0
+                self._task_queue.reset_stale_running(max_age_minutes=10)
+
             task = self._task_queue.claim_next()
             if task is None:
                 # Update queue depth metric
@@ -613,6 +661,17 @@ class BackgroundWorker:
                     result = await self._execute_intention_update_task(task)
                 else:
                     result = {"error": f"Unknown task type: {task_type}"}
+
+                # Distinguish transient failures from legitimate skips.
+                # Errors and transient failures should be retried via fail().
+                # Legitimate skips (e.g., no data in window) are completed.
+                if result.get("error"):
+                    raise RuntimeError(f"Task returned error: {result['error']}")
+                skip_reason = result.get("reason", "")
+                if result.get("status") == "skipped" and (
+                    "No LLM" in skip_reason or "not found" in skip_reason.lower()
+                ):
+                    raise RuntimeError(f"Task skipped (transient): {skip_reason}")
 
                 self._task_queue.complete(task_id, result)
             except Exception as e:
@@ -943,6 +1002,8 @@ class BackgroundWorker:
         while self._running:
             await asyncio.sleep(300)  # 5 minutes
 
+            self.metrics.last_idle_sweep = datetime.now(timezone.utc).isoformat()
+
             cutoff = (
                 datetime.now(timezone.utc)
                 - timedelta(minutes=self._config.session_idle_timeout_min)
@@ -982,6 +1043,13 @@ class BackgroundWorker:
                                 payload={"trigger": "inactivity"},
                                 priority=1,
                             )
+                        else:
+                            logger.debug(
+                                "Idle sweep: skipped summary for %s/%s "
+                                "(duplicate task exists)",
+                                user_id,
+                                session_id,
+                            )
 
             # Auto-complete idle child sessions (sub-agent defense-in-depth).
             # Child sessions use a shorter idle timeout since sub-agents
@@ -1020,6 +1088,13 @@ class BackgroundWorker:
                                 session_id=session_id,
                                 payload={"trigger": "close"},
                                 priority=2,
+                            )
+                        else:
+                            logger.debug(
+                                "Idle sweep: skipped child summary for %s/%s "
+                                "(duplicate task exists)",
+                                user_id,
+                                session_id,
                             )
 
     async def _periodic_scheduler(self) -> None:
@@ -1087,13 +1162,55 @@ class BackgroundWorker:
         """Recover from server crashes on startup.
 
         1. Reset stale running tasks back to pending.
-        2. Check for sessions needing summaries (if analyzer ready).
+        2. Enqueue summaries for idle/completed sessions that never got one.
         3. Check profile staleness.
         """
         # Reset tasks stuck in running state
         reset_count = self._task_queue.reset_stale_running()
         if reset_count:
             logger.info("Startup catch-up: reset %d stale tasks", reset_count)
+
+        # Enqueue summaries for idle/completed sessions without summaries.
+        # These could be orphaned by a crash between idle transition and
+        # task enqueue, or by a task that failed permanently.
+        if self.analyzer_ready:
+            try:
+                with self._db.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT user_id, session_id FROM sessions
+                        WHERE status IN ('idle', 'completed')
+                          AND summary_count = 0
+                          AND total_calls > 0
+                        """
+                    )
+                    orphaned = cur.fetchall()
+
+                enqueued = 0
+                for row in orphaned:
+                    uid = row["user_id"] if isinstance(row, dict) else row[0]
+                    sid = row["session_id"] if isinstance(row, dict) else row[1]
+                    if not self._task_queue.cancel_duplicate("summary", uid, sid):
+                        self._task_queue.enqueue(
+                            "summary",
+                            uid,
+                            session_id=sid,
+                            payload={"trigger": "startup_catchup"},
+                            priority=1,
+                        )
+                        enqueued += 1
+
+                if enqueued:
+                    logger.info(
+                        "Startup catch-up: enqueued summaries for %d "
+                        "idle/completed sessions",
+                        enqueued,
+                    )
+            except Exception:
+                logger.warning(
+                    "Startup catch-up: failed to scan for orphaned sessions",
+                    exc_info=True,
+                )
 
         # Update initial metrics
         stats = self._task_queue.get_queue_stats()

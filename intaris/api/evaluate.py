@@ -249,9 +249,10 @@ async def evaluate(
                 threshold = cfg.analysis.summary_volume_threshold
                 if threshold > 0:
                     # Get current total from the session (just incremented)
+                    from intaris.server import _get_db
                     from intaris.session import SessionStore
 
-                    _db = getattr(http_request.app.state, "db", None)
+                    _db = _get_db()
                     if _db is not None:
                         _sess = SessionStore(_db).get(
                             request.session_id, user_id=ctx.user_id
