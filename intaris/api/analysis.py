@@ -140,6 +140,12 @@ async def submit_reasoning(
         # task; the next POST /evaluate will wait for it to complete.
         # Only triggers for user messages, not agent reasoning.
         if sanitized.startswith("User message:"):
+            logger.debug(
+                "Received user message for %s/%s (context_len=%d)",
+                ctx.user_id,
+                request.session_id,
+                len(request.context or ""),
+            )
             barrier = getattr(http_request.app.state, "intention_barrier", None)
             if barrier is not None:
                 try:
