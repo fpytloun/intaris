@@ -1262,7 +1262,7 @@
                     <div>
                       <div class="text-xs text-secondary font-medium mb-1">Findings</div>
                       <div class="space-y-2">
-                        <template x-for="(finding, i) in analysis.findings" :key="i">
+                        <template x-for="(finding, i) in [...analysis.findings].sort((a, b) => (b.severity || 0) - (a.severity || 0))" :key="i">
                           <div class="bg-surface rounded-lg p-3">
                             <div class="flex items-center gap-2 mb-1">
                               <span class="text-xs font-medium px-2 py-0.5 rounded"
@@ -1294,7 +1294,7 @@
                     <div>
                       <div class="text-xs text-secondary font-medium mb-1">Recommendations</div>
                       <div class="space-y-2">
-                        <template x-for="(rec, i) in analysis.recommendations" :key="i">
+                        <template x-for="(rec, i) in [...analysis.recommendations].sort((a, b) => ({high:0,medium:1,low:2}[a.priority] ?? 3) - ({high:0,medium:1,low:2}[b.priority] ?? 3))" :key="i">
                           <div class="bg-surface rounded-lg p-3">
                             <div class="flex items-center gap-2 mb-1">
                               <span class="text-xs font-medium px-2 py-0.5 rounded bg-surface-tertiary"
@@ -1356,7 +1356,7 @@
             <template x-if="backfillResult">
               <div class="text-sm mb-3 px-3 py-2 rounded bg-surface-tertiary">
                 Enqueued <span class="font-medium" x-text="backfillResult.enqueued"></span> sessions,
-                skipped <span class="font-medium" x-text="backfillResult.skipped"></span>
+                <span class="font-medium" x-text="backfillResult.skipped"></span> already summarized
               </div>
             </template>
 

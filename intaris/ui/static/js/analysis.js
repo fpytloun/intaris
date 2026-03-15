@@ -359,6 +359,7 @@ function analysisTab() {
         await IntarisAPI.triggerAnalysis(params);
         Alpine.store('notify')?.success('Analysis triggered');
         this.triggeringAnalysis = false;
+        this.loadTaskStatus();
         this.analysisTracking = true;
         this.analysisProgress = { pending: 1, running: 0, completed: 0, failed: 0, cancelled: 0, processed: 0, pct: 0 };
         this._cancelAnalysisPoll = pollTaskProgress({
@@ -396,10 +397,11 @@ function analysisTab() {
         const result = await IntarisAPI.backfillSummaries(params);
         this.backfillResult = result;
         this.backfillingSummaries = false;
+        this.loadTaskStatus();
 
         if (result.enqueued > 0) {
           Alpine.store('notify')?.success(
-            `Backfill: ${result.enqueued} enqueued, ${result.skipped} skipped`
+            `Backfill: ${result.enqueued} enqueued, ${result.skipped} already summarized`
           );
           this.showBackfillModal = false;
           this.backfillTracking = true;
@@ -421,7 +423,7 @@ function analysisTab() {
           });
         } else {
           Alpine.store('notify')?.info(
-            `Backfill: no sessions to process (${result.skipped} already pending)`
+            `Backfill: no sessions to process (${result.skipped} already summarized)`
           );
         }
       } catch (e) {
