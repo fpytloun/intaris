@@ -140,7 +140,7 @@ async def submit_reasoning(
         # task; the next POST /evaluate will wait for it to complete.
         # Only triggers for user messages, not agent reasoning.
         if sanitized.startswith("User message:"):
-            logger.debug(
+            logger.info(
                 "Received user message for %s/%s (context_len=%d)",
                 ctx.user_id,
                 request.session_id,

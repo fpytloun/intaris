@@ -698,13 +698,19 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       output: { message?: any; parts?: any[] },
     ) => {
       if (!input.sessionID) return
-      // Do NOT use getOrCreateState() here — creating state before
-      // session.created fires causes a race condition where the session
-      // is created on the server without parent_session_id (the parent
-      // link is only set in session.created). If no state exists yet,
-      // skip this event; the session will be created properly later.
+      // Use sessions.get() — not getOrCreateState() — to avoid creating
+      // state before session.created fires (which would miss parent_session_id).
+      // If no state exists yet, skip; the session will be created properly later.
       const state = sessions.get(input.sessionID)
       if (!state) return
+
+      // Ensure Intaris session exists. After plugin reload, state may exist
+      // (created by tool.execute.before via getOrCreateState) but
+      // intarisSessionId may be null. Call ensureSession to recover.
+      if (state.intarisSessionId === null) {
+        const sid = await ensureSession(input.sessionID, state)
+        if (!sid) return  // Session creation failed — skip
+      }
 
       // Capture agent name on first message
       if (input.agent && !state.agentName) {
@@ -753,7 +759,10 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           const assistantContext = state.lastAssistantText || undefined
           state.lastAssistantText = ""  // Consumed — clear for next turn
 
-          callApi(
+          // Await the /reasoning call to ensure it completes before the
+          // LLM starts processing (which may block the event loop and
+          // prevent the fire-and-forget promise from resolving).
+          const reasoningResult = await callApi(
             "POST",
             "/api/v1/reasoning",
             {
@@ -761,15 +770,26 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
               content: `User message: ${userText}`,
               ...(assistantContext && { context: assistantContext }),
             },
-            10000, // 10s timeout — must survive event loop blocking from concurrent LLM calls
-          ).catch(() => {})
-
-          // Signal that an intention update is in flight. The next
-          // tool.execute.before will include intention_pending=true in
-          // the evaluate request so the server waits for the /reasoning
-          // call to arrive and the intention to be updated before
-          // evaluating. Cleared after the first evaluate call returns.
-          state.intentionPending = true
+            30000, // 30s timeout — large context bodies need time over remote connections
+          )
+          if (reasoningResult.error) {
+            // /reasoning failed — surface error in UI and do NOT set
+            // intentionPending (server would wait for a call that never arrived).
+            await client.app.log({
+              body: {
+                service: "intaris",
+                level: "error",
+                message: `Intaris: /reasoning failed — ${reasoningResult.error} (status=${reasoningResult.status}, contextLen=${assistantContext ? assistantContext.length : 0})`,
+              },
+            }).catch(() => {})
+          } else {
+            // Signal that an intention update is in flight. The next
+            // tool.execute.before will include intention_pending=true in
+            // the evaluate request so the server waits for the /reasoning
+            // call to arrive and the intention to be updated before
+            // evaluating. Cleared after the first evaluate call returns.
+            state.intentionPending = true
+          }
 
           // Record user message for session recording
           recordEvent(input.sessionID, {
