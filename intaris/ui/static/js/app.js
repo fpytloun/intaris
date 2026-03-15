@@ -66,6 +66,63 @@ function riskScoreChartColor(score) {
   return '#F87171'; // red
 }
 
+// ── Task progress polling helper ─────────────────────────────────────
+
+/**
+ * Poll task status at a regular interval until all tasks complete.
+ *
+ * @param {Object} opts
+ * @param {string}   [opts.taskType]    - Filter by task type (summary/analysis)
+ * @param {string}   [opts.sessionId]   - Filter by session ID
+ * @param {string}   [opts.since]       - ISO 8601 cutoff for created_at
+ * @param {number}   [opts.total]       - Total expected tasks (for percentage calc)
+ * @param {number}   [opts.interval]    - Poll interval in ms (default 3000)
+ * @param {number}   [opts.maxDuration] - Max poll duration in ms (default 600000 = 10 min)
+ * @param {Function} opts.onUpdate      - Called with { pending, running, completed, failed, cancelled, processed, pct }
+ * @param {Function} [opts.onDone]      - Called when pending+running = 0 or maxDuration exceeded
+ * @returns {Function} cancel - Call to stop polling
+ */
+function pollTaskProgress(opts) {
+  let active = true;
+  const interval = opts.interval || 3000;
+  const maxDuration = opts.maxDuration || 600000;
+  const total = opts.total || 0;
+  const startTime = Date.now();
+
+  const poll = async () => {
+    if (!active) return;
+    // Check max duration
+    if (Date.now() - startTime > maxDuration) {
+      if (opts.onDone) opts.onDone({ pending: 0, running: 0, completed: 0, failed: 0, cancelled: 0, processed: 0, pct: 100, timedOut: true });
+      return;
+    }
+    try {
+      const params = {};
+      if (opts.taskType) params.task_type = opts.taskType;
+      if (opts.sessionId) params.session_id = opts.sessionId;
+      if (opts.since) params.since = opts.since;
+      const status = await IntarisAPI.getTaskStatus(params);
+      const processed = (status.completed || 0) + (status.failed || 0) + (status.cancelled || 0);
+      const pending = (status.pending || 0) + (status.running || 0);
+      const pct = total > 0 ? Math.min(100, Math.round(processed / total * 100)) : (pending > 0 ? 50 : 100);
+      const update = { ...status, processed, pct };
+      if (opts.onUpdate) opts.onUpdate(update);
+      if (pending > 0 && active) {
+        setTimeout(poll, interval);
+      } else if (opts.onDone) {
+        opts.onDone({ ...update, pct: 100 });
+      }
+    } catch (e) {
+      // Keep polling on transient errors
+      if (active) setTimeout(poll, interval);
+    }
+  };
+  // Start after a short delay to let the task enqueue settle
+  setTimeout(poll, 1000);
+
+  return () => { active = false; };
+}
+
 document.addEventListener('alpine:init', () => {
 
   // ── Auth Store ───────────────────────────────────────────────

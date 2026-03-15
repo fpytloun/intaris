@@ -346,6 +346,16 @@ class BackfillSummariesResponse(BaseModel):
     skipped: int = Field(description="Number of sessions skipped (duplicate pending)")
 
 
+class TaskStatusResponse(BaseModel):
+    """Task queue status counts."""
+
+    pending: int = 0
+    running: int = 0
+    completed: int = 0
+    failed: int = 0
+    cancelled: int = 0
+
+
 class SessionSummaryRecord(BaseModel):
     """Intaris-generated session summary."""
 

@@ -447,7 +447,13 @@
                       <button @click.stop="triggerSummary(session)" class="btn-secondary text-xs py-0.5 px-2"
                               :disabled="session._summaryTriggering">
                         <span x-show="!session._summaryTriggering">Trigger Summary</span>
-                        <span x-show="session._summaryTriggering">Running...</span>
+                        <span x-show="session._summaryTriggering" class="flex items-center gap-1">
+                          <svg class="animate-spin h-3 w-3" viewBox="0 0 24 24" fill="none">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                          </svg>
+                          Generating...
+                        </span>
                       </button>
                     </div>
 
@@ -1044,14 +1050,40 @@
               <span x-show="profile.agent_id" class="text-xs font-mono text-muted px-2 py-0.5 rounded bg-surface-tertiary" x-text="profile.agent_id"></span>
             </div>
             <div class="flex items-center gap-2">
-              <button @click="triggerAnalysis()" class="btn-primary text-sm"
-                      :disabled="triggeringAnalysis">
-                <span x-show="!triggeringAnalysis">Trigger Analysis</span>
-                <span x-show="triggeringAnalysis">Running...</span>
-              </button>
-              <button @click="showBackfillModal = true; backfillResult = null" class="btn-secondary text-sm">
-                Backfill Summaries
-              </button>
+              <!-- Trigger Analysis: button or progress -->
+              <template x-if="!analysisTracking">
+                <button @click="triggerAnalysis()" class="btn-primary text-sm"
+                        :disabled="triggeringAnalysis">
+                  <span x-show="!triggeringAnalysis">Trigger Analysis</span>
+                  <span x-show="triggeringAnalysis">Triggering...</span>
+                </button>
+              </template>
+              <template x-if="analysisTracking">
+                <div class="flex items-center gap-2 text-xs text-secondary">
+                  <svg class="animate-spin h-3.5 w-3.5 text-brand" viewBox="0 0 24 24" fill="none">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                  </svg>
+                  <span>Analysis running...</span>
+                </div>
+              </template>
+
+              <!-- Backfill Summaries: button or progress bar -->
+              <template x-if="!backfillTracking">
+                <button @click="showBackfillModal = true; backfillResult = null" class="btn-secondary text-sm">
+                  Backfill Summaries
+                </button>
+              </template>
+              <template x-if="backfillTracking">
+                <div class="flex items-center gap-2 min-w-[200px]">
+                  <div class="flex-1 bg-surface-tertiary rounded-full h-2 overflow-hidden">
+                    <div class="bg-brand h-full rounded-full transition-all duration-500"
+                         :style="'width: ' + (backfillProgress?.pct || 0) + '%'"></div>
+                  </div>
+                  <span class="text-xs text-secondary whitespace-nowrap"
+                        x-text="(backfillProgress?.pct || 0) + '% (' + (backfillProgress?.processed || 0) + '/' + ((backfillProgress?.processed || 0) + (backfillProgress?.pending || 0) + (backfillProgress?.running || 0)) + ')'"></span>
+                </div>
+              </template>
             </div>
           </div>
 
@@ -1070,12 +1102,31 @@
                 </div>
               </div>
               <div class="stat-card">
-                <div class="stat-label">Profile Version</div>
-                <div class="stat-value" x-text="profile.profile_version || 0"></div>
+                <div class="stat-label">Task Queue</div>
+                <div class="stat-value text-sm">
+                  <template x-if="taskStatus.summaryPending + taskStatus.summaryRunning + taskStatus.analysisPending + taskStatus.analysisRunning > 0">
+                    <div class="flex items-center gap-1.5">
+                      <svg class="animate-spin h-3.5 w-3.5 text-brand flex-shrink-0" viewBox="0 0 24 24" fill="none">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                      </svg>
+                      <div class="text-xs space-y-0.5">
+                        <div x-show="taskStatus.summaryPending + taskStatus.summaryRunning > 0"
+                             x-text="'L2: ' + (taskStatus.summaryPending + taskStatus.summaryRunning) + ' active'"></div>
+                        <div x-show="taskStatus.analysisPending + taskStatus.analysisRunning > 0"
+                             x-text="'L3: ' + (taskStatus.analysisPending + taskStatus.analysisRunning) + ' active'"></div>
+                      </div>
+                    </div>
+                  </template>
+                  <template x-if="taskStatus.summaryPending + taskStatus.summaryRunning + taskStatus.analysisPending + taskStatus.analysisRunning === 0">
+                    <span class="text-muted">Idle</span>
+                  </template>
+                </div>
               </div>
               <div class="stat-card">
                 <div class="stat-label">Last Updated</div>
                 <div class="stat-value text-sm" x-text="profile.updated_at ? new Date(profile.updated_at).toLocaleString() : 'Never'"></div>
+                <div class="text-xs text-muted mt-0.5" x-text="'v' + (profile.profile_version || 0)"></div>
               </div>
             </div>
 

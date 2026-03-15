@@ -491,33 +491,43 @@ function sessionsTab() {
     async triggerSummary(session) {
       session._summaryTriggering = true;
       try {
+        const since = new Date().toISOString();
         await IntarisAPI.triggerSessionSummary(session.session_id);
         Alpine.store('notify').success('Summary generation triggered');
-        // Reload summaries after a delay
-        setTimeout(async () => {
-          try {
-            const summaries = await IntarisAPI.getSessionSummaries(session.session_id);
-            const intarisSummaries = (summaries.intaris_summaries || []).map(s => ({
-              ...s,
-              _expanded: false,
-              risk_indicators: typeof s.risk_indicators === 'string'
-                ? JSON.parse(s.risk_indicators) : (s.risk_indicators || []),
-              tools_used: typeof s.tools_used === 'string'
-                ? JSON.parse(s.tools_used) : (s.tools_used || []),
-            }));
-            const compacted = intarisSummaries.filter(s => s.summary_type === 'compacted');
-            const windows = intarisSummaries.filter(s => s.summary_type !== 'compacted');
-            const hasCompacted = compacted.length > 0;
-            session._summaries = {
-              intaris_summaries: intarisSummaries,
-              compacted_summary: hasCompacted ? compacted[0] : null,
-              window_summaries: windows,
-              _windowsExpanded: !hasCompacted && windows.length > 0,
-              agent_summaries: summaries.agent_summaries || [],
-            };
-          } catch {}
-          session._summaryTriggering = false;
-        }, 5000);
+        // Poll for completion instead of fixed delay
+        session._cancelSummaryPoll = pollTaskProgress({
+          taskType: 'summary',
+          sessionId: session.session_id,
+          since,
+          total: 1,
+          interval: 2000,
+          maxDuration: 120000,
+          onDone: async () => {
+            try {
+              const summaries = await IntarisAPI.getSessionSummaries(session.session_id);
+              const intarisSummaries = (summaries.intaris_summaries || []).map(s => ({
+                ...s,
+                _expanded: false,
+                risk_indicators: typeof s.risk_indicators === 'string'
+                  ? JSON.parse(s.risk_indicators) : (s.risk_indicators || []),
+                tools_used: typeof s.tools_used === 'string'
+                  ? JSON.parse(s.tools_used) : (s.tools_used || []),
+              }));
+              const compacted = intarisSummaries.filter(s => s.summary_type === 'compacted');
+              const windows = intarisSummaries.filter(s => s.summary_type !== 'compacted');
+              const hasCompacted = compacted.length > 0;
+              session._summaries = {
+                intaris_summaries: intarisSummaries,
+                compacted_summary: hasCompacted ? compacted[0] : null,
+                window_summaries: windows,
+                _windowsExpanded: !hasCompacted && windows.length > 0,
+                agent_summaries: summaries.agent_summaries || [],
+              };
+            } catch {}
+            session._summaryTriggering = false;
+            session._cancelSummaryPoll = null;
+          },
+        });
       } catch (e) {
         Alpine.store('notify').error(e.message || 'Failed to trigger summary');
         session._summaryTriggering = false;

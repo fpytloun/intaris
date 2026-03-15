@@ -32,10 +32,14 @@ from intaris.api.schemas import (
     SessionSummariesResponse,
     SessionSummaryRecord,
     SummaryTriggerResponse,
+    TaskStatusResponse,
 )
 from intaris.sanitize import _INJECTION_PATTERNS as _SANITIZE_PATTERNS
 
 logger = logging.getLogger(__name__)
+
+_BACKFILL_SESSION_LIMIT = 1000
+"""Maximum number of sessions to enqueue per backfill request."""
 
 router = APIRouter()
 
@@ -553,7 +557,6 @@ async def backfill_summaries(
         # Unlike _startup_catchup (which skips active sessions), the
         # manual backfill includes ALL statuses since the user
         # explicitly requested it.
-        _MAX_BACKFILL = 1000
         conditions = ["user_id = ?", "last_activity_at >= ?"]
         params: list[str | int] = [ctx.user_id, cutoff]
 
@@ -568,7 +571,7 @@ async def backfill_summaries(
         with db.cursor() as cur:
             cur.execute(
                 f"SELECT user_id, session_id FROM sessions WHERE {where} LIMIT ?",
-                (*params, _MAX_BACKFILL),
+                (*params, _BACKFILL_SESSION_LIMIT),
             )
             rows = cur.fetchall()
 
@@ -608,6 +611,73 @@ async def backfill_summaries(
         raise HTTPException(
             status_code=500,
             detail="Internal error during summary backfill",
+        )
+
+
+@router.get("/tasks/status", response_model=TaskStatusResponse)
+async def get_task_status(
+    ctx: SessionContext = Depends(get_session_context),
+    task_type: str | None = Query(None, description="Filter: summary, analysis"),
+    session_id: str | None = Query(None, description="Filter by session"),
+    since: datetime | None = Query(
+        None, description="ISO 8601 cutoff (only count tasks created after this)"
+    ),
+) -> TaskStatusResponse:
+    """Get task queue status counts for the current user.
+
+    Returns counts grouped by status (pending, running, completed,
+    failed, cancelled). Optionally filtered by task type, session,
+    and creation time.
+    """
+    from intaris.server import _get_db
+
+    try:
+        db = _get_db()
+        # Default to 24h window if no 'since' provided
+        cutoff = (
+            since.isoformat()
+            if since
+            else (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        )
+
+        conditions = ["user_id = ?", "created_at >= ?"]
+        params: list[str] = [ctx.user_id, cutoff]
+
+        if task_type:
+            conditions.append("task_type = ?")
+            params.append(task_type)
+
+        if session_id:
+            conditions.append("session_id = ?")
+            params.append(session_id)
+
+        where = " AND ".join(conditions)
+        with db.cursor() as cur:
+            cur.execute(
+                f"SELECT status, COUNT(*) as cnt FROM analysis_tasks "
+                f"WHERE {where} GROUP BY status",
+                tuple(params),
+            )
+            rows = cur.fetchall()
+
+        counts: dict[str, int] = {}
+        for row in rows:
+            status = row["status"] if isinstance(row, dict) else row[0]
+            cnt = row["cnt"] if isinstance(row, dict) else row[1]
+            counts[status] = cnt
+
+        return TaskStatusResponse(
+            pending=counts.get("pending", 0),
+            running=counts.get("running", 0),
+            completed=counts.get("completed", 0),
+            failed=counts.get("failed", 0),
+            cancelled=counts.get("cancelled", 0),
+        )
+    except Exception:
+        logger.exception("Error in /tasks/status")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error querying task status",
         )
 
 

@@ -318,6 +318,14 @@ const IntarisAPI = {
     return this.post(`/summaries/backfill${query ? '?' + query : ''}`);
   },
 
+  /**
+   * Get task queue status counts.
+   * @param {Object} params - { task_type, session_id, since }
+   */
+  getTaskStatus(params = {}) {
+    return this.get('/tasks/status', params);
+  },
+
   // ── WebSocket ───────────────────────────────────────────────
 
   /**

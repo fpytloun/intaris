@@ -1238,7 +1238,9 @@ class BackgroundWorker:
             # Update profile staleness metric
             self._update_staleness_metric()
 
-            # Update sessions needing summaries gauge
+            # Update sessions needing summaries gauge.
+            # No total_calls filter — sessions with only
+            # reasoning/checkpoints also need summaries.
             try:
                 with self._db.cursor() as cur:
                     cur.execute(
@@ -1247,7 +1249,6 @@ class BackgroundWorker:
                         WHERE status IN ('idle', 'completed',
                                          'terminated', 'suspended')
                           AND summary_count = 0
-                          AND total_calls > 0
                         """
                     )
                     row = cur.fetchone()

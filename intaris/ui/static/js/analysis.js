@@ -225,6 +225,19 @@ function analysisTab() {
     backfillForce: false,
     backfillResult: null,
 
+    // Task queue status (always-visible card)
+    taskStatus: { summaryPending: 0, summaryRunning: 0, analysisPending: 0, analysisRunning: 0 },
+
+    // Backfill progress tracking
+    backfillTracking: false,
+    backfillProgress: null, // { pending, running, completed, failed, cancelled, processed, pct }
+    _cancelBackfillPoll: null,
+
+    // Analysis trigger progress tracking
+    analysisTracking: false,
+    analysisProgress: null,
+    _cancelAnalysisPoll: null,
+
     init() {
       this.loadData();
 
@@ -236,20 +249,23 @@ function analysisTab() {
       });
 
       window.addEventListener('intaris:user-changed', () => {
+        this._cancelAllPolls();
         _destroyAllAnalysisCharts();
         this.loadData();
       });
       window.addEventListener('intaris:agent-changed', () => {
+        this._cancelAllPolls();
         _destroyAllAnalysisCharts();
         this.loadData();
       });
       window.addEventListener('intaris:logout', () => {
+        this._cancelAllPolls();
         _destroyAllAnalysisCharts();
       });
     },
 
     async loadData() {
-      await Promise.all([this.loadProfile(), this.loadAnalyses()]);
+      await Promise.all([this.loadProfile(), this.loadAnalyses(), this.loadTaskStatus()]);
       this.initialized = true;
 
       if (Alpine.store('nav').activeTab === 'analysis') {
@@ -260,6 +276,30 @@ function analysisTab() {
     _agentFilter() {
       const f = Alpine.store('nav')?.selectedAgent;
       return f || undefined;
+    },
+
+    _cancelAllPolls() {
+      if (this._cancelBackfillPoll) { this._cancelBackfillPoll(); this._cancelBackfillPoll = null; }
+      if (this._cancelAnalysisPoll) { this._cancelAnalysisPoll(); this._cancelAnalysisPoll = null; }
+      this.backfillTracking = false;
+      this.analysisTracking = false;
+    },
+
+    async loadTaskStatus() {
+      try {
+        const [summaryStatus, analysisStatus] = await Promise.all([
+          IntarisAPI.getTaskStatus({ task_type: 'summary' }),
+          IntarisAPI.getTaskStatus({ task_type: 'analysis' }),
+        ]);
+        this.taskStatus = {
+          summaryPending: summaryStatus.pending || 0,
+          summaryRunning: summaryStatus.running || 0,
+          analysisPending: analysisStatus.pending || 0,
+          analysisRunning: analysisStatus.running || 0,
+        };
+      } catch (e) {
+        console.debug('loadTaskStatus error:', e);
+      }
     },
 
     async loadProfile() {
@@ -300,12 +340,29 @@ function analysisTab() {
         const params = {};
         const agent = this._agentFilter();
         if (agent) params.agent_id = agent;
+        const since = new Date().toISOString();
         await IntarisAPI.triggerAnalysis(params);
         Alpine.store('notify')?.success('Analysis triggered');
-        setTimeout(() => this.loadData(), 3000);
+        this.triggeringAnalysis = false;
+        this.analysisTracking = true;
+        this.analysisProgress = { pending: 1, running: 0, completed: 0, failed: 0, cancelled: 0, processed: 0, pct: 0 };
+        this._cancelAnalysisPoll = pollTaskProgress({
+          taskType: 'analysis',
+          since,
+          total: 1,
+          interval: 3000,
+          maxDuration: 120000,
+          onUpdate: (s) => { this.analysisProgress = s; },
+          onDone: (s) => {
+            this.analysisProgress = s;
+            this.analysisTracking = false;
+            this._cancelAnalysisPoll = null;
+            this.loadTaskStatus();
+            this.loadData();
+          },
+        });
       } catch (e) {
         Alpine.store('notify')?.error(e.message || 'Failed to trigger analysis');
-      } finally {
         this.triggeringAnalysis = false;
       }
     },
@@ -320,14 +377,40 @@ function analysisTab() {
         };
         const agent = this._agentFilter();
         if (agent) params.agent_id = agent;
+        const since = new Date().toISOString();
         const result = await IntarisAPI.backfillSummaries(params);
         this.backfillResult = result;
-        Alpine.store('notify')?.success(
-          `Backfill: ${result.enqueued} enqueued, ${result.skipped} skipped`
-        );
+        this.backfillingSummaries = false;
+
+        if (result.enqueued > 0) {
+          Alpine.store('notify')?.success(
+            `Backfill: ${result.enqueued} enqueued, ${result.skipped} skipped`
+          );
+          this.showBackfillModal = false;
+          this.backfillTracking = true;
+          this.backfillProgress = { pending: result.enqueued, running: 0, completed: 0, failed: 0, cancelled: 0, processed: 0, pct: 0 };
+          this._cancelBackfillPoll = pollTaskProgress({
+            taskType: 'summary',
+            since,
+            total: result.enqueued,
+            interval: 3000,
+            maxDuration: 600000,
+            onUpdate: (s) => { this.backfillProgress = s; },
+            onDone: (s) => {
+              this.backfillProgress = s;
+              this.backfillTracking = false;
+              this._cancelBackfillPoll = null;
+              this.loadTaskStatus();
+              this.loadData();
+            },
+          });
+        } else {
+          Alpine.store('notify')?.info(
+            `Backfill: no sessions to process (${result.skipped} already pending)`
+          );
+        }
       } catch (e) {
         Alpine.store('notify')?.error(e.message || 'Backfill failed');
-      } finally {
         this.backfillingSummaries = false;
       }
     },
