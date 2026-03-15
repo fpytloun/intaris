@@ -193,6 +193,13 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `ANALYSIS_LLM_REASONING_EFFORT` | Reasoning effort for analysis LLM (default `low`) |
 | `ANALYSIS_LLM_TIMEOUT_MS` | Timeout for analysis LLM calls in milliseconds (default `30000`) |
 | `ANALYSIS_WORKER_COUNT` | Number of parallel task queue workers (default `4`) |
+| `ANALYSIS_WINDOW_CHARS` | Max chars per L2 analysis window prompt (default `150000`). The partitioner creates more windows when data exceeds this budget — no data is silently dropped. Tune for smaller/larger model context windows. |
+| `ANALYSIS_L3_WINDOW_CHARS` | Max chars per L3 cross-session analysis prompt (default `200000`). Progressive summarization compresses older sessions when the prompt exceeds this budget. |
+| `ANALYSIS_L3_LLM_MODEL` | LLM model for L3 cross-session analysis (falls back to `ANALYSIS_LLM_MODEL`, then `gpt-5.4`) |
+| `ANALYSIS_L3_LLM_BASE_URL` | LLM base URL for L3 analysis (falls back to `ANALYSIS_LLM_BASE_URL`, then `LLM_BASE_URL`) |
+| `ANALYSIS_L3_LLM_API_KEY` | LLM API key for L3 analysis (falls back to `ANALYSIS_LLM_API_KEY`, then `LLM_API_KEY`) |
+| `ANALYSIS_L3_LLM_REASONING_EFFORT` | Reasoning effort for L3 analysis LLM (falls back to `ANALYSIS_LLM_REASONING_EFFORT`) |
+| `ANALYSIS_L3_LLM_TIMEOUT_MS` | Timeout for L3 analysis LLM calls (falls back to `ANALYSIS_LLM_TIMEOUT_MS`, default `30000`) |
 | `NOTIFICATION_ACTION_TTL_MINUTES` | TTL for notification action tokens in minutes (default `60`) |
 
 ## Build / Run / Test

@@ -57,6 +57,8 @@ class Metrics:
         self.summary_audit_only_total: int = 0
         self.summary_partitions_total: int = 0
         self.summary_event_store_fallback_total: int = 0
+        # Safety valve activations (content truncation)
+        self.safety_valve_hits_total: int = 0
         # Gauges
         self.sessions_needing_summaries: int = 0
         # Liveness timestamps (ISO 8601)
@@ -81,6 +83,7 @@ class Metrics:
             "summary_audit_only_total": self.summary_audit_only_total,
             "summary_partitions_total": self.summary_partitions_total,
             "summary_event_store_fallback_total": self.summary_event_store_fallback_total,
+            "safety_valve_hits_total": self.safety_valve_hits_total,
             "sessions_needing_summaries": self.sessions_needing_summaries,
             "last_worker_poll": self.last_worker_poll,
             "last_idle_sweep": self.last_idle_sweep,
@@ -783,6 +786,7 @@ class BackgroundWorker:
         """
         from intaris.analyzer import (
             _PARENT_RECHECK_DELAY_S,
+            drain_safety_valve_hits,
             generate_summary,
         )
 
@@ -794,6 +798,9 @@ class BackgroundWorker:
         result = await asyncio.to_thread(
             generate_summary, self._db, llm, task, self._event_store
         )
+
+        # Propagate safety valve hits to metrics
+        self.metrics.safety_valve_hits_total += drain_safety_valve_hits()
 
         # Handle parent waiting for children
         if result.get("needs_children"):
@@ -881,15 +888,22 @@ class BackgroundWorker:
     async def _execute_analysis_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute a cross-session analysis task.
 
-        Creates an analysis LLM client and delegates to the analyzer
-        for agent-scoped cross-session behavioral analysis.
+        Creates an L3 analysis LLM client and delegates to the analyzer
+        for agent-scoped cross-session behavioral analysis. Uses the
+        dedicated L3 model (more capable) for cross-session pattern
+        detection.
         """
-        from intaris.analyzer import run_analysis
+        from intaris.analyzer import drain_safety_valve_hits, run_analysis
 
-        llm = self._get_analysis_llm()
+        llm = self._get_l3_analysis_llm()
         # Run in thread executor to avoid blocking the event loop.
         # run_analysis() makes synchronous LLM calls (up to 30s).
-        return await asyncio.to_thread(run_analysis, self._db, llm, task)
+        result = await asyncio.to_thread(run_analysis, self._db, llm, task)
+
+        # Propagate safety valve hits to metrics
+        self.metrics.safety_valve_hits_total += drain_safety_valve_hits()
+
+        return result
 
     @staticmethod
     def _should_notify_summary(result: dict[str, Any]) -> bool:
@@ -1004,7 +1018,7 @@ class BackgroundWorker:
             logger.warning("Failed to send analysis alert notification", exc_info=True)
 
     def _get_analysis_llm(self) -> Any | None:
-        """Create an analysis LLM client from config.
+        """Create an L2 analysis LLM client from config.
 
         Returns None if the analysis LLM is not configured.
         """
@@ -1016,6 +1030,25 @@ class BackgroundWorker:
             return LLMClient(cfg.llm_analysis)
         except Exception:
             logger.warning("Failed to create analysis LLM client", exc_info=True)
+            return None
+
+    def _get_l3_analysis_llm(self) -> Any | None:
+        """Create an L3 analysis LLM client from config.
+
+        Uses the dedicated L3 model (more capable) for cross-session
+        behavioral analysis. Falls back to the L2 analysis LLM if the
+        L3-specific config is not set.
+
+        Returns None if the LLM is not configured.
+        """
+        try:
+            from intaris.config import load_config
+            from intaris.llm import LLMClient
+
+            cfg = load_config()
+            return LLMClient(cfg.llm_l3_analysis)
+        except Exception:
+            logger.warning("Failed to create L3 analysis LLM client", exc_info=True)
             return None
 
     async def _execute_intention_update_task(

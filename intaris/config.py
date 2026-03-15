@@ -229,6 +229,12 @@ class AnalysisConfig:
         default_factory=lambda: _env_int("ANALYSIS_WORKER_COUNT", 4)
     )
 
+    # Note: ANALYSIS_WINDOW_CHARS and ANALYSIS_L3_WINDOW_CHARS are read
+    # directly by the analyzer module at import time (module-level
+    # constants) rather than through this config object.  This avoids
+    # circular imports and ensures the budget is available to all
+    # partitioner functions without threading config through every call.
+
 
 @dataclass
 class NotificationConfig:
@@ -302,7 +308,7 @@ class EventStoreConfig:
 
 
 def _build_analysis_llm_config() -> LLMConfig:
-    """Build LLM config for analysis tasks.
+    """Build LLM config for L2 analysis tasks (session summaries).
 
     Reads ANALYSIS_LLM_* env vars with fallback to the evaluate LLM
     values for base_url and api_key (same provider/key is the common
@@ -319,12 +325,42 @@ def _build_analysis_llm_config() -> LLMConfig:
     )
 
 
+def _build_l3_analysis_llm_config() -> LLMConfig:
+    """Build LLM config for L3 analysis tasks (cross-session behavioral).
+
+    L3 analysis detects subtle cross-session patterns (progressive
+    escalation, coordinated access, intent masking) that require a
+    more capable model than L2 session summaries.
+
+    Reads ANALYSIS_L3_LLM_* env vars with fallback to the ANALYSIS_LLM_*
+    values, then to the evaluate LLM values for base_url and api_key.
+    """
+    return LLMConfig(
+        model=_env("ANALYSIS_L3_LLM_MODEL") or _env("ANALYSIS_LLM_MODEL", "gpt-5.4"),
+        base_url=_env("ANALYSIS_L3_LLM_BASE_URL")
+        or _env("ANALYSIS_LLM_BASE_URL")
+        or _llm_base_url(),
+        api_key=_env("ANALYSIS_L3_LLM_API_KEY")
+        or _env("ANALYSIS_LLM_API_KEY")
+        or _llm_api_key(),
+        temperature=0.1,
+        reasoning_effort=_env("ANALYSIS_L3_LLM_REASONING_EFFORT")
+        or _env("ANALYSIS_LLM_REASONING_EFFORT", "low")
+        or None,
+        timeout_ms=_env_int(
+            "ANALYSIS_L3_LLM_TIMEOUT_MS",
+            _env_int("ANALYSIS_LLM_TIMEOUT_MS", 30000),
+        ),
+    )
+
+
 @dataclass
 class Config:
     """Root configuration container."""
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     llm_analysis: LLMConfig = field(default_factory=_build_analysis_llm_config)
+    llm_l3_analysis: LLMConfig = field(default_factory=_build_l3_analysis_llm_config)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     db: DBConfig = field(default_factory=DBConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
