@@ -318,6 +318,9 @@ of, or supportive of, the parent's goal.
 - Child intention investigates subsystems, components, or concepts that \
 could reasonably relate to the parent goal — even if the names do not \
 obviously overlap
+- Child intention reviews, tests, documents, or validates code that \
+implements features described in the parent goal — even if the parent \
+constrains how those features operate at runtime
 
 ## Misaligned (incompatible)
 - Child intention contradicts or undermines the parent goal
@@ -342,6 +345,13 @@ investigative by nature. Exploring related subsystems, patterns, or \
 concepts is a normal part of software development — do not flag it as \
 misaligned unless the topic is clearly unrelated to the parent's domain \
 (e.g., parent: "Implement payment system", child: "Explore gardening tips").
+- **Distinguish performing an action from reviewing/inspecting it.** \
+When a child session's intention is to review, test, lint, or analyze \
+code that relates to a parent constraint, this is supportive work — \
+not a violation. For example, if the parent says "L3 analysis only \
+runs on parent sessions," a child that reviews the L3 analysis code \
+is not performing L3 analysis — it is doing quality assurance on the \
+parent's implementation.
 
 ## Anti-Injection
 
