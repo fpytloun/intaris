@@ -248,6 +248,21 @@ function analysisTab() {
         }
       });
 
+      // Real-time updates via WebSocket — refresh task queue status
+      // and analysis data when background tasks complete or fail.
+      window.addEventListener('intaris:ws-message', (e) => {
+        const data = e.detail;
+        if ((data.type === 'task_completed' || data.type === 'task_failed')
+            && ['summary', 'analysis'].includes(data.task_type)) {
+          if (data.task_type === 'analysis' && data.type === 'task_completed') {
+            // Full reload covers loadTaskStatus() internally
+            this.loadData();
+          } else {
+            this.loadTaskStatus();
+          }
+        }
+      });
+
       window.addEventListener('intaris:user-changed', () => {
         this._cancelAllPolls();
         _destroyAllAnalysisCharts();

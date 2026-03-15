@@ -1103,18 +1103,18 @@
               </div>
               <div class="stat-card">
                 <div class="stat-label">Task Queue</div>
-                <div class="stat-value text-sm">
+                <div class="stat-value">
                   <template x-if="taskStatus.summaryPending + taskStatus.summaryRunning + taskStatus.analysisPending + taskStatus.analysisRunning > 0">
-                    <div class="flex items-center gap-1.5">
-                      <svg class="animate-spin h-3.5 w-3.5 text-brand flex-shrink-0" viewBox="0 0 24 24" fill="none">
+                    <div class="flex items-center gap-2">
+                      <svg class="animate-spin h-4 w-4 text-brand flex-shrink-0" viewBox="0 0 24 24" fill="none">
                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
                       </svg>
-                      <div class="text-xs space-y-0.5">
+                      <div class="text-sm space-y-0.5">
                         <div x-show="taskStatus.summaryPending + taskStatus.summaryRunning > 0"
-                             x-text="'L2: ' + (taskStatus.summaryPending + taskStatus.summaryRunning) + ' active'"></div>
+                             x-text="'L2 Summaries: ' + (taskStatus.summaryPending + taskStatus.summaryRunning) + ' active'"></div>
                         <div x-show="taskStatus.analysisPending + taskStatus.analysisRunning > 0"
-                             x-text="'L3: ' + (taskStatus.analysisPending + taskStatus.analysisRunning) + ' active'"></div>
+                             x-text="'L3 Analysis: ' + (taskStatus.analysisPending + taskStatus.analysisRunning) + ' active'"></div>
                       </div>
                     </div>
                   </template>
@@ -1126,7 +1126,6 @@
               <div class="stat-card">
                 <div class="stat-label">Last Updated</div>
                 <div class="stat-value text-sm" x-text="profile.updated_at ? new Date(profile.updated_at).toLocaleString() : 'Never'"></div>
-                <div class="text-xs text-muted mt-0.5" x-text="'v' + (profile.profile_version || 0)"></div>
               </div>
             </div>
 

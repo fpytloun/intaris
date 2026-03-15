@@ -739,6 +739,18 @@ class BackgroundWorker:
                     raise RuntimeError(f"Task skipped (transient): {skip_reason}")
 
                 self._task_queue.complete(task_id, result)
+
+                # Publish task completion event for real-time UI updates
+                if self._event_bus is not None:
+                    self._event_bus.publish(
+                        {
+                            "type": "task_completed",
+                            "task_type": task_type,
+                            "task_id": task_id,
+                            "user_id": task.get("user_id", ""),
+                            "session_id": task.get("session_id"),
+                        }
+                    )
             except Exception as e:
                 logger.exception("Task %s failed: %s", task_id, e)
                 self._task_queue.fail(task_id, str(e))
@@ -746,6 +758,18 @@ class BackgroundWorker:
                     self.metrics.summaries_failed_total += 1
                 elif task_type == "analysis":
                     self.metrics.analyses_failed_total += 1
+
+                # Publish task failure event for real-time UI updates
+                if self._event_bus is not None:
+                    self._event_bus.publish(
+                        {
+                            "type": "task_failed",
+                            "task_type": task_type,
+                            "task_id": task_id,
+                            "user_id": task.get("user_id", ""),
+                            "session_id": task.get("session_id"),
+                        }
+                    )
 
     async def _execute_summary_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute a summary generation task.
