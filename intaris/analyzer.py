@@ -1530,13 +1530,29 @@ def _format_tool_call(tc: dict[str, Any]) -> str:
     risk = tc.get("risk", "")
     reasoning = tc.get("reasoning", "")
 
+    # Show user resolution for escalations
+    user_decision = tc.get("user_decision")
+    if decision == "escalate" and user_decision:
+        decision = f"escalate→user:{user_decision}"
+
     # Brief args summary
     args_brief = _summarize_args(tc.get("args_redacted"))
 
     risk_str = f"({risk})" if risk else ""
     reasoning_brief = reasoning[:120] + "..." if len(reasoning) > 120 else reasoning
 
-    return f'[{ts}] {tool}({args_brief}) -> {decision}{risk_str} "{reasoning_brief}"'
+    line = f'[{ts}] {tool}({args_brief}) -> {decision}{risk_str} "{reasoning_brief}"'
+
+    # Append user note if present and escalation was resolved
+    # (gate on user_decision to avoid orphaned notes)
+    user_note = tc.get("user_note")
+    if user_note and user_decision:
+        # Collapse newlines/carriage returns for line-oriented format
+        safe_note = user_note.replace("\r", " ").replace("\n", " ").strip()
+        note_brief = safe_note[:80] + "..." if len(safe_note) > 80 else safe_note
+        line += f' [user: "{note_brief}"]'
+
+    return line
 
 
 def _summarize_args(args: Any) -> str:

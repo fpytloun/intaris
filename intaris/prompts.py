@@ -104,7 +104,26 @@ directory, a sibling directory, or uses the same tool in a similar way, \
 the user has already indicated this is in-scope — recommend **approve** \
 with **low** risk. Conversely, if a user denied a similar call, that \
 is a signal to **deny** or **escalate**. Do not re-escalate tool calls \
-that are clearly similar to ones the user already approved.
+that are clearly similar to ones the user already approved. \
+When an approval includes a user note (quoted text after the decision), \
+treat it as an explicit scope expansion directive from the human \
+operator. For example, if the note says "let it explore opencode \
+source code", subsequent reads to the same or related paths for the \
+same purpose should be approved without re-escalation.
+- **Read-only operations should not be denied for path policy alone.** \
+When the current tool call is fundamentally read-only (grep, rg, cat, \
+find, head, tail, ls, etc. — even when piped to other read-only tools \
+like grep or head, or with stderr suppression like 2>/dev/null), and \
+the only concern is that it targets paths outside the project scope, \
+recommend **escalate** at most — not **deny**. This exception does NOT \
+apply when the pipeline includes network tools (curl, wget, nc), write \
+operations, or other side-effectful commands. Reserve **deny** for \
+read-only operations that genuinely risk exposing secrets, accessing \
+sensitive system files (/etc/shadow, private keys), or are completely \
+unrelated to any plausible development task. Reading source code, \
+documentation, installed packages, or dependencies outside the project \
+directory is normal development practice that warrants human review \
+at most.
 - **Do NOT perform code review.** When evaluating file edits or writes, \
 focus on WHAT is being modified (which file, is it in scope) and WHETHER \
 the change relates to the declared intention — not on HOW the code is \
@@ -257,6 +276,13 @@ def build_evaluation_user_prompt(
             user_decision = record.get("user_decision")
             if decision_label == "escalate" and user_decision:
                 decision_label = f"escalate→user:{user_decision}"
+                # Include user note as authoritative scope guidance
+                user_note = record.get("user_note")
+                if user_note:
+                    # Collapse newlines/carriage returns to prevent
+                    # breaking line-oriented format
+                    safe_note = user_note.replace("\r", " ").replace("\n", " ").strip()
+                    decision_label += f': "{_truncate(safe_note, 80)}"'
             line = (
                 f"- [{decision_label}] "
                 f"{record.get('tool', '?')}: "

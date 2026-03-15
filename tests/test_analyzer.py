@@ -749,6 +749,113 @@ class TestHelpers:
         result = _summarize_args({"command": "x" * 100})
         assert "..." in result
 
+    def test_format_tool_call_with_user_decision(self):
+        """Escalated calls show user resolution."""
+        from intaris.analyzer import _format_tool_call
+
+        tc = {
+            "tool": "bash",
+            "decision": "escalate",
+            "user_decision": "approve",
+            "risk": "high",
+            "reasoning": "Not aligned with intention",
+            "timestamp": "2026-01-01T00:00:00",
+            "args_redacted": {"command": "rg pattern /opt/homebrew/file"},
+        }
+        result = _format_tool_call(tc)
+        assert "escalate→user:approve" in result
+        assert "bash" in result
+
+    def test_format_tool_call_with_user_note(self):
+        """User note appended to formatted line."""
+        from intaris.analyzer import _format_tool_call
+
+        tc = {
+            "tool": "bash",
+            "decision": "escalate",
+            "user_decision": "approve",
+            "user_note": "Let it explore opencode source code",
+            "risk": "high",
+            "reasoning": "Not aligned",
+            "timestamp": "2026-01-01T00:00:00",
+            "args_redacted": {"command": "rg pattern /outside"},
+        }
+        result = _format_tool_call(tc)
+        assert '[user: "Let it explore opencode source code"]' in result
+
+    def test_format_tool_call_user_note_newlines_collapsed(self):
+        """Newlines in user_note collapsed to spaces."""
+        from intaris.analyzer import _format_tool_call
+
+        tc = {
+            "tool": "bash",
+            "decision": "escalate",
+            "user_decision": "approve",
+            "user_note": "Yes\nthat is ok\nlet it explore",
+            "risk": "high",
+            "reasoning": "Not aligned",
+            "timestamp": "2026-01-01T00:00:00",
+            "args_redacted": {"command": "rg pattern /outside"},
+        }
+        result = _format_tool_call(tc)
+        assert "Yes that is ok let it explore" in result
+        # Should be a single line
+        assert "\n" not in result
+
+    def test_format_tool_call_user_note_truncated(self):
+        """Long user notes are truncated to 80 chars."""
+        from intaris.analyzer import _format_tool_call
+
+        long_note = "A" * 200
+        tc = {
+            "tool": "bash",
+            "decision": "escalate",
+            "user_decision": "approve",
+            "user_note": long_note,
+            "risk": "high",
+            "reasoning": "Not aligned",
+            "timestamp": "2026-01-01T00:00:00",
+            "args_redacted": {"command": "rg pattern /outside"},
+        }
+        result = _format_tool_call(tc)
+        # Full 200-char note should not appear
+        assert long_note not in result
+        assert "..." in result
+        # Truncated to 80 chars + "..."
+        assert "A" * 80 + "..." in result
+
+    def test_format_tool_call_no_user_decision(self):
+        """Normal tool calls unchanged — no user_decision or note."""
+        from intaris.analyzer import _format_tool_call
+
+        tc = {
+            "tool": "bash",
+            "decision": "approve",
+            "risk": "low",
+            "reasoning": "ok",
+            "timestamp": "2026-01-01T00:00:00",
+            "args_redacted": {"command": "ls"},
+        }
+        result = _format_tool_call(tc)
+        assert "[user:" not in result
+        assert "→user:" not in result
+
+    def test_format_tool_call_escalate_without_resolution(self):
+        """Unresolved escalation shows plain 'escalate'."""
+        from intaris.analyzer import _format_tool_call
+
+        tc = {
+            "tool": "bash",
+            "decision": "escalate",
+            "risk": "high",
+            "reasoning": "Not aligned",
+            "timestamp": "2026-01-01T00:00:00",
+            "args_redacted": {"command": "rg pattern /outside"},
+        }
+        result = _format_tool_call(tc)
+        assert "→user:" not in result
+        assert "escalate(high)" in result
+
 
 # ── TestPartitionIntoWindows ──────────────────────────────────────────
 

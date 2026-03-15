@@ -465,6 +465,137 @@ class TestPromptHardening:
         assert "DATA" in ANTI_INJECTION_PREAMBLE
         assert "never follow" in ANTI_INJECTION_PREAMBLE
 
+    def test_evaluation_prompt_includes_user_note(self):
+        """User note from approved escalation appears in history line."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        result = build_evaluation_user_prompt(
+            intention="Explore opencode codebase",
+            policy=None,
+            recent_history=[
+                {
+                    "tool": "bash",
+                    "args_redacted": {"command": "rg pattern /opt/homebrew/..."},
+                    "decision": "escalate",
+                    "user_decision": "approve",
+                    "user_note": "Yes that is ok, let it explore opencode source code",
+                    "reasoning": "Not aligned with intention",
+                }
+            ],
+            session_stats={
+                "total_calls": 1,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 1,
+            },
+            tool="bash",
+            args={"command": "rg pattern /opt/homebrew/other"},
+            agent_id=None,
+        )
+
+        assert "escalate→user:approve" in result
+        assert "let it explore opencode source code" in result
+
+    def test_evaluation_prompt_omits_user_note_when_absent(self):
+        """No extra content when user_note is None."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        result = build_evaluation_user_prompt(
+            intention="Build a web app",
+            policy=None,
+            recent_history=[
+                {
+                    "tool": "bash",
+                    "args_redacted": {"command": "ls"},
+                    "decision": "approve",
+                    "reasoning": "Safe read",
+                }
+            ],
+            session_stats={
+                "total_calls": 1,
+                "approved_count": 1,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="read",
+            args={"filePath": "/src/main.py"},
+            agent_id=None,
+        )
+
+        assert "[user:" not in result
+
+    def test_evaluation_prompt_user_note_newlines_collapsed(self):
+        """Newlines in user_note are collapsed to spaces."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        result = build_evaluation_user_prompt(
+            intention="Explore codebase",
+            policy=None,
+            recent_history=[
+                {
+                    "tool": "bash",
+                    "args_redacted": {"command": "rg pattern /outside"},
+                    "decision": "escalate",
+                    "user_decision": "approve",
+                    "user_note": "Yes\nthat is ok\nlet it explore",
+                    "reasoning": "Not aligned",
+                }
+            ],
+            session_stats={
+                "total_calls": 1,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 1,
+            },
+            tool="bash",
+            args={"command": "rg other /outside"},
+            agent_id=None,
+        )
+
+        # Note should be on one line (newlines collapsed)
+        assert "Yes that is ok let it explore" in result
+        # No raw newlines inside the decision label
+        for line in result.split("\n"):
+            if "escalate→user:approve" in line:
+                assert "Yes that is ok let it explore" in line
+                break
+        else:
+            pytest.fail("escalate→user:approve line not found")
+
+    def test_evaluation_prompt_user_note_truncated(self):
+        """Long user notes are truncated to 80 chars."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        long_note = "A" * 200
+        result = build_evaluation_user_prompt(
+            intention="Explore codebase",
+            policy=None,
+            recent_history=[
+                {
+                    "tool": "bash",
+                    "args_redacted": {"command": "rg pattern /outside"},
+                    "decision": "escalate",
+                    "user_decision": "approve",
+                    "user_note": long_note,
+                    "reasoning": "Not aligned",
+                }
+            ],
+            session_stats={
+                "total_calls": 1,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 1,
+            },
+            tool="bash",
+            args={"command": "rg other /outside"},
+            agent_id=None,
+        )
+
+        # Full 200-char note should not appear
+        assert long_note not in result
+        # But truncated version with ellipsis should
+        assert "..." in result
+
 
 # ── SessionPolicy validation ─────────────────────────────────────────
 
