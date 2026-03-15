@@ -4,6 +4,10 @@
  * Shows the agent-scoped behavioral profile (risk level, alerts, context),
  * trend charts (risk over time, findings distribution), and a paginated
  * list of cross-session analyses with expandable findings and recommendations.
+ *
+ * Chart data strategy:
+ * - Doughnut charts: show data from the LATEST analysis only (current state).
+ * - Time series charts: per-day bucketed, using the last analysis of each day.
  */
 
 /* global Alpine, IntarisAPI, Chart */
@@ -40,17 +44,37 @@ const ANALYSIS_SEVERITY_COLORS = {
   critical: ANALYSIS_COLORS.red,
 };
 
-// Category colors for finding types
+// Category colors for finding types (L2 indicators + L3 cross-session findings)
 const CATEGORY_COLORS = {
+  // L2 summary indicators
   intent_drift:               ANALYSIS_COLORS.purple,
   restriction_circumvention:  ANALYSIS_COLORS.red,
   scope_creep:                ANALYSIS_COLORS.orange,
   insecure_reasoning:         ANALYSIS_COLORS.pink,
   unusual_tool_pattern:       ANALYSIS_COLORS.amber,
-  injection_attempt:          ANALYSIS_COLORS.red,
+  injection_attempt:          '#EF4444', // distinct red
   escalation_pattern:         ANALYSIS_COLORS.teal,
   delegation_misalignment:    ANALYSIS_COLORS.slate,
+  // L3 cross-session findings
+  coordinated_access:         ANALYSIS_COLORS.purple,
+  progressive_escalation:     '#EF4444',
+  intent_masking:             ANALYSIS_COLORS.pink,
+  tool_abuse:                 ANALYSIS_COLORS.orange,
+  persistent_misalignment:    ANALYSIS_COLORS.amber,
+  insecure_reasoning_pattern: ANALYSIS_COLORS.teal,
 };
+
+// Fallback palette for unknown categories (cycles through distinct colors)
+const _FALLBACK_PALETTE = [
+  '#818CF8', '#FB7185', '#38BDF8', '#A3E635', '#E879F9',
+  '#FACC15', '#4ADE80', '#F97316', '#67E8F9', '#C084FC',
+];
+
+/** Get color for a category, with fallback cycling for unknown ones. */
+function _categoryColor(name, index) {
+  if (CATEGORY_COLORS[name]) return CATEGORY_COLORS[name];
+  return _FALLBACK_PALETTE[index % _FALLBACK_PALETTE.length];
+}
 
 // Numeric mapping for risk level line chart
 const RISK_LEVEL_VALUE = { low: 1, medium: 2, high: 3, critical: 4 };
@@ -89,6 +113,48 @@ if (typeof Chart !== 'undefined' && !Chart.registry.plugins.get(_analysisCenterT
       ctx.restore();
     },
   });
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/** Count occurrences by key in an array of objects. */
+function _countBy(items, key) {
+  const counts = {};
+  for (const item of items) {
+    const val = item[key] || 'unknown';
+    counts[val] = (counts[val] || 0) + 1;
+  }
+  return counts;
+}
+
+/**
+ * Bucket analyses by day (YYYY-MM-DD), keeping only the LAST analysis
+ * per day (most recent created_at). Returns array sorted chronologically.
+ */
+function _bucketByDay(analyses) {
+  // Sort chronologically first
+  const sorted = [...analyses].sort(
+    (a, b) => new Date(a.created_at) - new Date(b.created_at),
+  );
+
+  const dayMap = new Map(); // day string -> analysis (last wins)
+  for (const a of sorted) {
+    const day = new Date(a.created_at).toISOString().slice(0, 10);
+    dayMap.set(day, a);
+  }
+
+  // Return in chronological order
+  return [...dayMap.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([day, analysis]) => ({ day, analysis }));
+}
+
+/**
+ * Format a YYYY-MM-DD string as a short date label.
+ */
+function _formatDayLabel(dayStr) {
+  const d = new Date(dayStr + 'T00:00:00');
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -155,7 +221,7 @@ function analysisTab() {
         if (agent) params.agent_id = agent;
         this.profile = await IntarisAPI.getProfile(params);
       } catch (e) {
-        // Profile may 403 for non-bound keys — show defaults
+        // Profile may not exist yet — show defaults
         this.profile = { risk_level: 'low', profile_version: 0, active_alerts: [], context_summary: null, updated_at: null };
       } finally {
         this.profileLoading = false;
@@ -197,30 +263,13 @@ function analysisTab() {
       }
     },
 
-    // ── Chart data aggregation ─────────────────────────────────────
+    // ── Chart data helpers ─────────────────────────────────────────
 
-    /** Aggregate all findings across loaded analyses. */
-    _allFindings() {
-      const findings = [];
-      for (const a of this.analyses) {
-        if (a.findings) findings.push(...a.findings);
-      }
-      return findings;
-    },
-
-    /** Count occurrences by key in an array of objects. */
-    _countBy(items, key) {
-      const counts = {};
-      for (const item of items) {
-        const val = item[key] || 'unknown';
-        counts[val] = (counts[val] || 0) + 1;
-      }
-      return counts;
-    },
-
-    /** Count analyses by risk_level. */
-    _riskDistribution() {
-      return this._countBy(this.analyses, 'risk_level');
+    /** Get the latest (most recent) analysis, or null. */
+    _latestAnalysis() {
+      if (!this.analyses.length) return null;
+      // analyses are sorted by created_at DESC from the API
+      return this.analyses[0];
     },
 
     // ── Chart rendering ────────────────────────────────────────────
@@ -232,31 +281,33 @@ function analysisTab() {
     _renderAllCharts() {
       if (!this.analyses.length || typeof Chart === 'undefined') return;
 
-      const findings = this._allFindings();
+      const latest = this._latestAnalysis();
+      const latestFindings = latest?.findings || [];
 
-      // Doughnut charts
+      // Doughnut charts — latest analysis only
       this._renderDoughnut(
         'analysisCategoriesChart',
-        this._countBy(findings, 'category'),
-        CATEGORY_COLORS,
+        _countBy(latestFindings, 'category'),
+        null, // use _categoryColor for dynamic coloring
         'categories',
       );
       this._renderDoughnut(
         'analysisSeverityChart',
-        this._countBy(findings, 'severity'),
+        _countBy(latestFindings, 'severity'),
         ANALYSIS_SEVERITY_COLORS,
         'findings',
       );
       this._renderDoughnut(
         'analysisRiskLevelsChart',
-        this._riskDistribution(),
+        _countBy(this.analyses, 'risk_level'),
         ANALYSIS_RISK_COLORS,
         'analyses',
       );
 
-      // Time series
+      // Time series (per-day bucketed)
       this._renderRiskTimeline();
       this._renderFindingsTimeline();
+      this._renderCategoriesTimeline();
     },
 
     _renderDoughnut(canvasId, data, colorMap, subtext) {
@@ -278,7 +329,9 @@ function analysisTab() {
       const labels = Object.keys(data);
       const values = Object.values(data);
       const total = values.reduce((a, b) => a + b, 0);
-      const colors = labels.map(l => colorMap[l] || ANALYSIS_COLORS.muted);
+      const colors = colorMap
+        ? labels.map(l => colorMap[l] || ANALYSIS_COLORS.muted)
+        : labels.map((l, i) => _categoryColor(l, i));
 
       this._charts[canvasId] = new Chart(canvas, {
         type: 'doughnut',
@@ -343,7 +396,9 @@ function analysisTab() {
       const labels = Object.keys(data);
       const values = Object.values(data);
       const total = values.reduce((a, b) => a + b, 0);
-      const colors = labels.map(l => colorMap[l] || ANALYSIS_COLORS.muted);
+      const colors = colorMap
+        ? labels.map(l => colorMap[l] || ANALYSIS_COLORS.muted)
+        : labels.map((l, i) => _categoryColor(l, i));
 
       chart.data.labels = labels;
       chart.data.datasets[0].data = values;
@@ -355,19 +410,12 @@ function analysisTab() {
     },
 
     _renderRiskTimeline() {
-      if (this.analyses.length < 2) return;
+      const buckets = _bucketByDay(this.analyses);
+      if (buckets.length < 2) return;
 
-      // Sort chronologically (oldest first)
-      const sorted = [...this.analyses].sort(
-        (a, b) => new Date(a.created_at) - new Date(b.created_at),
-      );
-
-      const labels = sorted.map(a => {
-        const d = new Date(a.created_at);
-        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-      });
-      const values = sorted.map(a => RISK_LEVEL_VALUE[a.risk_level] || 0);
-      const pointColors = sorted.map(a => ANALYSIS_RISK_COLORS[a.risk_level] || ANALYSIS_COLORS.muted);
+      const labels = buckets.map(b => _formatDayLabel(b.day));
+      const values = buckets.map(b => RISK_LEVEL_VALUE[b.analysis.risk_level] || 0);
+      const pointColors = buckets.map(b => ANALYSIS_RISK_COLORS[b.analysis.risk_level] || ANALYSIS_COLORS.muted);
 
       const canvasId = 'analysisRiskTimeChart';
       const existing = this._charts[canvasId];
@@ -448,24 +496,17 @@ function analysisTab() {
     },
 
     _renderFindingsTimeline() {
-      if (this.analyses.length < 2) return;
+      const buckets = _bucketByDay(this.analyses);
+      if (buckets.length < 2) return;
 
-      // Sort chronologically
-      const sorted = [...this.analyses].sort(
-        (a, b) => new Date(a.created_at) - new Date(b.created_at),
-      );
-
-      const labels = sorted.map(a => {
-        const d = new Date(a.created_at);
-        return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-      });
+      const labels = buckets.map(b => _formatDayLabel(b.day));
 
       // Build stacked datasets by severity
       const severities = ['low', 'medium', 'high', 'critical'];
       const datasets = severities.map(sev => ({
         label: sev.charAt(0).toUpperCase() + sev.slice(1),
-        data: sorted.map(a => {
-          const findings = a.findings || [];
+        data: buckets.map(b => {
+          const findings = b.analysis.findings || [];
           return findings.filter(f => f.severity === sev).length;
         }),
         backgroundColor: ANALYSIS_SEVERITY_COLORS[sev] + 'CC',
@@ -473,7 +514,41 @@ function analysisTab() {
         borderSkipped: false,
       }));
 
-      const canvasId = 'analysisFindingsTimeChart';
+      this._renderStackedBar('analysisFindingsTimeChart', labels, datasets);
+    },
+
+    _renderCategoriesTimeline() {
+      const buckets = _bucketByDay(this.analyses);
+      if (buckets.length < 2) return;
+
+      const labels = buckets.map(b => _formatDayLabel(b.day));
+
+      // Collect all unique categories across all bucketed analyses
+      const allCategories = new Set();
+      for (const b of buckets) {
+        for (const f of (b.analysis.findings || [])) {
+          allCategories.add(f.category || 'unknown');
+        }
+      }
+      const categories = [...allCategories].sort();
+
+      // Build stacked datasets by category
+      const datasets = categories.map((cat, i) => ({
+        label: cat,
+        data: buckets.map(b => {
+          const findings = b.analysis.findings || [];
+          return findings.filter(f => (f.category || 'unknown') === cat).length;
+        }),
+        backgroundColor: _categoryColor(cat, i) + 'CC',
+        borderRadius: 2,
+        borderSkipped: false,
+      }));
+
+      this._renderStackedBar('analysisCategoriesTimeChart', labels, datasets);
+    },
+
+    /** Shared renderer for stacked bar charts (findings + categories timelines). */
+    _renderStackedBar(canvasId, labels, datasets) {
       const existing = this._charts[canvasId];
       if (existing && existing.canvas && existing.canvas.isConnected) {
         existing.data.labels = labels;
@@ -512,6 +587,7 @@ function analysisTab() {
               intersect: false,
               callbacks: {
                 label(ctx) {
+                  if (ctx.raw === 0) return null; // hide zero entries
                   return ' ' + ctx.dataset.label + ': ' + ctx.raw;
                 },
               },

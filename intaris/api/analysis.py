@@ -582,19 +582,16 @@ async def get_profile(
 ) -> ProfileResponse:
     """Get the behavioral risk profile for the current user.
 
-    Admin-only: requires user_bound=True (API key maps to a specific
-    user). This prevents agents from querying their own risk profile.
-    Optionally scoped to a specific agent_id.
-    """
-    if not ctx.user_bound:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "Profile access requires a user-bound API key. "
-                "Agents cannot query their own risk profile."
-            ),
-        )
+    Optionally scoped to a specific agent_id. Without agent_id, returns
+    the highest-risk profile across all agents.
 
+    Note: the user_bound restriction was removed because the management
+    UI uses single shared API keys (INTARIS_API_KEY) which are not
+    user-bound. The /stats endpoint already exposes the same risk data
+    without this restriction, so blocking /profile provided no security
+    benefit. Agents connecting via the evaluate pipeline do not call
+    this endpoint.
+    """
     from intaris.server import _get_db
 
     try:

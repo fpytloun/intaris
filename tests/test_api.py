@@ -1134,12 +1134,14 @@ class TestAnalysisEndpoints:
         assert data["items"] == []
         assert data["total"] == 0
 
-    def test_profile_requires_user_bound(self, client_no_auth):
-        """GET /profile returns 403 when user is not bound (agent access)."""
+    def test_profile_works_without_user_bound(self, client_no_auth):
+        """GET /profile returns default profile even without user-bound key."""
         headers = {"X-User-Id": "user-profile"}
         resp = client_no_auth.get("/api/v1/profile", headers=headers)
-        assert resp.status_code == 403
-        assert "user-bound" in resp.json()["detail"].lower()
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["risk_level"] == "low"
+        assert data["profile_version"] == 0
 
     def test_profile_with_bound_user(self, tmp_db):
         """GET /profile returns default profile for bound user."""

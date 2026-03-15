@@ -1168,10 +1168,21 @@
           </div>
 
           <!-- Findings Over Time -->
-          <div>
+          <div class="mb-6">
             <h3 class="chart-title">Findings Over Time</h3>
             <div class="chart-container-bar">
               <canvas id="analysisFindingsTimeChart"></canvas>
+            </div>
+            <div x-show="analyses.length < 2" class="text-xs text-muted text-center py-4">
+              Needs at least 2 analyses to show trend
+            </div>
+          </div>
+
+          <!-- Finding Categories Over Time -->
+          <div>
+            <h3 class="chart-title">Finding Categories Over Time</h3>
+            <div class="chart-container-bar">
+              <canvas id="analysisCategoriesTimeChart"></canvas>
             </div>
             <div x-show="analyses.length < 2" class="text-xs text-muted text-center py-4">
               Needs at least 2 analyses to show trend
