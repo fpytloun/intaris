@@ -255,7 +255,8 @@ function analysisTab() {
         if ((data.type === 'task_completed' || data.type === 'task_failed')
             && ['summary', 'analysis'].includes(data.task_type)) {
           if (data.task_type === 'analysis' && data.type === 'task_completed') {
-            // Full reload covers loadTaskStatus() internally
+            // Destroy charts before reload to avoid Canvas conflicts
+            _destroyAllAnalysisCharts();
             this.loadData();
           } else {
             this.loadTaskStatus();

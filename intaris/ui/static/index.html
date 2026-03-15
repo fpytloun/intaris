@@ -1141,14 +1141,14 @@
             <template x-if="profile.active_alerts && profile.active_alerts.length > 0">
               <div class="space-y-2">
                 <div class="text-xs text-secondary font-medium">Active Alerts</div>
-                <template x-for="alert in profile.active_alerts" :key="alert.detail">
+                <template x-for="alert in profile.active_alerts" :key="alert.detail || alert.summary || alert.category">
                   <div class="flex items-start gap-2 bg-surface-secondary rounded-lg p-3">
                     <span class="text-xs font-medium px-2 py-0.5 rounded"
                           :class="severityBadgeClass(alert.severity)"
                           x-text="riskBand(alert.severity).toUpperCase()"></span>
                     <div>
                       <div class="text-sm font-medium" x-text="alert.category"></div>
-                      <div class="text-xs text-secondary" x-text="alert.detail"></div>
+                      <div class="text-xs text-secondary" x-text="alert.detail || alert.summary || ''"></div>
                     </div>
                   </div>
                 </template>
@@ -1272,7 +1272,7 @@
                                     x-text="riskBand(finding.severity).toUpperCase()"></span>
                               <span class="text-sm font-medium" x-text="finding.category"></span>
                             </div>
-                            <div class="text-xs text-secondary" x-text="finding.detail"></div>
+                            <div class="text-xs text-secondary" x-text="finding.detail || finding.summary || ''"></div>
                             <template x-if="finding.session_ids && finding.session_ids.length > 0">
                               <div class="text-xs text-secondary mt-1 flex flex-wrap items-center gap-1">
                                 <span>Sessions:</span>

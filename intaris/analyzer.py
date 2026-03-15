@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
@@ -686,6 +687,14 @@ def run_analysis(
         lookback_days=lookback_days,
     )
 
+    logger.info(
+        "Starting cross-session analysis: user=%s agent=%s sessions=%d",
+        user_id,
+        agent_id,
+        len(summaries_by_session),
+    )
+    t0 = time.monotonic()
+
     try:
         raw_response = llm.generate(
             messages=[
@@ -706,6 +715,14 @@ def run_analysis(
         )
         raise
 
+    llm_duration = time.monotonic() - t0
+    logger.info(
+        "L3 LLM call completed: user=%s agent=%s duration=%.1fs",
+        user_id,
+        agent_id,
+        llm_duration,
+    )
+
     # Store the analysis
     analysis_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -714,9 +731,20 @@ def run_analysis(
     recommendations = result.get("recommendations", [])
     risk_score = coerce_risk_score(result.get("risk_level", 1))
 
-    # Coerce finding severities to integers
+    # Normalize finding fields — defensive against LLM fallback mode
+    # where strict schema is not enforced (e.g., 'summary' instead of
+    # 'detail', missing 'session_ids').
     for finding in findings:
         finding["severity"] = coerce_risk_score(finding.get("severity", 1))
+        if "detail" not in finding:
+            finding["detail"] = (
+                finding.pop("summary", None)
+                or finding.pop("description", None)
+                or finding.pop("text", None)
+                or ""
+            )
+        if "session_ids" not in finding:
+            finding["session_ids"] = []
 
     with db.cursor() as cur:
         cur.execute(

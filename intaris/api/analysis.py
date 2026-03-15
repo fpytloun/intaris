@@ -500,20 +500,61 @@ async def trigger_analysis(
         )
 
     try:
+        from intaris.server import _get_db
+
         task_queue = worker._task_queue
-        if task_queue.cancel_duplicate("analysis", ctx.user_id):
-            return AnalysisTriggerResponse(ok=True, task_id=None)
 
-        task_id = task_queue.enqueue(
-            "analysis",
+        if agent_id:
+            # Single agent — check for duplicate, enqueue one task
+            if task_queue.cancel_duplicate("analysis", ctx.user_id):
+                return AnalysisTriggerResponse(ok=True, task_id=None)
+            task_id = task_queue.enqueue(
+                "analysis",
+                ctx.user_id,
+                payload={
+                    "triggered_by": "manual",
+                    "agent_id": agent_id,
+                },
+            )
+            return AnalysisTriggerResponse(ok=True, task_id=task_id)
+
+        # All agents — enumerate distinct agents for this user and
+        # enqueue a separate analysis task for each, matching the
+        # periodic scheduler pattern in BackgroundWorker.
+        db = _get_db()
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT COALESCE(agent_id, '') as agent_id "
+                "FROM sessions WHERE user_id = ?",
+                (ctx.user_id,),
+            )
+            agents = [
+                row["agent_id"] if isinstance(row, dict) else row[0]
+                for row in cur.fetchall()
+            ]
+
+        # Per-agent dedup: check each agent individually so a running
+        # task for one agent doesn't block others from being enqueued.
+        enqueued = 0
+        for aid in agents:
+            if not task_queue.cancel_duplicate("analysis", ctx.user_id):
+                task_queue.enqueue(
+                    "analysis",
+                    ctx.user_id,
+                    payload={
+                        "triggered_by": "manual",
+                        "agent_id": aid,
+                    },
+                )
+                enqueued += 1
+
+        logger.info(
+            "Analysis triggered for all agents: user=%s agents=%d enqueued=%d",
             ctx.user_id,
-            payload={
-                "triggered_by": "manual",
-                "agent_id": agent_id or "",
-            },
+            len(agents),
+            enqueued,
         )
-
-        return AnalysisTriggerResponse(ok=True, task_id=task_id)
+        return AnalysisTriggerResponse(ok=True, task_id=None)
     except Exception:
         logger.exception("Error in /analysis/trigger")
         raise HTTPException(
