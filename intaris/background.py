@@ -1269,9 +1269,15 @@ class BackgroundWorker:
         # Enqueue summaries for sessions that should have them but don't.
         # Covers: crash between idle transition and task enqueue, tasks
         # that failed permanently, terminated/suspended sessions.
+        # Only catches up recent sessions (within lookback_days) to avoid
+        # re-enqueuing ancient sessions on every restart.
         if self.analyzer_ready:
             try:
                 enqueued = 0
+                cutoff = (
+                    datetime.now(timezone.utc)
+                    - timedelta(days=self._config.lookback_days)
+                ).isoformat()
 
                 # 1. Sessions with no summaries at all
                 with self._db.cursor() as cur:
@@ -1282,7 +1288,9 @@ class BackgroundWorker:
                                          'terminated', 'suspended')
                           AND summary_count = 0
                           AND total_calls > 0
-                        """
+                          AND last_activity_at >= ?
+                        """,
+                        (cutoff,),
                     )
                     no_summary = cur.fetchall()
 
@@ -1299,23 +1307,27 @@ class BackgroundWorker:
                         )
                         enqueued += 1
 
-                # 2. Completed/terminated sessions with summaries but no
-                #    compacted summary (compaction gap — e.g., volume summary
-                #    was running when session closed, close summary was
-                #    skipped by cancel_duplicate).
+                # 2. Completed/terminated sessions with multiple window
+                #    summaries but no compacted summary (compaction gap —
+                #    e.g., volume summary was running when session closed,
+                #    close summary was skipped by cancel_duplicate).
+                #    Requires summary_count > 1 because compaction needs
+                #    at least 2 window summaries.
                 with self._db.cursor() as cur:
                     cur.execute(
                         """
                         SELECT s.user_id, s.session_id FROM sessions s
                         WHERE s.status IN ('completed', 'terminated')
-                          AND s.summary_count > 0
+                          AND s.summary_count > 1
+                          AND s.last_activity_at >= ?
                           AND NOT EXISTS (
                               SELECT 1 FROM session_summaries ss
                               WHERE ss.user_id = s.user_id
                                 AND ss.session_id = s.session_id
                                 AND ss.summary_type = 'compacted'
                           )
-                        """
+                        """,
+                        (cutoff,),
                     )
                     no_compaction = cur.fetchall()
 
