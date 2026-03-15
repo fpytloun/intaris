@@ -203,6 +203,11 @@
     @apply w-full max-w-[200px] mx-auto;
   }
 
+  .chart-container-doughnut-wide {
+    @apply w-full;
+    height: 200px;
+  }
+
   .chart-container-timeline {
     height: 180px;
   }

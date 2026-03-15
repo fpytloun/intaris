@@ -315,12 +315,19 @@ function analysisTab() {
       return this.analyses.length > 0;
     },
 
-    _renderAllCharts() {
+    _renderAllCharts(retries = 5) {
       if (!this.analyses.length || typeof Chart === 'undefined') return;
 
-      // Safety: skip if canvases are not visible (hidden tab)
+      // Wait for canvases to become visible — Alpine x-show may not
+      // have flushed yet after reactive updates.  Retry a few times
+      // with a short delay instead of silently skipping.
       const testCanvas = document.getElementById('analysisCategoriesChart');
-      if (!testCanvas || testCanvas.offsetParent === null) return;
+      if (!testCanvas || testCanvas.offsetParent === null) {
+        if (retries > 0) {
+          setTimeout(() => this._renderAllCharts(retries - 1), 50);
+        }
+        return;
+      }
 
       const latest = this._latestAnalysis();
       const latestFindings = latest?.findings || [];
@@ -383,14 +390,15 @@ function analysisTab() {
         },
         options: {
           responsive: true,
-          maintainAspectRatio: true,
+          maintainAspectRatio: false,
           cutout: '65%',
           plugins: {
             legend: {
-              position: 'bottom',
+              position: 'right',
               labels: {
                 color: ANALYSIS_COLORS.text,
-                padding: 10,
+                padding: 8,
+                boxWidth: 12,
                 font: { size: 10 },
                 generateLabels(chart) {
                   const ds = chart.data.datasets[0];

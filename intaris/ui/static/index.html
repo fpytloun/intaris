@@ -1135,16 +1135,16 @@
           <h2 class="text-lg font-medium mb-4">Analysis Trends</h2>
 
           <!-- Doughnut row (latest analysis, session counts) -->
-          <div class="grid grid-cols-2 gap-4 mb-6">
-            <div class="chart-card">
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+            <div>
               <h3 class="chart-title">Sessions by Category</h3>
-              <div class="chart-container-doughnut">
+              <div class="chart-container-doughnut-wide">
                 <canvas id="analysisCategoriesChart"></canvas>
               </div>
             </div>
-            <div class="chart-card">
+            <div>
               <h3 class="chart-title">Sessions by Severity</h3>
-              <div class="chart-container-doughnut">
+              <div class="chart-container-doughnut-wide">
                 <canvas id="analysisSeverityChart"></canvas>
               </div>
             </div>
