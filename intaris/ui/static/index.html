@@ -1854,6 +1854,12 @@
           <span class="badge badge-low text-xs" x-text="sourceLabel()"></span>
         </div>
         <div class="flex items-center gap-2">
+          <!-- Source toggle -->
+          <button @click.stop="toggleSources()"
+                  :class="showAllSources ? 'btn-success' : 'btn-secondary'"
+                  class="text-xs py-1 px-2">
+            <span x-text="showAllSources ? 'All sources' : 'Agent only'"></span>
+          </button>
           <!-- Live tail toggle -->
           <button @click.stop="toggleLiveTail()"
                   :class="liveTail ? 'btn-success' : 'btn-secondary'"
@@ -1925,9 +1931,14 @@
 
             <!-- Tool group -->
             <template x-if="block.type === 'tool-group'">
-              <div class="console-tool" :class="block.isError ? 'console-tool-error' : ''">
+              <div class="console-tool"
+                   :class="{ 'console-tool-error': block.isError }"
+                   :style="block.intaris ? 'border-left: 2px solid rgba(96, 165, 250, 0.4)' : ''">
                 <div class="console-tool-header" @click="toggleTool(block.id)">
                   <span x-text="isToolExpanded(block.id) ? '▼' : '▶'" class="console-chevron"></span>
+                  <template x-if="block.intaris">
+                    <span class="font-medium uppercase tracking-wider" style="font-size: 10px; color: rgba(96, 165, 250, 0.7); margin-right: 4px">intaris</span>
+                  </template>
                   <span class="console-tool-name" x-text="block.tool"></span>
                   <span class="console-tool-subtitle" x-text="block.subtitle"></span>
                   <span class="ml-auto flex items-center gap-1.5 flex-shrink-0">

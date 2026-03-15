@@ -395,13 +395,13 @@ function processOpenCode(events) {
     // ── Skip consumed events ──
     if (event.type === 'tool_result' || event.type === 'evaluation') {
       if (consumed.has(event.seq)) continue;
-      // Uncorrelated evaluation — render standalone
+      // Uncorrelated evaluation — render standalone (intaris-sourced)
       if (event.type === 'evaluation') {
         blocks.push({
           type: 'tool-group',
           id: 'b' + (blockId++),
           tool: data.tool || '?',
-          subtitle: '',
+          subtitle: data.reasoning || '',
           args: data.args_redacted || {},
           argsDisplay: formatArgsDisplay(data.tool, data.args_redacted || {}),
           decision: data.decision || null,
@@ -413,6 +413,7 @@ function processOpenCode(events) {
           isError: false,
           title: '',
           ts: event.ts,
+          intaris: true,
         });
       }
       continue;
@@ -676,6 +677,9 @@ function consolePlayer() {
     afterTs: '',
     beforeTs: '',
 
+    // Source filter: false = agent-only (exclude intaris), true = all sources
+    showAllSources: false,
+
     // Collapsible state
     expandedTools: {},
     expandedReasoning: {},
@@ -695,6 +699,7 @@ function consolePlayer() {
       this.autoScroll = true;
       this.afterTs = opts.afterTs ? this._toLocalDatetime(opts.afterTs) : '';
       this.beforeTs = opts.beforeTs ? this._toLocalDatetime(opts.beforeTs) : '';
+      this.showAllSources = false;
       this.expandedTools = {};
       this.expandedReasoning = {};
       this.stopLiveTail();
@@ -704,6 +709,12 @@ function consolePlayer() {
         .catch(() => {});
       await this.loadEvents();
       this.processEvents();
+      // Fallback: if no agent events found, retry with all sources
+      if (this.events.length === 0 && !this.showAllSources) {
+        this.showAllSources = true;
+        await this.loadEvents();
+        this.processEvents();
+      }
       this.scrollToBottom();
       this.startLiveTail();
     },
@@ -769,6 +780,21 @@ function consolePlayer() {
       return local || '';
     },
 
+    /**
+     * Toggle between agent-only and all sources, reload events.
+     */
+    async toggleSources() {
+      this.showAllSources = !this.showAllSources;
+      this.events = [];
+      this.blocks = [];
+      this.lastSeq = 0;
+      this.hasMore = false;
+      this.autoScroll = true;
+      await this.loadEvents();
+      this.processEvents();
+      this.scrollToBottom();
+    },
+
     // ── Data loading ──
 
     async loadEvents() {
@@ -780,8 +806,8 @@ function consolePlayer() {
         const params = {
           after_seq: this.lastSeq,
           limit: this.pageSize,
-          exclude_source: 'intaris',
         };
+        if (!this.showAllSources) params.exclude_source = 'intaris';
         if (this.afterTs) params.after_ts = this._toISOString(this.afterTs);
         if (this.beforeTs) params.before_ts = this._toISOString(this.beforeTs);
 
@@ -838,8 +864,8 @@ function consolePlayer() {
         onMessage: (data) => {
           if (data.type === 'session_event' && data.event) {
             const event = data.event;
-            // Skip intaris-source events
-            if (event.source === 'intaris') return;
+            // Skip intaris-source events unless showing all sources
+            if (!this.showAllSources && event.source === 'intaris') return;
             if (!this.events.some(e => e.seq === event.seq)) {
               this.events.push(event);
               if (event.seq > this.lastSeq) this.lastSeq = event.seq;

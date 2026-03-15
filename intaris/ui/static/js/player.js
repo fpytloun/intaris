@@ -23,7 +23,7 @@ function sessionPlayer() {
 
     // Filtering
     typeFilter: '__all__',
-    sourceFilter: '__agent__',
+    sourceFilter: '__all__',
 
     // Time range filter
     afterTs: '',
@@ -64,6 +64,10 @@ function sessionPlayer() {
       this.autoScroll = true;
       this.afterTs = opts.afterTs ? this._toLocalDatetime(opts.afterTs) : '';
       this.beforeTs = opts.beforeTs ? this._toLocalDatetime(opts.beforeTs) : '';
+      // Force "All sources" when opened with time range (e.g., from summary card)
+      if (opts.afterTs || opts.beforeTs) {
+        this.sourceFilter = '__all__';
+      }
       this.stopLiveTail();
       this.stopPlaying();
       await this.loadEvents();
