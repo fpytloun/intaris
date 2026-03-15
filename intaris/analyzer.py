@@ -69,7 +69,7 @@ _TOOL_CALL_EST = 250
 _PARTITION_OVERHEAD = 2_000
 
 
-async def generate_summary(
+def generate_summary(
     db: Database,
     llm: Any | None,
     task: dict[str, Any],
@@ -240,7 +240,7 @@ async def generate_summary(
     if not has_sufficient_data:
         # Check if compaction is possible even without new data
         if prior_window_count > 1:
-            compaction_result = await _generate_compaction(
+            compaction_result = _generate_compaction(
                 db,
                 llm,
                 user_id=user_id,
@@ -508,7 +508,7 @@ async def generate_summary(
     total_windows = _count_prior_summaries(db, user_id, session_id)
 
     if total_windows > 1:
-        compaction_result = await _generate_compaction(
+        compaction_result = _generate_compaction(
             db,
             llm,
             user_id=user_id,
@@ -542,7 +542,7 @@ async def generate_summary(
     }
 
 
-async def run_analysis(
+def run_analysis(
     db: Database,
     llm: Any | None,
     task: dict[str, Any],
@@ -1689,7 +1689,7 @@ def _append_child_section(
         parts.append("")
 
 
-async def _generate_compaction(
+def _generate_compaction(
     db: Database,
     llm: Any,
     *,

@@ -7,7 +7,6 @@ prompt building, and helper functions.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -172,7 +171,7 @@ class TestGenerateSummary:
         _insert_tool_calls(audit_store, count=5)
         from intaris.analyzer import generate_summary
 
-        result = asyncio.run(generate_summary(db, mock_llm, _make_task()))
+        result = generate_summary(db, mock_llm, _make_task())
         assert (
             result.get("summary_type") == "window" or result.get("compacted") is False
         )
@@ -195,7 +194,7 @@ class TestGenerateSummary:
         assert session_store.get("sess-1", user_id=TEST_USER)["summary_count"] == 0
         from intaris.analyzer import generate_summary
 
-        asyncio.run(generate_summary(db, mock_llm, _make_task()))
+        generate_summary(db, mock_llm, _make_task())
         assert session_store.get("sess-1", user_id=TEST_USER)["summary_count"] >= 1
 
     def test_skips_when_no_llm(self, db, session_store, audit_store):
@@ -204,7 +203,7 @@ class TestGenerateSummary:
         _insert_tool_calls(audit_store, count=5)
         from intaris.analyzer import generate_summary
 
-        result = asyncio.run(generate_summary(db, None, _make_task()))
+        result = generate_summary(db, None, _make_task())
         assert result["status"] == "skipped"
         assert "No LLM client" in result["reason"]
 
@@ -215,7 +214,7 @@ class TestGenerateSummary:
         # No tool calls, no reasoning — truly empty window
         from intaris.analyzer import generate_summary
 
-        result = asyncio.run(generate_summary(db, mock_llm, _make_task()))
+        result = generate_summary(db, mock_llm, _make_task())
         assert result["status"] == "skipped"
         assert "Insufficient data" in result["reason"]
 
@@ -223,19 +222,15 @@ class TestGenerateSummary:
         """Returns error when session does not exist."""
         from intaris.analyzer import generate_summary
 
-        result = asyncio.run(
-            generate_summary(db, mock_llm, _make_task(session_id="nonexistent"))
-        )
+        result = generate_summary(db, mock_llm, _make_task(session_id="nonexistent"))
         assert "error" in result
 
     def test_skips_when_missing_user_id(self, db, mock_llm):
         """Returns error when user_id is empty."""
         from intaris.analyzer import generate_summary
 
-        result = asyncio.run(
-            generate_summary(
-                db, mock_llm, {"user_id": "", "session_id": "s", "payload": {}}
-            )
+        result = generate_summary(
+            db, mock_llm, {"user_id": "", "session_id": "s", "payload": {}}
         )
         assert "error" in result
 
@@ -247,7 +242,7 @@ class TestGenerateSummary:
         _insert_tool_calls(audit_store, count=5)
         from intaris.analyzer import generate_summary
 
-        asyncio.run(generate_summary(db, mock_llm, _make_task()))
+        generate_summary(db, mock_llm, _make_task())
         session = session_store.get("sess-1", user_id=TEST_USER)
         with db.cursor() as cur:
             cur.execute(
@@ -267,7 +262,7 @@ class TestGenerateSummary:
         from intaris.analyzer import generate_summary
 
         with pytest.raises(RuntimeError, match="LLM timeout"):
-            asyncio.run(generate_summary(db, llm, _make_task()))
+            generate_summary(db, llm, _make_task())
 
     def test_audit_log_only_path(self, db, session_store, audit_store, mock_llm):
         """Without event store, uses audit-log-only path."""
@@ -275,7 +270,7 @@ class TestGenerateSummary:
         _insert_tool_calls(audit_store, count=5)
         from intaris.analyzer import generate_summary
 
-        asyncio.run(generate_summary(db, mock_llm, _make_task(), event_store=None))
+        generate_summary(db, mock_llm, _make_task(), event_store=None)
         call_args = mock_llm.generate.call_args
         system_msg = call_args[1]["messages"][0]["content"]
         assert "four data streams" not in system_msg
@@ -304,7 +299,7 @@ class TestRunAnalysis:
             "user_id": TEST_USER,
             "payload": {"triggered_by": "manual", "agent_id": "", "lookback_days": 30},
         }
-        result = asyncio.run(run_analysis(db, llm, task))
+        result = run_analysis(db, llm, task)
         assert "analysis_id" in result
         assert result["risk_level"] == "low"
         assert result["sessions_analyzed"] >= 2
@@ -319,7 +314,7 @@ class TestRunAnalysis:
             "user_id": TEST_USER,
             "payload": {"triggered_by": "manual", "agent_id": "", "lookback_days": 30},
         }
-        asyncio.run(run_analysis(db, llm, task))
+        run_analysis(db, llm, task)
         with db.cursor() as cur:
             cur.execute(
                 "SELECT risk_level, profile_version FROM behavioral_profiles "
@@ -334,9 +329,7 @@ class TestRunAnalysis:
         self._setup(db, session_store, audit_store)
         from intaris.analyzer import run_analysis
 
-        result = asyncio.run(
-            run_analysis(db, None, {"user_id": TEST_USER, "payload": {}})
-        )
+        result = run_analysis(db, None, {"user_id": TEST_USER, "payload": {}})
         assert result["status"] == "skipped"
 
     def test_skips_when_insufficient_sessions(self, db, session_store, audit_store):
@@ -348,7 +341,7 @@ class TestRunAnalysis:
         from intaris.analyzer import run_analysis
 
         task = {"user_id": TEST_USER, "payload": {"lookback_days": 30}}
-        result = asyncio.run(run_analysis(db, llm, task))
+        result = run_analysis(db, llm, task)
         assert result["status"] == "skipped"
 
     def test_filters_root_sessions_only(self, db, session_store, audit_store):
@@ -366,7 +359,7 @@ class TestRunAnalysis:
         from intaris.analyzer import run_analysis
 
         task = {"user_id": TEST_USER, "payload": {"lookback_days": 30}}
-        result = asyncio.run(run_analysis(db, llm, task))
+        result = run_analysis(db, llm, task)
         assert result["sessions_analyzed"] == 2
 
     def test_agent_scoped_filtering(self, db, session_store, audit_store):
@@ -391,7 +384,7 @@ class TestRunAnalysis:
             "user_id": TEST_USER,
             "payload": {"agent_id": "agent-a", "lookback_days": 30},
         }
-        result = asyncio.run(run_analysis(db, llm, task))
+        result = run_analysis(db, llm, task)
         assert result["sessions_analyzed"] == 2
 
     def test_llm_failure_propagates(self, db, session_store, audit_store):
@@ -401,10 +394,8 @@ class TestRunAnalysis:
         from intaris.analyzer import run_analysis
 
         with pytest.raises(RuntimeError, match="LLM error"):
-            asyncio.run(
-                run_analysis(
-                    db, llm, {"user_id": TEST_USER, "payload": {"lookback_days": 30}}
-                )
+            run_analysis(
+                db, llm, {"user_id": TEST_USER, "payload": {"lookback_days": 30}}
             )
 
 
@@ -1096,7 +1087,7 @@ class TestHierarchicalSummary:
             )
         from intaris.analyzer import generate_summary
 
-        result = asyncio.run(generate_summary(db, mock_llm, _make_task("sess-parent")))
+        result = generate_summary(db, mock_llm, _make_task("sess-parent"))
         assert result.get("needs_children") is True
 
     def test_proceeds_after_max_recheck(self, db, session_store, audit_store, mock_llm):
@@ -1107,7 +1098,7 @@ class TestHierarchicalSummary:
         from intaris.analyzer import _MAX_PARENT_RECHECK, generate_summary
 
         task = _make_task("sess-pm", parent_check_count=_MAX_PARENT_RECHECK)
-        result = asyncio.run(generate_summary(db, mock_llm, task))
+        result = generate_summary(db, mock_llm, task)
         assert result.get("needs_children") is not True
 
     def test_parent_no_children(self, db, session_store, audit_store, mock_llm):
@@ -1115,7 +1106,7 @@ class TestHierarchicalSummary:
         _insert_tool_calls(audit_store, "sess-pa", count=5)
         from intaris.analyzer import generate_summary
 
-        result = asyncio.run(generate_summary(db, mock_llm, _make_task("sess-pa")))
+        result = generate_summary(db, mock_llm, _make_task("sess-pa"))
         assert result.get("needs_children") is not True
 
     def test_child_data_compacted_preferred(self, db, session_store):
@@ -1216,15 +1207,13 @@ class TestCompaction:
         session = session_store.get("sess-compact", user_id=TEST_USER)
         from intaris.analyzer import _generate_compaction
 
-        result = asyncio.run(
-            _generate_compaction(
-                db,
-                mock_llm,
-                user_id=TEST_USER,
-                session_id="sess-compact",
-                session=session,
-                child_data=[],
-            )
+        result = _generate_compaction(
+            db,
+            mock_llm,
+            user_id=TEST_USER,
+            session_id="sess-compact",
+            session=session,
+            child_data=[],
         )
         assert result is not None and result["compacted"] is True
         with db.cursor() as cur:
@@ -1241,15 +1230,13 @@ class TestCompaction:
         from intaris.analyzer import _generate_compaction
 
         assert (
-            asyncio.run(
-                _generate_compaction(
-                    db,
-                    mock_llm,
-                    user_id=TEST_USER,
-                    session_id="sess-single",
-                    session=session,
-                    child_data=[],
-                )
+            _generate_compaction(
+                db,
+                mock_llm,
+                user_id=TEST_USER,
+                session_id="sess-single",
+                session=session,
+                child_data=[],
             )
             is None
         )
@@ -1274,15 +1261,13 @@ class TestCompaction:
         session = session_store.get("sess-super", user_id=TEST_USER)
         from intaris.analyzer import _generate_compaction
 
-        asyncio.run(
-            _generate_compaction(
-                db,
-                mock_llm,
-                user_id=TEST_USER,
-                session_id="sess-super",
-                session=session,
-                child_data=[],
-            )
+        _generate_compaction(
+            db,
+            mock_llm,
+            user_id=TEST_USER,
+            session_id="sess-super",
+            session=session,
+            child_data=[],
         )
         with db.cursor() as cur:
             cur.execute(
@@ -1319,7 +1304,7 @@ class TestEventEnrichedPath:
         ]
         from intaris.analyzer import generate_summary
 
-        asyncio.run(generate_summary(db, mock_llm, _make_task(), event_store=es))
+        generate_summary(db, mock_llm, _make_task(), event_store=es)
         system_msg = mock_llm.generate.call_args[1]["messages"][0]["content"]
         assert (
             "four data streams" in system_msg
@@ -1333,9 +1318,7 @@ class TestEventEnrichedPath:
         es.read.return_value = []
         from intaris.analyzer import generate_summary
 
-        result = asyncio.run(
-            generate_summary(db, mock_llm, _make_task(), event_store=es)
-        )
+        result = generate_summary(db, mock_llm, _make_task(), event_store=es)
         assert result.get("event_enriched") is False
 
     def test_sufficient_without_min_tool_calls(
@@ -1360,9 +1343,7 @@ class TestEventEnrichedPath:
         ]
         from intaris.analyzer import generate_summary
 
-        result = asyncio.run(
-            generate_summary(db, mock_llm, _make_task(), event_store=es)
-        )
+        result = generate_summary(db, mock_llm, _make_task(), event_store=es)
         assert result.get("status") != "skipped"
         assert result.get("event_enriched") is True
 

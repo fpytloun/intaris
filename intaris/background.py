@@ -746,8 +746,12 @@ class BackgroundWorker:
         )
 
         llm = self._get_analysis_llm()
-        result = await generate_summary(
-            self._db, llm, task, event_store=self._event_store
+        # Run in thread executor to avoid blocking the event loop.
+        # generate_summary() makes synchronous LLM calls (up to 30s each,
+        # potentially multiple per partition) that would block all HTTP
+        # request processing, WebSocket pings, and barrier events.
+        result = await asyncio.to_thread(
+            generate_summary, self._db, llm, task, self._event_store
         )
 
         # Handle parent waiting for children
@@ -842,7 +846,9 @@ class BackgroundWorker:
         from intaris.analyzer import run_analysis
 
         llm = self._get_analysis_llm()
-        return await run_analysis(self._db, llm, task)
+        # Run in thread executor to avoid blocking the event loop.
+        # run_analysis() makes synchronous LLM calls (up to 30s).
+        return await asyncio.to_thread(run_analysis, self._db, llm, task)
 
     @staticmethod
     def _should_notify_summary(result: dict[str, Any]) -> bool:
@@ -997,7 +1003,10 @@ class BackgroundWorker:
         # no double-update race between generate_intention and here.
         source = "bootstrap" if trigger == "bootstrap" else "user"
 
-        intention = generate_intention(
+        # Run in thread executor to avoid blocking the event loop.
+        # generate_intention() makes synchronous LLM calls (up to 30s).
+        intention = await asyncio.to_thread(
+            generate_intention,
             llm=analysis_llm,
             db=self._db,
             session_store=self._session_store,

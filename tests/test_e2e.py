@@ -1179,8 +1179,6 @@ class TestL2SummaryPipeline:
 
     def test_summary_generation(self, client):
         """Generate a session summary with real LLM after tool evaluations."""
-        import asyncio
-
         _create_session(
             client,
             "sess-l2-sum",
@@ -1222,7 +1220,7 @@ class TestL2SummaryPipeline:
             "session_id": "sess-l2-sum",
             "payload": {"trigger": "manual"},
         }
-        result = asyncio.run(generate_summary(db, llm, task))
+        result = generate_summary(db, llm, task)
 
         # Verify summary was generated
         assert result.get("error") is None
@@ -1248,8 +1246,6 @@ class TestL2SummaryPipeline:
 
     def test_summary_with_reasoning(self, client):
         """Summary incorporates reasoning data when available."""
-        import asyncio
-
         _create_session(
             client,
             "sess-l2-reas",
@@ -1298,7 +1294,7 @@ class TestL2SummaryPipeline:
             "session_id": "sess-l2-reas",
             "payload": {"trigger": "manual"},
         }
-        result = asyncio.run(generate_summary(db, llm, task))
+        result = generate_summary(db, llm, task)
         assert result.get("error") is None
         assert result.get("status") != "skipped"
 
@@ -1318,8 +1314,6 @@ class TestL3AnalysisPipeline:
     @pytest.mark.timeout(90)
     def test_cross_session_analysis(self, client):
         """Run cross-session analysis across multiple sessions."""
-        import asyncio
-
         # Create and populate 2 sessions
         for i, (sid, intention) in enumerate(
             [
@@ -1360,7 +1354,7 @@ class TestL3AnalysisPipeline:
                 "session_id": sid,
                 "payload": {"trigger": "manual"},
             }
-            result = asyncio.run(generate_summary(db, llm, task))
+            result = generate_summary(db, llm, task)
             assert result.get("status") != "skipped", (
                 f"Summary generation skipped for {sid}: {result}"
             )
@@ -1374,7 +1368,7 @@ class TestL3AnalysisPipeline:
                 "lookback_days": 30,
             },
         }
-        result = asyncio.run(run_analysis(db, llm, analysis_task))
+        result = run_analysis(db, llm, analysis_task)
 
         assert result.get("status") != "skipped", f"Analysis skipped: {result}"
         assert "analysis_id" in result
@@ -1390,8 +1384,6 @@ class TestL3AnalysisPipeline:
     @pytest.mark.timeout(90)
     def test_profile_updated_after_analysis(self, client):
         """Behavioral profile is updated after analysis."""
-        import asyncio
-
         # Create 2 sessions with summaries
         for sid, intention in [
             ("sess-l3-prof-a", "Implement feature A"),
@@ -1417,31 +1409,27 @@ class TestL3AnalysisPipeline:
         llm = LLMClient(cfg.llm_analysis)
 
         for sid in ["sess-l3-prof-a", "sess-l3-prof-b"]:
-            asyncio.run(
-                generate_summary(
-                    db,
-                    llm,
-                    {
-                        "user_id": _DEFAULT_USER,
-                        "session_id": sid,
-                        "payload": {"trigger": "manual"},
-                    },
-                )
-            )
-
-        asyncio.run(
-            run_analysis(
+            generate_summary(
                 db,
                 llm,
                 {
                     "user_id": _DEFAULT_USER,
-                    "payload": {
-                        "triggered_by": "manual",
-                        "agent_id": "",
-                        "lookback_days": 30,
-                    },
+                    "session_id": sid,
+                    "payload": {"trigger": "manual"},
                 },
             )
+
+        run_analysis(
+            db,
+            llm,
+            {
+                "user_id": _DEFAULT_USER,
+                "payload": {
+                    "triggered_by": "manual",
+                    "agent_id": "",
+                    "lookback_days": 30,
+                },
+            },
         )
 
         # Verify profile exists in DB
@@ -1548,8 +1536,6 @@ def _do_generate_summary(
     user_id: str = _DEFAULT_USER,
 ) -> dict:
     """Generate L2 summary using real LLM. Returns result dict."""
-    import asyncio
-
     from intaris.analyzer import generate_summary
     from intaris.config import load_config
     from intaris.llm import LLMClient
@@ -1563,7 +1549,7 @@ def _do_generate_summary(
         "session_id": session_id,
         "payload": {"trigger": "manual"},
     }
-    return asyncio.run(generate_summary(db, llm, task))
+    return generate_summary(db, llm, task)
 
 
 def _do_run_analysis(
@@ -1572,8 +1558,6 @@ def _do_run_analysis(
     agent_id: str = "",
 ) -> dict:
     """Run L3 cross-session analysis using real LLM. Returns result dict."""
-    import asyncio
-
     from intaris.analyzer import run_analysis
     from intaris.config import load_config
     from intaris.llm import LLMClient
@@ -1590,7 +1574,7 @@ def _do_run_analysis(
             "lookback_days": 30,
         },
     }
-    return asyncio.run(run_analysis(db, llm, task))
+    return run_analysis(db, llm, task)
 
 
 def _get_summary(
