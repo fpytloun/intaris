@@ -1142,14 +1142,26 @@
               <div class="space-y-2">
                 <div class="text-xs text-secondary font-medium">Active Alerts</div>
                 <template x-for="alert in profile.active_alerts" :key="alert.detail || alert.summary || alert.category">
-                  <div class="flex items-start gap-2 bg-surface-secondary rounded-lg p-3">
-                    <span class="text-xs font-medium px-2 py-0.5 rounded"
-                          :class="severityBadgeClass(alert.severity)"
-                          x-text="riskBand(alert.severity).toUpperCase()"></span>
-                    <div>
-                      <div class="text-sm font-medium" x-text="alert.category"></div>
-                      <div class="text-xs text-secondary" x-text="alert.detail || alert.summary || ''"></div>
+                  <div class="bg-surface-secondary rounded-lg p-3">
+                    <div class="flex items-start gap-2">
+                      <span class="text-xs font-medium px-2 py-0.5 rounded flex-shrink-0"
+                            :class="severityBadgeClass(alert.severity)"
+                            x-text="riskBand(alert.severity).toUpperCase()"></span>
+                      <div>
+                        <div class="text-sm font-medium" x-text="alert.category"></div>
+                        <div class="text-xs text-secondary" x-text="alert.detail || alert.summary || ''"></div>
+                      </div>
                     </div>
+                    <template x-if="alert.session_ids && alert.session_ids.length > 0">
+                      <div class="text-xs text-secondary mt-2 flex flex-wrap items-center gap-1">
+                        <span>Sessions:</span>
+                        <template x-for="sid in alert.session_ids" :key="sid">
+                          <span class="font-mono text-brand-accent hover:underline cursor-pointer"
+                                @click="Alpine.store('nav').openSessionModal(sid)"
+                                x-text="sid"></span>
+                        </template>
+                      </div>
+                    </template>
                   </div>
                 </template>
               </div>
