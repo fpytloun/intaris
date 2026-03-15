@@ -107,6 +107,15 @@ class NotificationDispatcher:
                 f"#approvals?call_id={notification.call_id}"
             )
 
+        # Enrich behavioral analysis notifications with UI URLs
+        if self._base_url and notification.event_type == "summary_alert":
+            notification.ui_url = (
+                f"{self._base_url.rstrip('/')}/ui/"
+                f"#sessions?session_id={notification.session_id}"
+            )
+        elif self._base_url and notification.event_type == "analysis_alert":
+            notification.ui_url = f"{self._base_url.rstrip('/')}/ui/#analysis"
+
         # Dispatch to each channel concurrently (filtered by event type)
         tasks = []
         for channel in channels:

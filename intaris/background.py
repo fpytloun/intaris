@@ -445,6 +445,7 @@ class BackgroundWorker:
         self.analyzer_ready = config.enabled
         self._event_bus = None
         self._event_store = None
+        self._notification_dispatcher = None
 
     def set_event_bus(self, event_bus) -> None:
         """Set the EventBus reference for publishing events.
@@ -460,6 +461,15 @@ class BackgroundWorker:
         When set, the background worker runs a periodic flush loop.
         """
         self._event_store = event_store
+
+    def set_notification_dispatcher(self, dispatcher) -> None:
+        """Set the NotificationDispatcher for behavioral analysis alerts.
+
+        Called after initialization since the dispatcher is created
+        separately. When set, the background worker sends notifications
+        for concerning L2 summaries and high/critical L3 analyses.
+        """
+        self._notification_dispatcher = dispatcher
 
     async def start(self) -> None:
         """Launch all background loops.
@@ -585,9 +595,20 @@ class BackgroundWorker:
                         self.metrics.summary_audit_only_total += 1
                     if result.get("event_read_truncated"):
                         self.metrics.event_read_truncated_total += 1
+                    # Notify on concerning L2 summaries
+                    if self._notification_dispatcher and self._should_notify_summary(
+                        result
+                    ):
+                        await self._notify_summary_alert(task, result)
                 elif task_type == "analysis":
                     result = await self._execute_analysis_task(task)
                     self.metrics.analyses_completed_total += 1
+                    # Notify on high/critical L3 analysis results
+                    if self._notification_dispatcher and result.get("risk_level") in (
+                        "high",
+                        "critical",
+                    ):
+                        await self._notify_analysis_alert(task, result)
                 elif task_type == "intention_update":
                     result = await self._execute_intention_update_task(task)
                 else:
@@ -711,6 +732,116 @@ class BackgroundWorker:
 
         llm = self._get_analysis_llm()
         return await run_analysis(self._db, llm, task)
+
+    @staticmethod
+    def _should_notify_summary(result: dict[str, Any]) -> bool:
+        """Check if an L2 summary result warrants a notification.
+
+        Triggers when:
+        - intent_alignment is "misaligned" (always)
+        - intent_alignment is "partially_aligned" AND any risk indicator
+          has severity "high" or "critical"
+        """
+        if result.get("status") == "skipped":
+            return False
+        alignment = result.get("intent_alignment", "")
+        if alignment == "misaligned":
+            return True
+        if alignment == "partially_aligned":
+            indicators = result.get("risk_indicators", [])
+            if isinstance(indicators, list):
+                return any(
+                    ind.get("severity") in ("high", "critical") for ind in indicators
+                )
+        return False
+
+    async def _notify_summary_alert(
+        self, task: dict[str, Any], result: dict[str, Any]
+    ) -> None:
+        """Send a summary_alert notification for a concerning L2 summary."""
+        from intaris.notifications.providers import Notification
+
+        try:
+            user_id = task.get("user_id", "")
+            session_id = task.get("session_id", "")
+            # Parse risk_indicators if stored as JSON string
+            indicators = result.get("risk_indicators", [])
+            if isinstance(indicators, str):
+                import json
+
+                try:
+                    indicators = json.loads(indicators)
+                except (json.JSONDecodeError, TypeError):
+                    indicators = []
+
+            notification = Notification(
+                event_type="summary_alert",
+                call_id="",  # No specific call for summaries
+                session_id=session_id,
+                user_id=user_id,
+                agent_id=task.get("payload", {}).get("agent_id"),
+                tool=None,
+                args_redacted=None,
+                risk=None,
+                reasoning=None,
+                ui_url=None,  # Enriched by dispatcher
+                approve_url=None,
+                deny_url=None,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                intent_alignment=result.get("intent_alignment"),
+                risk_indicators=indicators if isinstance(indicators, list) else None,
+                risk_level=None,
+            )
+            await self._notification_dispatcher.notify(
+                user_id=user_id, notification=notification
+            )
+            logger.info(
+                "Summary alert notification sent for session %s (alignment=%s)",
+                session_id,
+                result.get("intent_alignment"),
+            )
+        except Exception:
+            logger.warning("Failed to send summary alert notification", exc_info=True)
+
+    async def _notify_analysis_alert(
+        self, task: dict[str, Any], result: dict[str, Any]
+    ) -> None:
+        """Send an analysis_alert notification for high/critical L3 analysis."""
+        from intaris.notifications.providers import Notification
+
+        try:
+            user_id = task.get("user_id", "")
+            agent_id = task.get("payload", {}).get("agent_id", "")
+            notification = Notification(
+                event_type="analysis_alert",
+                call_id="",  # No specific call for analysis
+                session_id="",  # Cross-session, no single session
+                user_id=user_id,
+                agent_id=agent_id or None,
+                tool=None,
+                args_redacted=None,
+                risk=None,
+                reasoning=None,
+                ui_url=None,  # Enriched by dispatcher
+                approve_url=None,
+                deny_url=None,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                risk_level=result.get("risk_level"),
+                findings_count=result.get("findings_count"),
+                context_summary=result.get("context_summary"),
+                analysis_id=result.get("analysis_id"),
+                sessions_analyzed=result.get("sessions_analyzed"),
+            )
+            await self._notification_dispatcher.notify(
+                user_id=user_id, notification=notification
+            )
+            logger.info(
+                "Analysis alert notification sent for user %s (risk=%s)",
+                user_id,
+                result.get("risk_level"),
+            )
+        except Exception:
+            logger.warning("Failed to send analysis alert notification", exc_info=True)
 
     def _get_analysis_llm(self) -> Any | None:
         """Create an analysis LLM client from config.

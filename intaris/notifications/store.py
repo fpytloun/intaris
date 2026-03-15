@@ -112,6 +112,8 @@ class NotificationStore:
             "resolution",
             "session_suspended",
             "denial",
+            "summary_alert",
+            "analysis_alert",
         }
         if events is not None:
             invalid = set(events) - valid_events

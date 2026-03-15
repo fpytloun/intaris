@@ -468,6 +468,7 @@ async def lifespan(app):
         base_url=cfg.webhook.base_url,
     )
     app.state.notification_dispatcher = notification_dispatcher
+    background_worker.set_notification_dispatcher(notification_dispatcher)
     logger.info("Notification dispatcher initialized")
 
     # Warn if notification channels exist without encryption key

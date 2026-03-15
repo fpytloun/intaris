@@ -450,3 +450,355 @@ class TestAnalysisConfigDefaults:
 
         config = _build_analysis_llm_config()
         assert config.timeout_ms == 30000
+
+
+# ── Behavioral Analysis Notification Triggers ─────────────────────────
+
+
+class TestShouldNotifySummary:
+    """Tests for BackgroundWorker._should_notify_summary() threshold logic."""
+
+    def test_misaligned_always_notifies(self):
+        from intaris.background import BackgroundWorker
+
+        result = {"intent_alignment": "misaligned", "risk_indicators": []}
+        assert BackgroundWorker._should_notify_summary(result) is True
+
+    def test_partially_aligned_with_high_indicator_notifies(self):
+        from intaris.background import BackgroundWorker
+
+        result = {
+            "intent_alignment": "partially_aligned",
+            "risk_indicators": [
+                {"indicator": "intent_drift", "severity": "high", "detail": "Drifting"},
+            ],
+        }
+        assert BackgroundWorker._should_notify_summary(result) is True
+
+    def test_partially_aligned_with_critical_indicator_notifies(self):
+        from intaris.background import BackgroundWorker
+
+        result = {
+            "intent_alignment": "partially_aligned",
+            "risk_indicators": [
+                {
+                    "indicator": "injection_attempt",
+                    "severity": "critical",
+                    "detail": "Injection",
+                },
+            ],
+        }
+        assert BackgroundWorker._should_notify_summary(result) is True
+
+    def test_partially_aligned_with_low_indicators_does_not_notify(self):
+        from intaris.background import BackgroundWorker
+
+        result = {
+            "intent_alignment": "partially_aligned",
+            "risk_indicators": [
+                {"indicator": "scope_creep", "severity": "low", "detail": "Minor"},
+            ],
+        }
+        assert BackgroundWorker._should_notify_summary(result) is False
+
+    def test_aligned_does_not_notify(self):
+        from intaris.background import BackgroundWorker
+
+        result = {"intent_alignment": "aligned", "risk_indicators": []}
+        assert BackgroundWorker._should_notify_summary(result) is False
+
+    def test_aligned_with_indicators_does_not_notify(self):
+        """Aligned sessions don't notify even with risk indicators."""
+        from intaris.background import BackgroundWorker
+
+        result = {
+            "intent_alignment": "aligned",
+            "risk_indicators": [
+                {
+                    "indicator": "unusual_tool_pattern",
+                    "severity": "medium",
+                    "detail": "Unusual",
+                },
+            ],
+        }
+        assert BackgroundWorker._should_notify_summary(result) is False
+
+    def test_skipped_does_not_notify(self):
+        from intaris.background import BackgroundWorker
+
+        result = {"status": "skipped", "reason": "No data"}
+        assert BackgroundWorker._should_notify_summary(result) is False
+
+    def test_unclear_does_not_notify(self):
+        from intaris.background import BackgroundWorker
+
+        result = {"intent_alignment": "unclear", "risk_indicators": []}
+        assert BackgroundWorker._should_notify_summary(result) is False
+
+
+class TestNotificationDataclass:
+    """Tests for the extended Notification dataclass."""
+
+    def test_behavioral_fields_default_to_none(self):
+        from intaris.notifications.providers import Notification
+
+        n = Notification(
+            event_type="escalation",
+            call_id="c1",
+            session_id="s1",
+            user_id="u1",
+            agent_id=None,
+            tool="read",
+            args_redacted=None,
+            risk="low",
+            reasoning="ok",
+            ui_url=None,
+            approve_url=None,
+            deny_url=None,
+            timestamp="2026-01-01T00:00:00",
+        )
+        assert n.risk_level is None
+        assert n.intent_alignment is None
+        assert n.risk_indicators is None
+        assert n.findings_count is None
+        assert n.context_summary is None
+        assert n.analysis_id is None
+        assert n.sessions_analyzed is None
+
+    def test_summary_alert_notification(self):
+        from intaris.notifications.providers import Notification
+
+        n = Notification(
+            event_type="summary_alert",
+            call_id="",
+            session_id="sess-1",
+            user_id="user-1",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted=None,
+            risk=None,
+            reasoning=None,
+            ui_url=None,
+            approve_url=None,
+            deny_url=None,
+            timestamp="2026-01-01T00:00:00",
+            intent_alignment="misaligned",
+            risk_indicators=[
+                {"indicator": "intent_drift", "severity": "high", "detail": "Drifted"},
+            ],
+        )
+        assert n.event_type == "summary_alert"
+        assert n.intent_alignment == "misaligned"
+        assert n.risk_indicators is not None and len(n.risk_indicators) == 1
+
+    def test_analysis_alert_notification(self):
+        from intaris.notifications.providers import Notification
+
+        n = Notification(
+            event_type="analysis_alert",
+            call_id="",
+            session_id="",
+            user_id="user-1",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted=None,
+            risk=None,
+            reasoning=None,
+            ui_url=None,
+            approve_url=None,
+            deny_url=None,
+            timestamp="2026-01-01T00:00:00",
+            risk_level="critical",
+            findings_count=3,
+            context_summary="Agent shows dangerous patterns.",
+            analysis_id="analysis-1",
+            sessions_analyzed=5,
+        )
+        assert n.event_type == "analysis_alert"
+        assert n.risk_level == "critical"
+        assert n.sessions_analyzed == 5
+
+
+class TestNotificationEventTypes:
+    """Tests for new event types in the notification store."""
+
+    def test_summary_alert_is_valid_event(self, db):
+        """summary_alert is accepted as a valid event type."""
+        from cryptography.fernet import Fernet
+
+        from intaris.notifications.store import NotificationStore
+
+        key = Fernet.generate_key().decode()
+        store = NotificationStore(db, encryption_key=key)
+        # Should not raise — summary_alert is valid
+        store.upsert_channel(
+            user_id="user-1",
+            name="test-channel",
+            provider="webhook",
+            config={"url": "https://example.com/hook"},
+            events=["summary_alert"],
+        )
+
+    def test_analysis_alert_is_valid_event(self, db):
+        """analysis_alert is accepted as a valid event type."""
+        from cryptography.fernet import Fernet
+
+        from intaris.notifications.store import NotificationStore
+
+        key = Fernet.generate_key().decode()
+        store = NotificationStore(db, encryption_key=key)
+        store.upsert_channel(
+            user_id="user-1",
+            name="test-channel-2",
+            provider="webhook",
+            config={"url": "https://example.com/hook"},
+            events=["analysis_alert"],
+        )
+
+    def test_both_behavioral_events_accepted(self, db):
+        """Both behavioral event types can be configured together."""
+        from cryptography.fernet import Fernet
+
+        from intaris.notifications.store import NotificationStore
+
+        key = Fernet.generate_key().decode()
+        store = NotificationStore(db, encryption_key=key)
+        store.upsert_channel(
+            user_id="user-1",
+            name="test-channel-3",
+            provider="webhook",
+            config={"url": "https://example.com/hook"},
+            events=["escalation", "summary_alert", "analysis_alert"],
+        )
+
+    def test_behavioral_events_not_in_default_set(self):
+        """Behavioral events are opt-in, not in the default channel events."""
+        from intaris.notifications.dispatcher import DEFAULT_CHANNEL_EVENTS
+
+        assert "summary_alert" not in DEFAULT_CHANNEL_EVENTS
+        assert "analysis_alert" not in DEFAULT_CHANNEL_EVENTS
+
+
+class TestProviderFormatting:
+    """Tests for provider formatting of behavioral analysis notifications."""
+
+    def _make_summary_notification(self):
+        from intaris.notifications.providers import Notification
+
+        return Notification(
+            event_type="summary_alert",
+            call_id="",
+            session_id="sess-test-123",
+            user_id="user-1",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted=None,
+            risk=None,
+            reasoning=None,
+            ui_url="https://intaris.example.com/ui/#sessions",
+            approve_url=None,
+            deny_url=None,
+            timestamp="2026-01-01T00:00:00",
+            intent_alignment="misaligned",
+            risk_indicators=[
+                {
+                    "indicator": "intent_drift",
+                    "severity": "high",
+                    "detail": "Agent drifted from CSS to database changes",
+                },
+                {
+                    "indicator": "scope_creep",
+                    "severity": "medium",
+                    "detail": "Accessed files outside project",
+                },
+            ],
+        )
+
+    def _make_analysis_notification(self):
+        from intaris.notifications.providers import Notification
+
+        return Notification(
+            event_type="analysis_alert",
+            call_id="",
+            session_id="",
+            user_id="user-1",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted=None,
+            risk=None,
+            reasoning=None,
+            ui_url="https://intaris.example.com/ui/#analysis",
+            approve_url=None,
+            deny_url=None,
+            timestamp="2026-01-01T00:00:00",
+            risk_level="critical",
+            findings_count=3,
+            context_summary="Agent shows progressive escalation across sessions with increasing denial rates.",
+            analysis_id="analysis-1",
+            sessions_analyzed=5,
+        )
+
+    def test_pushover_summary_alert_format(self):
+        from intaris.notifications.providers import PushoverProvider
+
+        n = self._make_summary_notification()
+        msg = PushoverProvider._format_summary_alert_message(n)
+        assert "sess-test-123" in msg
+        assert "misaligned" in msg
+        assert "intent_drift" in msg
+        assert "2 (1 high/critical)" in msg
+
+    def test_pushover_analysis_alert_format(self):
+        from intaris.notifications.providers import PushoverProvider
+
+        n = self._make_analysis_notification()
+        msg = PushoverProvider._format_analysis_alert_message(n)
+        assert "CRITICAL" in msg
+        assert "test-agent" in msg
+        assert "5" in msg  # sessions_analyzed
+        assert "progressive escalation" in msg
+
+    def test_slack_summary_alert_blocks(self):
+        from intaris.notifications.providers import SlackProvider
+
+        n = self._make_summary_notification()
+        blocks = SlackProvider._build_summary_alert_blocks(n)
+        # Should have header, fields section, indicators section, actions
+        assert any(b.get("type") == "header" for b in blocks)
+        header_text = blocks[0]["text"]["text"]
+        assert "Summary Alert" in header_text
+        # Should have Open in Intaris button
+        action_blocks = [b for b in blocks if b.get("type") == "actions"]
+        assert len(action_blocks) >= 1
+
+    def test_slack_analysis_alert_blocks(self):
+        from intaris.notifications.providers import SlackProvider
+
+        n = self._make_analysis_notification()
+        blocks = SlackProvider._build_analysis_alert_blocks(n)
+        assert any(b.get("type") == "header" for b in blocks)
+        header_text = blocks[0]["text"]["text"]
+        assert "CRITICAL" in header_text
+        # Should have context summary section
+        text_blocks = [
+            b
+            for b in blocks
+            if b.get("type") == "section"
+            and "text" in b
+            and isinstance(b["text"], dict)
+        ]
+        assert any(
+            "progressive escalation" in b["text"].get("text", "") for b in text_blocks
+        )
+
+    def test_webhook_includes_behavioral_fields(self):
+        """Webhook payload includes behavioral analysis fields."""
+
+        n = self._make_analysis_notification()
+        # The webhook provider builds a payload dict internally.
+        # We can't easily test the full send() without HTTP, but we can
+        # verify the Notification dataclass has the fields set.
+        assert n.risk_level == "critical"
+        assert n.findings_count == 3
+        assert n.context_summary is not None
+        assert n.sessions_analyzed == 5

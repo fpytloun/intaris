@@ -75,15 +75,16 @@ Only later when task was done, there was reasoning update to `Fixing a bug in th
 
 - consider adding assistant/user turn into reasoning (eg. Assistant: should I delete this directory, User: yes do it) for better intention generation including user answers on assistant proposals
 
+- notifications for behavioral analysis and escalations
+
 ## Major
-
-- Approve/deny from Sessions "Recent Evaluations"
-
-- add e2e tests for behavioral analysis, with and without session logging
 
 ## Issues
 
 - "High risk — requires human review. The tool call edits a local project file (db.py) to modify database schema by adding/adjusting tables and indexes related to agent/session guardrails. This is an operational change with potential systemic impact on data integrity and migrations, and thus should be reviewed." Intention: "Implementing UI controls and a trustworthy hierarchical analysis workflow in intaris where console/events views coexist, analysis history sessions are clickable (open modals), child-session analyses are run first and incorporated into parent-session conclusions so no subsession is omitted, with metadata rules for agent_id/agent_type and L3 only operating on parent sessions."
+
+- Child session misaligned with parent (oc-ses_311ad1ebeffe3ua1uURWw78LSf): The child intends to perform L2/L3 code-review analyses in a subsession, but the parent explicitly requires L3 analyses to operate only on parent sessions; allowing L3 in the child contradicts that constraint, so the intentions are incompatible.. Parent intention: Implementing UI controls and a trustworthy hierarchical analysis workflow in intaris where console/events views coexist, analysis history sessions are clickable (open modals), child-session analyses are run first and incorporated into parent-session conclusions so no subsession is omitted, with metadata rules for agent_id/agent_type and L3 only operating on parent sessions.
+Intention: "OpenCode codereview: Code review L2/L3 analysis (@codereview subagent)" (file read)
 
 ## Minor
 
@@ -91,6 +92,8 @@ Only later when task was done, there was reasoning update to `Fixing a bug in th
 
 - there should be feedback-loop and self-learning from approve/deny actions. Evaluator should look for similar pattern already denied/approved especially if there is "Optional note" attached. But again we must not degrade performance.
 - also ability to mark as false positive / false negative in audit
+
+- configurable policies and evaluation behavior (eg catch PII data, some things for EU regulations, etc., more rules to enforce hard kill vs being more permissive)
 
 - Prometheus metrics, we want to know more about performance, like having histogram for evaluations, etc.
 - Grafana dashboard

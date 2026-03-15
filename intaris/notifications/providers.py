@@ -55,7 +55,8 @@ class Notification:
     Providers select which fields to include based on their platform.
     """
 
-    event_type: str  # "escalation", "resolution", "session_suspended", or "denial"
+    event_type: str  # "escalation", "resolution", "session_suspended", "denial",
+    #                   "summary_alert", or "analysis_alert"
     call_id: str
     session_id: str
     user_id: str
@@ -71,6 +72,14 @@ class Notification:
     # Resolution-specific fields
     user_decision: str | None = None  # "approve" or "deny"
     user_note: str | None = None
+    # Behavioral analysis fields (summary_alert / analysis_alert)
+    risk_level: str | None = None  # "low", "medium", "high", "critical"
+    intent_alignment: str | None = None  # L2 alignment assessment
+    risk_indicators: list[dict[str, Any]] | None = None  # L2 risk indicators
+    findings_count: int | None = None  # L3 findings count
+    context_summary: str | None = None  # L3 context summary (1-2 sentences)
+    analysis_id: str | None = None  # L3 analysis ID
+    sessions_analyzed: int | None = None  # L3 sessions count
 
 
 class NotificationProvider(Protocol):
@@ -150,6 +159,21 @@ class WebhookProvider:
             payload["user_decision"] = notification.user_decision
         if notification.user_note:
             payload["user_note"] = notification.user_note
+        # Behavioral analysis fields
+        if notification.risk_level:
+            payload["risk_level"] = notification.risk_level
+        if notification.intent_alignment:
+            payload["intent_alignment"] = notification.intent_alignment
+        if notification.risk_indicators:
+            payload["risk_indicators"] = notification.risk_indicators
+        if notification.findings_count is not None:
+            payload["findings_count"] = notification.findings_count
+        if notification.context_summary:
+            payload["context_summary"] = notification.context_summary
+        if notification.analysis_id:
+            payload["analysis_id"] = notification.analysis_id
+        if notification.sessions_analyzed is not None:
+            payload["sessions_analyzed"] = notification.sessions_analyzed
 
         body = json.dumps(payload, separators=(",", ":")).encode()
 
@@ -216,6 +240,20 @@ class PushoverProvider:
             message = self._format_denial_message(notification)
             # Denials are informational — use lower priority than escalations
             priority = config.get("denial_priority", 0)
+        elif notification.event_type == "summary_alert":
+            title = "Intaris: Session Summary Alert"
+            message = self._format_summary_alert_message(notification)
+            priority = config.get("priority", 1)
+        elif notification.event_type == "analysis_alert":
+            level = (notification.risk_level or "high").upper()
+            title = f"Intaris: {level} Behavioral Alert"
+            message = self._format_analysis_alert_message(notification)
+            # Critical analysis alerts get emergency priority
+            priority = (
+                2
+                if notification.risk_level == "critical"
+                else config.get("priority", 1)
+            )
         else:
             title = "Intaris: Escalation Required"
             message = self._format_escalation_message(notification)
@@ -297,6 +335,52 @@ class PushoverProvider:
             parts.append(f"<b>Note:</b> {html_escape(n.user_note)}")
         return "\n".join(parts)
 
+    @staticmethod
+    def _format_summary_alert_message(n: Notification) -> str:
+        """Format L2 session summary alert for Pushover (HTML mode)."""
+        parts = []
+        parts.append(f"<b>Session:</b> {html_escape(n.session_id[:20])}")
+        if n.agent_id:
+            parts.append(f"<b>Agent:</b> {html_escape(n.agent_id)}")
+        if n.intent_alignment:
+            parts.append(f"<b>Alignment:</b> {html_escape(n.intent_alignment)}")
+        if n.risk_indicators:
+            count = len(n.risk_indicators)
+            high_count = sum(
+                1
+                for ind in n.risk_indicators
+                if ind.get("severity") in ("high", "critical")
+            )
+            parts.append(
+                f"<b>Risk indicators:</b> {count} ({high_count} high/critical)"
+            )
+            # Show top indicators (truncated)
+            for ind in n.risk_indicators[:3]:
+                cat = ind.get("indicator", "unknown")
+                sev = ind.get("severity", "?")
+                detail = ind.get("detail", "")[:80]
+                parts.append(f"  - {html_escape(cat)} ({sev}): {html_escape(detail)}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _format_analysis_alert_message(n: Notification) -> str:
+        """Format L3 cross-session analysis alert for Pushover (HTML mode)."""
+        parts = []
+        if n.risk_level:
+            parts.append(f"<b>Risk level:</b> {html_escape(n.risk_level.upper())}")
+        if n.agent_id:
+            parts.append(f"<b>Agent:</b> {html_escape(n.agent_id)}")
+        if n.sessions_analyzed is not None:
+            parts.append(f"<b>Sessions analyzed:</b> {n.sessions_analyzed}")
+        if n.findings_count is not None:
+            parts.append(f"<b>Findings:</b> {n.findings_count}")
+        if n.context_summary:
+            summary = n.context_summary[:200]
+            if len(n.context_summary) > 200:
+                summary += "..."
+            parts.append(f"\n{html_escape(summary)}")
+        return "\n".join(parts)
+
 
 def _slack_escape(text: str) -> str:
     """Escape Slack mrkdwn special characters.
@@ -339,6 +423,10 @@ class SlackProvider:
             blocks = self._build_denial_blocks(notification)
         elif notification.event_type == "session_suspended":
             blocks = self._build_suspension_blocks(notification)
+        elif notification.event_type == "summary_alert":
+            blocks = self._build_summary_alert_blocks(notification)
+        elif notification.event_type == "analysis_alert":
+            blocks = self._build_analysis_alert_blocks(notification)
         else:
             blocks = self._build_escalation_blocks(notification)
 
@@ -590,6 +678,160 @@ class SlackProvider:
                         "type": "mrkdwn",
                         "text": f"*Note:* {_slack_escape(n.user_note)}",
                     },
+                }
+            )
+
+        return blocks
+
+    @staticmethod
+    def _build_summary_alert_blocks(n: Notification) -> list[dict[str, Any]]:
+        """Build Slack Block Kit blocks for L2 session summary alert."""
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": "Intaris: Session Summary Alert",
+                },
+            },
+        ]
+
+        fields = []
+        if n.session_id:
+            fields.append(
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Session:* `{_slack_escape(n.session_id[:20])}`",
+                }
+            )
+        if n.agent_id:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Agent:* {_slack_escape(n.agent_id)}"}
+            )
+        if n.intent_alignment:
+            fields.append(
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Alignment:* {_slack_escape(n.intent_alignment)}",
+                }
+            )
+        if n.risk_indicators:
+            high_count = sum(
+                1
+                for ind in n.risk_indicators
+                if ind.get("severity") in ("high", "critical")
+            )
+            fields.append(
+                {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"*Risk indicators:* {len(n.risk_indicators)} "
+                        f"({high_count} high/critical)"
+                    ),
+                }
+            )
+        if fields:
+            blocks.append({"type": "section", "fields": fields})
+
+        # Show top risk indicators as a list
+        if n.risk_indicators:
+            lines = []
+            for ind in n.risk_indicators[:5]:
+                cat = _slack_escape(ind.get("indicator", "unknown"))
+                sev = _slack_escape(ind.get("severity", "?"))
+                detail = _slack_escape(ind.get("detail", "")[:100])
+                lines.append(f"- *{cat}* ({sev}): {detail}")
+            if lines:
+                blocks.append(
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": "\n".join(lines)},
+                    }
+                )
+
+        if n.ui_url:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Open in Intaris",
+                            },
+                            "url": n.ui_url,
+                        }
+                    ],
+                }
+            )
+
+        return blocks
+
+    @staticmethod
+    def _build_analysis_alert_blocks(n: Notification) -> list[dict[str, Any]]:
+        """Build Slack Block Kit blocks for L3 behavioral analysis alert."""
+        level = (n.risk_level or "high").upper()
+        emoji = "\U0001f534" if n.risk_level == "critical" else "\U0001f7e0"
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{emoji} Intaris: {level} Behavioral Alert",
+                },
+            },
+        ]
+
+        fields = []
+        if n.risk_level:
+            fields.append(
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Risk level:* {_slack_escape(n.risk_level.upper())}",
+                }
+            )
+        if n.agent_id:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Agent:* {_slack_escape(n.agent_id)}"}
+            )
+        if n.sessions_analyzed is not None:
+            fields.append(
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Sessions analyzed:* {n.sessions_analyzed}",
+                }
+            )
+        if n.findings_count is not None:
+            fields.append({"type": "mrkdwn", "text": f"*Findings:* {n.findings_count}"})
+        if fields:
+            blocks.append({"type": "section", "fields": fields})
+
+        if n.context_summary:
+            summary = n.context_summary[:300]
+            if len(n.context_summary) > 300:
+                summary += "..."
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": _slack_escape(summary)},
+                }
+            )
+
+        if n.ui_url:
+            blocks.append(
+                {
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Open in Intaris",
+                            },
+                            "url": n.ui_url,
+                        }
+                    ],
                 }
             )
 

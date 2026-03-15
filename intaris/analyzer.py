@@ -699,6 +699,7 @@ async def run_analysis(
         "findings_count": len(findings),
         "recommendations_count": len(recommendations),
         "sessions_analyzed": len(session_ids),
+        "context_summary": result.get("context_summary"),
     }
 
 
