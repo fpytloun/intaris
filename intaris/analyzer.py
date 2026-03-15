@@ -1980,8 +1980,8 @@ def _get_session_summaries_for_analysis(
                 FROM sessions s
                 WHERE s.user_id = ? AND s.agent_id = ?
                   AND s.parent_session_id IS NULL
-                  AND s.created_at >= ?
-                ORDER BY s.created_at DESC
+                  AND s.last_activity_at >= ?
+                ORDER BY s.last_activity_at DESC
                 LIMIT ?
                 """,
                 (user_id, agent_id, cutoff, _MAX_L3_SESSIONS),
@@ -1996,8 +1996,8 @@ def _get_session_summaries_for_analysis(
                 FROM sessions s
                 WHERE s.user_id = ?
                   AND s.parent_session_id IS NULL
-                  AND s.created_at >= ?
-                ORDER BY s.created_at DESC
+                  AND s.last_activity_at >= ?
+                ORDER BY s.last_activity_at DESC
                 LIMIT ?
                 """,
                 (user_id, cutoff, _MAX_L3_SESSIONS),

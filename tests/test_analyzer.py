@@ -550,7 +550,7 @@ class TestGetSessionSummariesForAnalysis:
         _insert_summary(db, "sess-old")
         with db.cursor() as cur:
             cur.execute(
-                "UPDATE sessions SET created_at = '2020-01-01T00:00:00' WHERE session_id = 'sess-old' AND user_id = ?",
+                "UPDATE sessions SET created_at = '2020-01-01T00:00:00', last_activity_at = '2020-01-01T00:00:00' WHERE session_id = 'sess-old' AND user_id = ?",
                 (TEST_USER,),
             )
         _create_session(session_store, "sess-recent")
