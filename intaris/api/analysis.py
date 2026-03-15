@@ -841,11 +841,11 @@ async def get_profile(
                     (ctx.user_id, agent_id),
                 )
             else:
-                # Return the highest-risk profile across all agents
+                # Return the most recently updated profile across all agents
                 cur.execute(
                     "SELECT * FROM behavioral_profiles "
                     "WHERE user_id = ? "
-                    "ORDER BY risk_level DESC "
+                    "ORDER BY updated_at DESC "
                     "LIMIT 1",
                     (ctx.user_id,),
                 )
