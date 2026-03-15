@@ -130,45 +130,66 @@ function _getCanvas(id) {
 
 function _countSessionsByKey(findings, key) {
   const sessionSets = {};
+  let hasAnySessions = false;
   for (const f of findings) {
     const val = f[key] || 'unknown';
     if (!sessionSets[val]) sessionSets[val] = new Set();
     for (const sid of (f.session_ids || [])) {
       sessionSets[val].add(sid);
+      hasAnySessions = true;
     }
   }
   const counts = {};
   for (const [k, s] of Object.entries(sessionSets)) {
     counts[k] = s.size;
+  }
+  // Fallback: when LLM returns empty session_ids, count findings instead
+  if (!hasAnySessions) {
+    for (const f of findings) {
+      const val = f[key] || 'unknown';
+      counts[val] = (counts[val] || 0) + 1;
+    }
   }
   return counts;
 }
 
 function _countSessionsForValue(findings, key, value) {
   const sessions = new Set();
+  let findingCount = 0;
   for (const f of findings) {
     if ((f[key] || 'unknown') === value) {
       for (const sid of (f.session_ids || [])) {
         sessions.add(sid);
       }
+      findingCount++;
     }
   }
-  return sessions.size;
+  // Fallback: count findings when no session_ids populated
+  return sessions.size > 0 ? sessions.size : findingCount;
 }
 
 /** Group findings by severity band (riskBand of numeric severity). */
 function _countSessionsByBand(findings) {
   const sessionSets = {};
+  let hasAnySessions = false;
   for (const f of findings) {
     const band = typeof f.severity === 'number' ? riskBand(f.severity) : (f.severity || 'unknown');
     if (!sessionSets[band]) sessionSets[band] = new Set();
     for (const sid of (f.session_ids || [])) {
       sessionSets[band].add(sid);
+      hasAnySessions = true;
     }
   }
   const counts = {};
   for (const [k, s] of Object.entries(sessionSets)) {
     counts[k] = s.size;
+  }
+  // Fallback: count findings when no session_ids populated
+  if (!hasAnySessions) {
+    for (const f of findings) {
+      const band = typeof f.severity === 'number' ? riskBand(f.severity) : (f.severity || 'unknown');
+      counts[band] = (counts[band] || 0) + 1;
+    }
   }
   return counts;
 }
@@ -176,15 +197,18 @@ function _countSessionsByBand(findings) {
 /** Count sessions for a specific severity band across findings. */
 function _countSessionsForBand(findings, band) {
   const sessions = new Set();
+  let findingCount = 0;
   for (const f of findings) {
     const b = typeof f.severity === 'number' ? riskBand(f.severity) : (f.severity || 'unknown');
     if (b === band) {
       for (const sid of (f.session_ids || [])) {
         sessions.add(sid);
       }
+      findingCount++;
     }
   }
-  return sessions.size;
+  // Fallback: count findings when no session_ids populated
+  return sessions.size > 0 ? sessions.size : findingCount;
 }
 
 function _sortChronological(analyses) {

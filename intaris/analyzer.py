@@ -975,13 +975,16 @@ def run_analysis(
     risk_score = coerce_risk_score(result.get("risk_level", 1))
 
     # Normalize finding fields — defensive against LLM fallback mode
-    # where strict schema is not enforced (e.g., 'summary' instead of
-    # 'detail', missing 'session_ids').
+    # where strict schema is not enforced (e.g., content in 'notes'
+    # instead of 'detail', empty 'session_ids').  Checks for empty
+    # values (not just missing keys) because the LLM may return
+    # detail="" while putting actual content in a non-schema field.
     for finding in findings:
         finding["severity"] = coerce_risk_score(finding.get("severity", 1))
-        if "detail" not in finding:
+        if not finding.get("detail"):
             finding["detail"] = (
-                finding.pop("summary", None)
+                finding.pop("notes", None)
+                or finding.pop("summary", None)
                 or finding.pop("description", None)
                 or finding.pop("text", None)
                 or ""

@@ -790,12 +790,17 @@ async def list_analyses(
                     }
                     for r in d["recommendations"]
                 ]
-            # Normalize findings stored with 'summary' instead of 'detail'
+            # Normalize findings — handles LLM fallback mode where content
+            # may be in 'notes' instead of 'detail', or 'detail' may be
+            # present but empty.  Checks falsy (not just missing key).
             if isinstance(d.get("findings"), list):
                 for f in d["findings"]:
-                    if isinstance(f, dict) and "detail" not in f:
+                    if isinstance(f, dict) and not f.get("detail"):
                         f["detail"] = (
-                            f.pop("summary", None) or f.pop("description", None) or ""
+                            f.pop("notes", None)
+                            or f.pop("summary", None)
+                            or f.pop("description", None)
+                            or ""
                         )
                     if isinstance(f, dict) and "session_ids" not in f:
                         f["session_ids"] = []
