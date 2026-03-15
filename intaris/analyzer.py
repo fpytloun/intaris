@@ -53,11 +53,26 @@ _MAX_PARENT_RECHECK = 10
 # Delay between parent re-enqueue checks (seconds)
 _PARENT_RECHECK_DELAY_S = 30
 
+# ── Event-aware windowing constants ───────────────────────────────────
+# Target max chars per window user prompt (conversation + tool calls + reasoning).
+# The partitioner splits data into windows that fit within this budget.
+# No content is ever truncated — if there's too much data, more windows are created.
+_MAX_WINDOW_CHARS = 60_000
+# Hard limit on event store reads to prevent OOM (C2 fix)
+_MAX_EVENT_READ = 5_000
+# Formatting overhead per conversation entry (timestamp + role prefix + tags)
+_ENTRY_OVERHEAD = 50
+# Estimated chars per compressed tool call line
+_TOOL_CALL_EST = 250
+# Overhead per partition (headers, stats, prior summary, etc.)
+_PARTITION_OVERHEAD = 2_000
+
 
 async def generate_summary(
     db: Database,
     llm: Any | None,
     task: dict[str, Any],
+    event_store: Any | None = None,
 ) -> dict[str, Any]:
     """Generate an Intaris session summary for an activity window.
 
@@ -65,6 +80,12 @@ async def generate_summary(
     - Generates a tail window summary for unwindowed audit data
     - For parent sessions, collects child session data
     - Generates a compacted summary when > 1 windows exist
+
+    When ``event_store`` is provided and has data for the session,
+    uses the event-enriched path: fetches assistant text and user
+    messages from the event store, partitions into context-budget-aware
+    windows, and generates richer summaries with conversation context.
+    Falls back to audit_log-only when no events are available.
 
     The task payload may contain:
     - trigger: what triggered this summary (volume, close, manual, etc.)
@@ -80,6 +101,7 @@ async def generate_summary(
         db: Database instance.
         llm: LLM client for analysis (LLMClient instance).
         task: Task dict with payload containing session_id, trigger, etc.
+        event_store: Optional EventStore instance for event-enriched analysis.
 
     Returns:
         Result dict with summary details or skip reason.
@@ -132,7 +154,7 @@ async def generate_summary(
 
         if children_needing_summaries and parent_check_count < _MAX_PARENT_RECHECK:
             # Signal to the background worker to enqueue child tasks
-            # and re-enqueue this parent task with a delay
+            # and re-enqueue this task with a delay
             logger.info(
                 "Parent session %s: %d children need summaries, re-enqueue #%d",
                 session_id,
@@ -158,7 +180,7 @@ async def generate_summary(
         # Collect child data (compacted > window > raw metadata)
         child_data = _collect_child_data(db, user_id, children)
 
-    # ── Step 2: Generate tail window summary (if needed) ──────────
+    # ── Step 2: Determine window range ────────────────────────────
     now = datetime.now(timezone.utc).isoformat()
     window_start = _get_window_start(db, user_id, session_id, session)
     window_end = now
@@ -173,32 +195,232 @@ async def generate_summary(
         limit=500,
     )
 
+    reasoning_records = audit_store.get_window(
+        session_id,
+        user_id=user_id,
+        from_ts=window_start,
+        to_ts=window_end,
+        record_types={"reasoning"},
+        limit=200,
+    )
+
+    user_messages = []
+    agent_reasoning = []
+    for rec in reasoning_records:
+        content = rec.get("content", "")
+        if content.startswith("User message:"):
+            user_messages.append(rec)
+        else:
+            agent_reasoning.append(rec)
+
+    # ── Step 3: Try event-enriched path ───────────────────────────
+    conversation = _get_session_events(
+        event_store, user_id, session_id, window_start, window_end
+    )
+    event_enriched = bool(conversation)
+
+    # For event-enriched path: minimum 0 tool calls (M2 fix)
+    # For audit_log-only path: minimum _MIN_WINDOW_RECORDS tool calls
+    min_records = 0 if event_enriched else _MIN_WINDOW_RECORDS
+    has_sufficient_data = len(tool_calls) >= min_records and (
+        len(tool_calls) > 0 or event_enriched
+    )
+
+    if not has_sufficient_data:
+        # Check if compaction is possible even without new data
+        total_windows = _count_prior_summaries(db, user_id, session_id)
+        if total_windows > 1:
+            compaction_result = await _generate_compaction(
+                db,
+                llm,
+                user_id=user_id,
+                session_id=session_id,
+                session=session,
+                child_data=child_data,
+            )
+            if compaction_result:
+                return compaction_result
+
+        if total_windows == 0:
+            logger.info(
+                "Summary skipped: insufficient data "
+                "(user=%s session=%s, %d tool calls, %d conversation entries)",
+                user_id,
+                session_id,
+                len(tool_calls),
+                len(conversation),
+            )
+            return {"status": "skipped", "reason": "Insufficient data in window"}
+
+        return {
+            "status": "skipped",
+            "reason": "Single window exists, no compaction needed",
+        }
+
+    # ── Step 4: Generate window summaries ─────────────────────────
+    from intaris.llm import parse_json_response
+    from intaris.prompts_analysis import (
+        SESSION_SUMMARY_EXPECTED_KEYS,
+        SESSION_SUMMARY_SCHEMA,
+        SESSION_SUMMARY_SYSTEM_PROMPT,
+        SESSION_SUMMARY_SYSTEM_PROMPT_4STREAM,
+    )
+    from intaris.sanitize import ANTI_INJECTION_PREAMBLE
+
+    prior_summary = _get_prior_summary(db, user_id, session_id)
+    base_window_number = _count_prior_summaries(db, user_id, session_id) + 1
+
+    # Choose system prompt based on whether we have conversation data
+    if event_enriched:
+        system_prompt = SESSION_SUMMARY_SYSTEM_PROMPT_4STREAM.format(
+            anti_injection=ANTI_INJECTION_PREAMBLE,
+        )
+    else:
+        system_prompt = SESSION_SUMMARY_SYSTEM_PROMPT.format(
+            anti_injection=ANTI_INJECTION_PREAMBLE,
+        )
+
     tail_window_generated = False
     tail_result: dict[str, Any] = {}
     tail_stats: dict[str, Any] = {}
-    tail_window_number = 0
-    if len(tool_calls) >= _MIN_WINDOW_RECORDS:
-        # Generate the tail window summary
-        reasoning_records = audit_store.get_window(
-            session_id,
-            user_id=user_id,
-            from_ts=window_start,
-            to_ts=window_end,
-            record_types={"reasoning"},
-            limit=200,
+    last_window_number = 0
+    windows_generated = 0
+
+    if event_enriched:
+        # Event-enriched path: partition into context-budget-aware windows
+        partitions = _partition_into_windows(
+            conversation,
+            tool_calls,
+            agent_reasoning,
+            window_start=window_start,
+            window_end=window_end,
         )
 
-        user_messages = []
-        agent_reasoning = []
-        for rec in reasoning_records:
-            content = rec.get("content", "")
-            if content.startswith("User message:"):
-                user_messages.append(rec)
-            else:
-                agent_reasoning.append(rec)
+        if not partitions:
+            # Fallback: single partition with all data
+            partitions = [
+                {
+                    "conversation": conversation,
+                    "tool_calls": tool_calls,
+                    "reasoning": agent_reasoning,
+                    "window_start": window_start,
+                    "window_end": window_end,
+                }
+            ]
 
-        prior_summary = _get_prior_summary(db, user_id, session_id)
-        tail_window_number = _count_prior_summaries(db, user_id, session_id) + 1
+        logger.info(
+            "Event-enriched summary: user=%s session=%s "
+            "partitions=%d conversation=%d tool_calls=%d",
+            user_id,
+            session_id,
+            len(partitions),
+            len(conversation),
+            len(tool_calls),
+        )
+
+        for i, partition in enumerate(partitions):
+            window_number = base_window_number + i
+            p_tool_calls = partition.get("tool_calls", [])
+            p_reasoning = partition.get("reasoning", [])
+            p_conversation = partition.get("conversation", [])
+            p_start = partition.get("window_start", window_start)
+            p_end = partition.get("window_end", window_end)
+
+            user_prompt = _build_summary_prompt(
+                intention=intention,
+                intention_source=intention_source,
+                window_start=p_start,
+                window_end=p_end,
+                window_number=window_number,
+                tool_calls=p_tool_calls,
+                user_messages=[],  # Not used in event-enriched path
+                agent_reasoning=p_reasoning,
+                prior_summary=prior_summary,
+                child_sessions=child_data if i == len(partitions) - 1 else None,
+                conversation=p_conversation,
+            )
+
+            try:
+                raw_response = llm.generate(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    json_schema=SESSION_SUMMARY_SCHEMA,
+                )
+                result = parse_json_response(
+                    raw_response,
+                    expected_keys=SESSION_SUMMARY_EXPECTED_KEYS,
+                )
+            except Exception:
+                logger.exception(
+                    "LLM call failed for summary generation "
+                    "(user=%s session=%s partition=%d)",
+                    user_id,
+                    session_id,
+                    i,
+                )
+                raise
+
+            # Per-partition stats (M1 fix: computed from partitioned data)
+            p_approved = sum(
+                1 for tc in p_tool_calls if tc.get("decision") == "approve"
+            )
+            p_denied = sum(1 for tc in p_tool_calls if tc.get("decision") == "deny")
+            p_escalated = sum(
+                1 for tc in p_tool_calls if tc.get("decision") == "escalate"
+            )
+            p_stats = {
+                "total": len(p_tool_calls),
+                "approved_count": p_approved,
+                "denied_count": p_denied,
+                "escalated_count": p_escalated,
+            }
+
+            _store_summary(
+                db,
+                user_id=user_id,
+                session_id=session_id,
+                window_start=p_start,
+                window_end=p_end,
+                trigger=trigger,
+                summary_type="window",
+                result=result,
+                stats=p_stats,
+            )
+
+            try:
+                session_store.increment_summary_count(session_id, user_id=user_id)
+            except Exception:
+                logger.debug("Failed to increment summary_count", exc_info=True)
+
+            logger.info(
+                "Window summary generated (event-enriched): "
+                "user=%s session=%s window=%d "
+                "alignment=%s indicators=%d calls=%d conv=%d",
+                user_id,
+                session_id,
+                window_number,
+                result.get("intent_alignment"),
+                len(result.get("risk_indicators", [])),
+                len(p_tool_calls),
+                len(p_conversation),
+            )
+
+            # Update for next iteration and final return
+            tail_result = result
+            tail_stats = p_stats
+            last_window_number = window_number
+            prior_summary = result.get("summary", "")
+            if prior_summary and len(prior_summary) > _MAX_PRIOR_SUMMARY_CHARS:
+                prior_summary = prior_summary[:_MAX_PRIOR_SUMMARY_CHARS]
+            windows_generated += 1
+
+        tail_window_generated = True
+
+    else:
+        # Audit_log-only path (unchanged fallback)
+        tail_window_number = base_window_number
 
         user_prompt = _build_summary_prompt(
             intention=intention,
@@ -211,18 +433,6 @@ async def generate_summary(
             agent_reasoning=agent_reasoning,
             prior_summary=prior_summary,
             child_sessions=child_data,
-        )
-
-        from intaris.llm import parse_json_response
-        from intaris.prompts_analysis import (
-            SESSION_SUMMARY_EXPECTED_KEYS,
-            SESSION_SUMMARY_SCHEMA,
-            SESSION_SUMMARY_SYSTEM_PROMPT,
-        )
-        from intaris.sanitize import ANTI_INJECTION_PREAMBLE
-
-        system_prompt = SESSION_SUMMARY_SYSTEM_PROMPT.format(
-            anti_injection=ANTI_INJECTION_PREAMBLE,
         )
 
         try:
@@ -265,6 +475,8 @@ async def generate_summary(
             stats=tail_stats,
         )
         tail_window_generated = True
+        last_window_number = tail_window_number
+        windows_generated = 1
 
         try:
             session_store.increment_summary_count(session_id, user_id=user_id)
@@ -282,7 +494,7 @@ async def generate_summary(
             tail_stats["total"],
         )
 
-    # ── Step 3: Compaction (if > 1 windows exist) ─────────────────
+    # ── Step 5: Compaction (if > 1 windows exist) ─────────────────
     total_windows = _count_prior_summaries(db, user_id, session_id)
 
     if total_windows > 1:
@@ -295,29 +507,23 @@ async def generate_summary(
             child_data=child_data,
         )
         if compaction_result:
+            # Annotate with event-enriched info
+            compaction_result["event_enriched"] = event_enriched
+            compaction_result["windows_generated"] = windows_generated
             return compaction_result
 
-    # If we only generated a tail window, return that info
+    # If we only generated tail window(s), return that info
     if tail_window_generated:
         return {
             "summary_type": "window",
             "intent_alignment": tail_result.get("intent_alignment"),
             "risk_indicators_count": len(tail_result.get("risk_indicators", [])),
-            "call_count": tail_stats["total"],
-            "window_number": tail_window_number,
+            "call_count": tail_stats.get("total", 0),
+            "window_number": last_window_number,
             "compacted": False,
+            "event_enriched": event_enriched,
+            "windows_generated": windows_generated,
         }
-
-    # No tail window and no compaction needed
-    if total_windows == 0:
-        logger.info(
-            "Summary skipped: insufficient data "
-            "(user=%s session=%s, %d tool calls in tail)",
-            user_id,
-            session_id,
-            len(tool_calls),
-        )
-        return {"status": "skipped", "reason": "Insufficient data in window"}
 
     # Exactly 1 window exists, no compaction needed
     return {
@@ -770,6 +976,406 @@ def _collect_child_data(
     return child_data
 
 
+def _get_session_events(
+    event_store: Any,
+    user_id: str,
+    session_id: str,
+    after_ts: str | None,
+    before_ts: str | None,
+) -> list[dict[str, Any]]:
+    """Fetch and process session events for L2 analysis enrichment.
+
+    Reads ``part`` and ``message`` events from the event store, deduplicates
+    streaming part updates (keeps last by seq per part.id), extracts
+    assistant text and user messages, and returns a sorted list of
+    conversation entries.
+
+    Returns an empty list on any failure (M5 fix — graceful fallback).
+
+    Args:
+        event_store: EventStore instance (or None).
+        user_id: Tenant identifier.
+        session_id: Session identifier.
+        after_ts: Window start timestamp (ISO 8601).
+        before_ts: Window end timestamp (ISO 8601).
+
+    Returns:
+        List of ``{ts, role, text, seq}`` dicts sorted by seq.
+    """
+    if event_store is None:
+        return []
+
+    try:
+        raw_events = event_store.read(
+            user_id,
+            session_id,
+            event_types={"part", "message"},
+            after_ts=after_ts,
+            before_ts=before_ts,
+            limit=_MAX_EVENT_READ,
+        )
+    except Exception:
+        logger.exception(
+            "Event store read failed for %s/%s, falling back to audit_log",
+            user_id,
+            session_id,
+        )
+        return []
+
+    if not raw_events:
+        return []
+
+    # Log if we hit the read limit (C2 — truncation warning)
+    if len(raw_events) >= _MAX_EVENT_READ:
+        logger.warning(
+            "Event store read hit limit (%d) for %s/%s — "
+            "some events may be missing from analysis",
+            _MAX_EVENT_READ,
+            user_id,
+            session_id,
+        )
+
+    from intaris.sanitize import escape_markdown_headers
+
+    # Deduplicate part events by data.part.id — keep last by seq (m1 fix).
+    # OpenCode streams part updates; many events per part with the same id.
+    parts_by_id: dict[str, dict[str, Any]] = {}
+    message_events: list[dict[str, Any]] = []
+
+    for event in raw_events:
+        event_type = event.get("type")
+        data = event.get("data") or {}
+
+        if event_type == "part":
+            part = data.get("part") or {}
+            part_type = part.get("type", "")
+            part_id = part.get("id", "")
+
+            # Only keep text parts (skip step-finish, snapshot, etc.)
+            if part_type != "text":
+                continue
+
+            if part_id:
+                # Dedup: keep last by seq
+                existing = parts_by_id.get(part_id)
+                if existing is None or event.get("seq", 0) > existing.get("seq", 0):
+                    parts_by_id[part_id] = event
+            else:
+                # No part ID — treat as unique
+                parts_by_id[f"_noid_{event.get('seq', 0)}"] = event
+
+        elif event_type == "message":
+            role = data.get("role", "")
+            if role == "user":
+                message_events.append(event)
+
+    # Log if transcript events detected (Claude Code — m4, future work)
+    transcript_count = sum(1 for e in raw_events if e.get("type") == "transcript")
+    if transcript_count:
+        logger.info(
+            "Session %s/%s has %d transcript events (Claude Code) — "
+            "skipping for now (future work)",
+            user_id,
+            session_id,
+            transcript_count,
+        )
+
+    # Build conversation entries
+    conversation: list[dict[str, Any]] = []
+
+    # User messages from event store
+    for event in message_events:
+        data = event.get("data") or {}
+        content = data.get("content", "")
+        # Handle content that may be a list of parts (OpenAI format)
+        if isinstance(content, list):
+            text_parts = [
+                p.get("text", "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            content = "\n".join(text_parts)
+        if not content:
+            continue
+        conversation.append(
+            {
+                "ts": event.get("ts", ""),
+                "role": "user",
+                "text": content,
+                "seq": event.get("seq", 0),
+            }
+        )
+
+    # Assistant text from deduplicated parts (C1 fix — sanitize)
+    for event in parts_by_id.values():
+        data = event.get("data") or {}
+        part = data.get("part") or {}
+        text = part.get("text", "")
+        if not text:
+            continue
+        # Sanitize: escape markdown headers and boundary tags (C1 fix)
+        text = escape_markdown_headers(text)
+        # Escape boundary tags to prevent tag breakout
+        text = text.replace("⟨assistant_text⟩", "⟨\u200bassistant_text⟩")
+        text = text.replace("⟨/assistant_text⟩", "⟨\u200b/assistant_text⟩")
+        conversation.append(
+            {
+                "ts": event.get("ts", ""),
+                "role": "assistant",
+                "text": text,
+                "seq": event.get("seq", 0),
+            }
+        )
+
+    # Sort by seq (primary ordering key)
+    conversation.sort(key=lambda e: e["seq"])
+
+    return conversation
+
+
+def _partition_into_windows(
+    conversation: list[dict[str, Any]],
+    tool_calls: list[dict[str, Any]],
+    reasoning: list[dict[str, Any]],
+    *,
+    window_start: str,
+    window_end: str,
+) -> list[dict[str, Any]]:
+    """Partition data into context-budget-aware windows using logical turns.
+
+    A **conversation turn** is the atomic unit: a USER message followed
+    by all ASSISTANT responses, tool calls, and reasoning until the next
+    USER message. Content before the first USER message is "turn 0".
+
+    Split rules:
+    - Never split mid-turn — a turn is the atomic unit.
+    - Split between turns — window N ends with a complete turn,
+      window N+1 starts with the next USER message.
+    - Never end a window with a USER message unless it's the last
+      data in the session (no subsequent turn exists).
+    - Oversized single turn → gets its own window (no truncation).
+
+    No content is ever truncated or dropped. If there's too much data
+    for one window, more windows are created.
+
+    Args:
+        conversation: Sorted list of ``{ts, role, text, seq}`` dicts.
+        tool_calls: Audit log tool call records for the window.
+        reasoning: Audit log reasoning records for the window.
+        window_start: ISO 8601 start of the full window.
+        window_end: ISO 8601 end of the full window.
+
+    Returns:
+        List of partition dicts, each with keys:
+        ``conversation``, ``tool_calls``, ``reasoning``,
+        ``window_start``, ``window_end``.
+    """
+    if not conversation and not tool_calls:
+        return []
+
+    # ── Step 1: Group conversation entries into logical turns ──────
+    # A turn starts at each USER message. Turn 0 is any content
+    # before the first USER message (assistant preamble).
+    turns: list[dict[str, Any]] = []
+    current_turn: list[dict[str, Any]] = []
+
+    for entry in conversation:
+        if entry.get("role") == "user" and current_turn:
+            # Start a new turn — save the current one
+            turns.append({"entries": current_turn})
+            current_turn = [entry]
+        else:
+            current_turn.append(entry)
+
+    # Don't forget the last turn
+    if current_turn:
+        turns.append({"entries": current_turn})
+
+    # ── Step 2: Compute time ranges and assign tool_calls/reasoning ─
+    for i, turn in enumerate(turns):
+        entries = turn["entries"]
+        # Turn time range
+        if entries:
+            t_start = entries[0].get("ts", window_start)
+            t_end = entries[-1].get("ts", window_end)
+        else:
+            t_start = window_start
+            t_end = window_end
+
+        # First turn extends back to window_start
+        if i == 0:
+            t_start = window_start
+
+        # Last turn extends to window_end
+        if i == len(turns) - 1:
+            t_end = window_end
+        else:
+            # For non-last turns, extend to just before the next turn starts
+            next_entries = turns[i + 1]["entries"]
+            if next_entries:
+                t_end = next_entries[0].get("ts", t_end)
+
+        turn["ts_start"] = t_start
+        turn["ts_end"] = t_end
+
+        # Assign tool_calls by timestamp range
+        turn["tool_calls"] = [
+            tc for tc in tool_calls if t_start <= (tc.get("timestamp") or "") <= t_end
+        ]
+
+        # Assign reasoning by timestamp range
+        turn["reasoning"] = [
+            r for r in reasoning if t_start <= (r.get("timestamp") or "") <= t_end
+        ]
+
+    # ── Step 3: Assign any unassigned tool_calls/reasoning ────────
+    # (timestamps outside all turn ranges → last turn)
+    assigned_tc = set()
+    assigned_r = set()
+    for turn in turns:
+        for tc in turn["tool_calls"]:
+            assigned_tc.add(id(tc))
+        for r in turn["reasoning"]:
+            assigned_r.add(id(r))
+
+    unassigned_tc = [tc for tc in tool_calls if id(tc) not in assigned_tc]
+    unassigned_r = [r for r in reasoning if id(r) not in assigned_r]
+    if turns:
+        if unassigned_tc:
+            turns[-1]["tool_calls"].extend(unassigned_tc)
+        if unassigned_r:
+            turns[-1]["reasoning"].extend(unassigned_r)
+
+    # ── Step 4: Compute actual size per turn ──────────────────────
+    for turn in turns:
+        conv_size = sum(
+            len(e.get("text", "")) + _ENTRY_OVERHEAD for e in turn["entries"]
+        )
+        tc_size = len(turn["tool_calls"]) * _TOOL_CALL_EST
+        reas_size = sum(len(r.get("content", "")) + 30 for r in turn["reasoning"])
+        turn["size"] = conv_size + tc_size + reas_size
+
+    # ── Step 5: Check if everything fits in one window ────────────
+    total_size = sum(t["size"] for t in turns) + _PARTITION_OVERHEAD
+    if total_size <= _MAX_WINDOW_CHARS:
+        return [
+            {
+                "conversation": conversation,
+                "tool_calls": tool_calls,
+                "reasoning": reasoning,
+                "window_start": window_start,
+                "window_end": window_end,
+            }
+        ]
+
+    # ── Step 6: Walk turns, accumulate size, split at boundaries ──
+    partitions: list[dict[str, Any]] = []
+    current_conv: list[dict[str, Any]] = []
+    current_tc: list[dict[str, Any]] = []
+    current_reas: list[dict[str, Any]] = []
+    current_size = _PARTITION_OVERHEAD
+    current_start = window_start
+
+    for turn in turns:
+        turn_size = turn["size"]
+
+        # Would adding this turn exceed the budget?
+        if current_size + turn_size > _MAX_WINDOW_CHARS and current_conv:
+            # Finalize the current partition (ends with the previous
+            # complete turn — never mid-turn, never with a dangling
+            # user message since the previous turn's last entry is
+            # an assistant response or tool result).
+            p_end = current_conv[-1].get("ts", window_end)
+            partitions.append(
+                {
+                    "conversation": current_conv,
+                    "tool_calls": current_tc,
+                    "reasoning": current_reas,
+                    "window_start": current_start,
+                    "window_end": p_end,
+                }
+            )
+            # Start a new partition with this turn
+            current_conv = list(turn["entries"])
+            current_tc = list(turn["tool_calls"])
+            current_reas = list(turn["reasoning"])
+            current_size = _PARTITION_OVERHEAD + turn_size
+            current_start = turn["ts_start"]
+        else:
+            # Add this turn to the current partition
+            current_conv.extend(turn["entries"])
+            current_tc.extend(turn["tool_calls"])
+            current_reas.extend(turn["reasoning"])
+            current_size += turn_size
+
+    # Finalize the last partition
+    if current_conv or current_tc or current_reas:
+        partitions.append(
+            {
+                "conversation": current_conv,
+                "tool_calls": current_tc,
+                "reasoning": current_reas,
+                "window_start": current_start,
+                "window_end": window_end,
+            }
+        )
+
+    # ── Step 7: Extend first partition start to window_start ──────
+    if partitions:
+        partitions[0]["window_start"] = window_start
+
+    # Edge case: no partitions (only tool_calls, no conversation)
+    if not partitions and tool_calls:
+        partitions.append(
+            {
+                "conversation": [],
+                "tool_calls": tool_calls,
+                "reasoning": reasoning,
+                "window_start": window_start,
+                "window_end": window_end,
+            }
+        )
+
+    return partitions
+
+
+def _build_conversation_section(
+    conversation: list[dict[str, Any]],
+) -> str:
+    """Format interleaved USER/ASSISTANT entries for the prompt.
+
+    Pure formatter — no truncation or budget limits. The partitioner
+    ensures each window's conversation fits within the target budget.
+
+    USER entries: ``[timestamp] USER: "text"``
+    ASSISTANT entries: ``[timestamp] ASSISTANT: ⟨assistant_text⟩text⟨/assistant_text⟩``
+
+    Args:
+        conversation: Sorted list of ``{ts, role, text}`` dicts.
+
+    Returns:
+        Formatted conversation section string.
+    """
+    lines: list[str] = []
+
+    for entry in conversation:
+        ts = (entry.get("ts") or "")[:19]
+        role = entry.get("role", "")
+        text = entry.get("text", "")
+
+        if role == "user":
+            line = f'[{ts}] USER: "{text}"'
+        elif role == "assistant":
+            # C1 fix: wrap assistant text in boundary tags
+            line = f"[{ts}] ASSISTANT: \u27e8assistant_text\u27e9{text}\u27e8/assistant_text\u27e9"
+        else:
+            continue
+
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
 def _compress_tool_calls(tool_calls: list[dict[str, Any]]) -> list[str]:
     """Compress tool call records into prompt-friendly lines.
 
@@ -874,8 +1480,14 @@ def _build_summary_prompt(
     agent_reasoning: list[dict[str, Any]],
     prior_summary: str | None,
     child_sessions: list[dict[str, Any]] | None = None,
+    conversation: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the user prompt for L2 session summary generation.
+
+    If ``conversation`` is provided (event-enriched path), renders an
+    interleaved ``== Conversation ==`` section instead of the separate
+    ``== User Messages ==`` section. The conversation section contains
+    both user messages and assistant text with boundary tags.
 
     If child_sessions is provided, includes a "Delegated Work" section
     with child session data for parent session summaries.
@@ -896,8 +1508,12 @@ def _build_summary_prompt(
         parts.append(prior_summary)
         parts.append("")
 
-    # User messages
-    if user_messages:
+    # Conversation (event-enriched) or User Messages (audit_log fallback)
+    if conversation:
+        parts.append("== Conversation ==")
+        parts.append(_build_conversation_section(conversation))
+        parts.append("")
+    elif user_messages:
         parts.append("== User Messages ==")
         for msg in user_messages[:_MAX_USER_MESSAGES]:
             ts = (msg.get("timestamp") or "")[:19]
@@ -939,7 +1555,7 @@ def _build_summary_prompt(
     if child_sessions:
         _append_child_section(parts, child_sessions)
 
-    # Statistics
+    # Statistics (M1 fix: computed from the tool_calls in this partition)
     approved = sum(1 for tc in tool_calls if tc.get("decision") == "approve")
     denied = sum(1 for tc in tool_calls if tc.get("decision") == "deny")
     escalated = sum(1 for tc in tool_calls if tc.get("decision") == "escalate")
@@ -951,9 +1567,17 @@ def _build_summary_prompt(
         f"Total calls: {len(tool_calls)}, "
         f"Approved: {approved}, Denied: {denied}, Escalated: {escalated}"
     )
-    parts.append(f"Unique tools: {', '.join(unique_tools)}")
+    if unique_tools:
+        parts.append(f"Unique tools: {', '.join(unique_tools)}")
     if injection_count:
         parts.append(f"Injection warnings: {injection_count}")
+    if conversation:
+        user_count = sum(1 for e in conversation if e.get("role") == "user")
+        assistant_count = sum(1 for e in conversation if e.get("role") == "assistant")
+        parts.append(
+            f"Conversation entries: {len(conversation)} "
+            f"({user_count} user, {assistant_count} assistant)"
+        )
 
     return "\n".join(parts)
 

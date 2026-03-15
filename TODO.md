@@ -71,13 +71,15 @@ Only later when task was done, there was reasoning update to `Fixing a bug in th
 - checkpoint and reasoning details are not visible on UI
 - Sessions are jumping position as last activity gets updated
 
+- check if behavioral analysis L2 works with parts if session recording is enabled (it should be enabled by default)
+
+- consider adding assistant/user turn into reasoning (eg. Assistant: should I delete this directory, User: yes do it) for better intention generation including user answers on assistant proposals
+
 ## Major
 
 - Approve/deny from Sessions "Recent Evaluations"
 
-- add e2e tests for behavioral analysis
-- check if behavioral analysis L2 works with parts if session recording is enabled (it should be enabled by default)
-- consider adding assistant/user turn into reasoning (eg. Assistant: should I delete this directory, User: yes do it) for better intention generation including user answers on assistant proposals
+- add e2e tests for behavioral analysis, with and without session logging
 
 ## Issues
 

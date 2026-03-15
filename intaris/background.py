@@ -52,6 +52,11 @@ class Metrics:
         self.summary_parent_recheck_count: int = 0
         self.compaction_total: int = 0
         self.compaction_supersede_total: int = 0
+        # Event-aware analysis metrics (m3 fix)
+        self.summary_event_enriched_total: int = 0
+        self.summary_audit_only_total: int = 0
+        self.summary_partitions_total: int = 0
+        self.event_read_truncated_total: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Export metrics as a dict for health check response."""
@@ -67,6 +72,10 @@ class Metrics:
             "summary_parent_recheck_count": self.summary_parent_recheck_count,
             "compaction_total": self.compaction_total,
             "compaction_supersede_total": self.compaction_supersede_total,
+            "summary_event_enriched_total": self.summary_event_enriched_total,
+            "summary_audit_only_total": self.summary_audit_only_total,
+            "summary_partitions_total": self.summary_partitions_total,
+            "event_read_truncated_total": self.event_read_truncated_total,
         }
 
 
@@ -567,6 +576,13 @@ class BackgroundWorker:
                     children_count = len(result.get("child_sessions", []))
                     if children_count > self.metrics.summary_max_children_per_task:
                         self.metrics.summary_max_children_per_task = children_count
+                    # Event-aware metrics (m3 fix)
+                    if result.get("event_enriched"):
+                        self.metrics.summary_event_enriched_total += 1
+                        windows_gen = result.get("windows_generated", 0)
+                        self.metrics.summary_partitions_total += windows_gen
+                    elif result.get("status") != "skipped":
+                        self.metrics.summary_audit_only_total += 1
                 elif task_type == "analysis":
                     result = await self._execute_analysis_task(task)
                     self.metrics.analyses_completed_total += 1
@@ -588,7 +604,8 @@ class BackgroundWorker:
         """Execute a summary generation task.
 
         Creates an analysis LLM client and delegates to the analyzer
-        for windowed session summary generation. Handles parent/child
+        for windowed session summary generation. Passes the event store
+        for event-enriched analysis when available. Handles parent/child
         orchestration: when the analyzer signals that children need
         summaries, enqueues child tasks and re-enqueues the parent
         with a delay.
@@ -599,7 +616,9 @@ class BackgroundWorker:
         )
 
         llm = self._get_analysis_llm()
-        result = await generate_summary(self._db, llm, task)
+        result = await generate_summary(
+            self._db, llm, task, event_store=self._event_store
+        )
 
         # Handle parent waiting for children
         if result.get("needs_children"):
