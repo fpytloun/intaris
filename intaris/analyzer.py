@@ -81,7 +81,7 @@ _PARTITION_OVERHEAD = 2_000
 _ENTRY_CONTENT_LIMIT = 5_000  # reasoning entry, summary narrative
 _WRITE_ARGS_CONTENT_LIMIT = 2_000  # WRITE/CRITICAL tool args content
 _READ_ARGS_CONTENT_LIMIT = 200  # READ tool args (brief, compressed)
-_ARGS_VALUE_LIMIT = 500  # generic arg values
+_ARGS_VALUE_LIMIT = 1_000  # generic arg values
 _EVAL_REASONING_LIMIT = 500  # Intaris evaluation reasoning brief
 _USER_NOTE_LIMIT = 500  # human user's escalation notes
 

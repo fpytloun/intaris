@@ -171,13 +171,32 @@
                 <div class="stat-value" x-text="stats.pending_approvals"></div>
                 <div class="stat-label">Pending Approvals</div>
               </div>
-              <div class="stat-card">
+              <div class="stat-card cursor-pointer hover:ring-1 hover:ring-brand-accent/30 transition-all"
+                   @click="Alpine.store('nav').activeTab = 'analysis'"
+                   title="Click to view full analysis">
                 <div class="stat-value flex items-center justify-center gap-2">
                   <span class="inline-block w-2.5 h-2.5 rounded-full"
-                        :class="riskScoreColor(stats.analysis?.behavioral_risk_level || 1)"></span>
-                  <span x-text="riskScoreLabel(stats.analysis?.behavioral_risk_level || 1)"></span>
+                        :class="riskScoreColor(stats.analysis?.latest_risk_level || stats.analysis?.behavioral_risk_level || 1)"></span>
+                  <span x-text="riskScoreLabel(stats.analysis?.latest_risk_level || stats.analysis?.behavioral_risk_level || 1)"></span>
                 </div>
                 <div class="stat-label">Behavioral Risk</div>
+                <template x-if="stats.analysis?.latest_findings && stats.analysis.latest_findings.length > 0">
+                  <div class="mt-2 space-y-0.5">
+                    <template x-for="f in [...stats.analysis.latest_findings].sort((a, b) => (b.severity || 0) - (a.severity || 0)).slice(0, 5)" :key="f.category">
+                      <div class="flex items-center gap-1.5 text-xs">
+                        <span class="inline-block w-1.5 h-1.5 rounded-full flex-shrink-0"
+                              :class="riskScoreColor(f.severity)"></span>
+                        <span class="text-secondary truncate" x-text="f.category"></span>
+                      </div>
+                    </template>
+                    <template x-if="stats.analysis.latest_findings.length > 5">
+                      <div class="text-xs text-muted" x-text="'+' + (stats.analysis.latest_findings.length - 5) + ' more'"></div>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="!stats.analysis?.latest_findings || stats.analysis.latest_findings.length === 0">
+                  <div class="mt-1 text-xs text-muted">No analysis yet</div>
+                </template>
               </div>
             </div>
 

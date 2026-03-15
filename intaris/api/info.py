@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -280,10 +281,11 @@ def _get_analysis_stats(
                     (user_id, agent_id),
                 )
             else:
+                # Match /profile ordering: most recently updated profile
                 cur.execute(
                     "SELECT risk_level, profile_version FROM behavioral_profiles "
                     "WHERE user_id = ? "
-                    "ORDER BY risk_level DESC "
+                    "ORDER BY updated_at DESC "
                     "LIMIT 1",
                     (user_id,),
                 )
@@ -317,6 +319,31 @@ def _get_analysis_stats(
             if row:
                 stats["total_analyses"] = row[0] or 0
                 stats["last_analysis_at"] = row[1]
+
+        # Latest analysis findings (compact: category + severity only)
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT findings, risk_level FROM behavioral_analyses "
+                f"WHERE user_id = ?{agent_cond} "
+                "ORDER BY created_at DESC LIMIT 1",
+                (user_id, *agent_params),
+            )
+            row = cur.fetchone()
+            if row and row["findings"]:
+                try:
+                    raw = row["findings"]
+                    findings = json.loads(raw) if isinstance(raw, str) else raw
+                    if isinstance(findings, list):
+                        stats["latest_risk_level"] = row["risk_level"]
+                        stats["latest_findings"] = [
+                            {
+                                "category": f.get("category", "?"),
+                                "severity": f.get("severity", 1),
+                            }
+                            for f in findings
+                        ]
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
         # Pending tasks in queue
         bg_worker = getattr(
@@ -373,6 +400,11 @@ async def config(
                 "temperature": cfg.llm_analysis.temperature,
                 "reasoning_effort": cfg.llm_analysis.reasoning_effort,
                 "timeout_ms": cfg.llm_analysis.timeout_ms,
+            },
+            "llm_l3_analysis": {
+                "model": cfg.llm_l3_analysis.model,
+                "reasoning_effort": cfg.llm_l3_analysis.reasoning_effort,
+                "timeout_ms": cfg.llm_l3_analysis.timeout_ms,
             },
             "analysis": {
                 "enabled": cfg.analysis.enabled,
