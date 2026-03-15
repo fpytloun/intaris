@@ -421,14 +421,90 @@ function sessionsTab() {
         this.collapsedSessions = { ...this.collapsedSessions };
       }
       try {
-        const audit = await IntarisAPI.listAudit({
-          session_id: session.session_id,
-          limit: 5,
-        });
+        const [audit, summaries] = await Promise.all([
+          IntarisAPI.listAudit({
+            session_id: session.session_id,
+            limit: 5,
+          }),
+          IntarisAPI.getSessionSummaries(session.session_id).catch(() => ({
+            intaris_summaries: [],
+            agent_summaries: [],
+          })),
+        ]);
         this.sessionAudit = audit.items || [];
         this.auditTotal = audit.total || 0;
+        // Attach summaries to session for template access
+        const intarisSummaries = (summaries.intaris_summaries || []).map(s => ({
+          ...s,
+          _expanded: false,
+          risk_indicators: typeof s.risk_indicators === 'string'
+            ? JSON.parse(s.risk_indicators) : (s.risk_indicators || []),
+          tools_used: typeof s.tools_used === 'string'
+            ? JSON.parse(s.tools_used) : (s.tools_used || []),
+        }));
+        session._summaries = {
+          intaris_summaries: intarisSummaries,
+          agent_summaries: summaries.agent_summaries || [],
+        };
+        session._summaryTriggering = false;
       } catch (e) {
         Alpine.store('notify').error('Failed to load session audit: ' + e.message);
+      }
+    },
+
+    /**
+     * Open Console modal filtered to a summary's time window.
+     */
+    openSummaryConsole(session, summary) {
+      window.dispatchEvent(new CustomEvent('intaris:open-console', {
+        detail: {
+          sessionId: session.session_id,
+          afterTs: summary.window_start,
+          beforeTs: summary.window_end,
+        },
+      }));
+    },
+
+    /**
+     * Open Events modal filtered to a summary's time window.
+     */
+    openSummaryEvents(session, summary) {
+      window.dispatchEvent(new CustomEvent('intaris:open-recording', {
+        detail: {
+          sessionId: session.session_id,
+          afterTs: summary.window_start,
+          beforeTs: summary.window_end,
+        },
+      }));
+    },
+
+    async triggerSummary(session) {
+      session._summaryTriggering = true;
+      try {
+        await IntarisAPI.triggerSessionSummary(session.session_id);
+        Alpine.store('notify').success('Summary generation triggered');
+        // Reload summaries after a delay
+        setTimeout(async () => {
+          try {
+            const summaries = await IntarisAPI.getSessionSummaries(session.session_id);
+            const intarisSummaries = (summaries.intaris_summaries || []).map(s => ({
+              ...s,
+              _expanded: false,
+              risk_indicators: typeof s.risk_indicators === 'string'
+                ? JSON.parse(s.risk_indicators) : (s.risk_indicators || []),
+              tools_used: typeof s.tools_used === 'string'
+                ? JSON.parse(s.tools_used) : (s.tools_used || []),
+            }));
+            session._summaries = {
+              intaris_summaries: intarisSummaries,
+              agent_summaries: summaries.agent_summaries || [],
+            };
+          } catch {}
+          session._summaryTriggering = false;
+        }, 5000);
+      } catch (e) {
+        Alpine.store('notify').error(e.message || 'Failed to trigger summary');
+        session._summaryTriggering = false;
       }
     },
 

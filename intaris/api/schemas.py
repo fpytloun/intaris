@@ -375,6 +375,7 @@ class AnalysisRecord(BaseModel):
     """Cross-session behavioral analysis result."""
 
     id: str
+    agent_id: str | None = None
     analysis_type: str
     sessions_scope: list[str] | None = None
     risk_level: str
@@ -393,9 +394,10 @@ class AnalysisListResponse(BaseModel):
 
 
 class ProfileResponse(BaseModel):
-    """Behavioral risk profile for a user."""
+    """Behavioral risk profile for a user+agent."""
 
     user_id: str
+    agent_id: str | None = None
     risk_level: str = "low"
     active_alerts: list[dict[str, Any]] | None = None
     context_summary: str | None = None

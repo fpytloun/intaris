@@ -426,10 +426,10 @@ L3: Cross-Session Analysis (per-user)
 ### Phase status
 
 - **Phase 1 (Foundation)**: Complete — infrastructure, data collection endpoints, background worker, evaluator integration.
-- **Phase 2 (LLM Analysis)**: Not started — implement `generate_summary()` and `run_analysis()` in `analyzer.py`.
-- **Phase 3 (Profile Updates)**: Not started — profile computation from analysis results.
-- **Phase 4 (UI Integration)**: Not started — management UI tabs for analysis.
-- **Phase 5 (Tuning)**: Not started — threshold tuning, alert rules.
+- **Phase 2 (LLM Analysis)**: Complete — `generate_summary()` implements windowed, iterative session summaries analyzing three data streams (user messages, tool calls, agent reasoning with anti-injection sandboxing).
+- **Phase 3 (Profile Updates)**: Complete — `run_analysis()` implements agent-scoped cross-session analysis. Profiles keyed by `(user_id, agent_id)`. Evaluator injects `behavioral_alert` for high/critical profiles.
+- **Phase 4 (UI Integration)**: Complete — Analysis tab (profile + analysis history), session summaries in Sessions detail, behavioral risk indicator in Dashboard.
+- **Phase 5 (Tuning)**: Not started — threshold tuning, alert rules, notification integration from analysis findings.
 
 ## Filesystem Path Protection
 

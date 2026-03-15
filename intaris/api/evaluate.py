@@ -238,6 +238,48 @@ async def evaluate(
             except Exception:
                 logger.debug("Failed to auto-append evaluation event", exc_info=True)
 
+        # Volume-triggered summary: enqueue a summary task when the
+        # session's total calls hit the configured threshold.
+        bg_worker = getattr(http_request.app.state, "background_worker", None)
+        if bg_worker is not None and bg_worker.analyzer_ready:
+            try:
+                from intaris.config import load_config
+
+                cfg = load_config()
+                threshold = cfg.analysis.summary_volume_threshold
+                if threshold > 0:
+                    # Get current total from the session (just incremented)
+                    from intaris.session import SessionStore
+
+                    _db = getattr(http_request.app.state, "db", None)
+                    if _db is not None:
+                        _sess = SessionStore(_db).get(
+                            request.session_id, user_id=ctx.user_id
+                        )
+                        total = _sess.get("total_calls", 0)
+                        if total > 0 and total % threshold == 0:
+                            tq = bg_worker._task_queue
+                            if not tq.recently_completed(
+                                "summary",
+                                ctx.user_id,
+                                request.session_id,
+                                cooldown_seconds=60,
+                            ):
+                                tq.enqueue(
+                                    "summary",
+                                    ctx.user_id,
+                                    session_id=request.session_id,
+                                    payload={"trigger": "volume"},
+                                    priority=1,
+                                )
+                                logger.debug(
+                                    "Volume-triggered summary: session=%s total=%d",
+                                    request.session_id,
+                                    total,
+                                )
+            except Exception:
+                logger.debug("Failed to check volume trigger", exc_info=True)
+
         return EvaluateResponse(**result)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e

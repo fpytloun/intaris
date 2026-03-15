@@ -419,9 +419,10 @@ class BackgroundWorker:
         self._tasks: list[asyncio.Task] = []
         self._running = False
         self.metrics = Metrics()
-        # Analyzer readiness flag — False in Phase 1 (stubs),
-        # set to True in Phase 3 when real analyzer is available.
-        self.analyzer_ready = False
+        # Analyzer readiness flag — controls whether automatic summary
+        # and analysis tasks are enqueued by the idle sweeper and
+        # periodic scheduler. Enabled when analysis config is active.
+        self.analyzer_ready = config.enabled
         self._event_bus = None
         self._event_store = None
 
@@ -569,22 +570,39 @@ class BackgroundWorker:
     async def _execute_summary_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute a summary generation task.
 
-        In Phase 1, this is a stub that logs and returns an empty result.
-        Phase 3 will implement actual LLM-based summary generation.
+        Creates an analysis LLM client and delegates to the analyzer
+        for windowed session summary generation.
         """
         from intaris.analyzer import generate_summary
 
-        return await generate_summary(self._db, None, task)
+        llm = self._get_analysis_llm()
+        return await generate_summary(self._db, llm, task)
 
     async def _execute_analysis_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute a cross-session analysis task.
 
-        In Phase 1, this is a stub that logs and returns an empty result.
-        Phase 3 will implement actual LLM-based analysis.
+        Creates an analysis LLM client and delegates to the analyzer
+        for agent-scoped cross-session behavioral analysis.
         """
         from intaris.analyzer import run_analysis
 
-        return await run_analysis(self._db, None, task)
+        llm = self._get_analysis_llm()
+        return await run_analysis(self._db, llm, task)
+
+    def _get_analysis_llm(self) -> Any | None:
+        """Create an analysis LLM client from config.
+
+        Returns None if the analysis LLM is not configured.
+        """
+        try:
+            from intaris.config import load_config
+            from intaris.llm import LLMClient
+
+            cfg = load_config()
+            return LLMClient(cfg.llm_analysis)
+        except Exception:
+            logger.warning("Failed to create analysis LLM client", exc_info=True)
+            return None
 
     async def _execute_intention_update_task(
         self, task: dict[str, Any]
@@ -736,6 +754,20 @@ class BackgroundWorker:
                             }
                         )
 
+                # Enqueue summary tasks for auto-completed child sessions
+                if self.analyzer_ready:
+                    for user_id, session_id in completed_children:
+                        if not self._task_queue.cancel_duplicate(
+                            "summary", user_id, session_id
+                        ):
+                            self._task_queue.enqueue(
+                                "summary",
+                                user_id,
+                                session_id=session_id,
+                                payload={"trigger": "close"},
+                                priority=2,
+                            )
+
     async def _periodic_scheduler(self) -> None:
         """Periodically enqueue analysis for users with new data.
 
@@ -755,31 +787,43 @@ class BackgroundWorker:
             if not self.analyzer_ready:
                 continue
 
-            # Find users with new summaries since last analysis
+            # Find (user_id, agent_id) pairs with new summaries since
+            # their last analysis. Agent-scoped: each agent gets its own
+            # analysis and behavioral profile.
             with self._db.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT DISTINCT ss.user_id
+                    SELECT DISTINCT ss.user_id, COALESCE(s.agent_id, '') as agent_id
                     FROM session_summaries ss
+                    JOIN sessions s
+                        ON ss.user_id = s.user_id
+                        AND ss.session_id = s.session_id
                     LEFT JOIN behavioral_profiles bp
                         ON ss.user_id = bp.user_id
+                        AND COALESCE(s.agent_id, '') = bp.agent_id
                     WHERE ss.created_at > COALESCE(bp.updated_at, '1970-01-01')
                     """
                 )
-                users = [row[0] for row in cur.fetchall()]
+                pairs = [(row[0], row[1]) for row in cur.fetchall()]
 
-            for user_id in users:
+            enqueued = 0
+            for user_id, agent_id in pairs:
                 if not self._task_queue.cancel_duplicate("analysis", user_id):
                     self._task_queue.enqueue(
                         "analysis",
                         user_id,
-                        payload={"triggered_by": "periodic"},
+                        payload={
+                            "triggered_by": "periodic",
+                            "agent_id": agent_id,
+                            "lookback_days": self._config.lookback_days,
+                        },
                     )
+                    enqueued += 1
 
-            if users:
+            if enqueued:
                 logger.info(
-                    "Periodic scheduler: enqueued analysis for %d users",
-                    len(users),
+                    "Periodic scheduler: enqueued analysis for %d user/agent pairs",
+                    enqueued,
                 )
 
             # Update profile staleness metric

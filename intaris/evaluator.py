@@ -260,7 +260,7 @@ class Evaluator:
         # Lookup behavioral profile for context injection
         profile_version: int | None = None
         if self._analysis_enabled and self._db is not None:
-            profile = self._get_behavioral_context(user_id)
+            profile = self._get_behavioral_context(user_id, agent_id)
             if profile:
                 profile_version = profile.get("profile_version")
                 # Inject context for high/critical risk profiles
@@ -560,14 +560,21 @@ class Evaluator:
             "injection_detected": _injection_detected,
         }
 
-    def _get_behavioral_context(self, user_id: str) -> dict[str, Any] | None:
+    def _get_behavioral_context(
+        self, user_id: str, agent_id: str | None = None
+    ) -> dict[str, Any] | None:
         """Fast DB lookup of pre-computed behavioral profile.
+
+        Looks up the agent-scoped profile first. Falls back to the
+        user-level profile (agent_id='') if no agent-specific profile
+        exists.
 
         Returns the profile dict if found, None otherwise.
         This is a ~1ms read that does not impact the evaluate hot path.
 
         Args:
             user_id: Tenant identifier.
+            agent_id: Agent identifier (optional).
 
         Returns:
             Profile dict with risk_level, context_summary, profile_version,
@@ -578,9 +585,23 @@ class Evaluator:
 
         try:
             with self._db.cursor() as cur:
+                # Try agent-specific profile first
+                if agent_id:
+                    cur.execute(
+                        "SELECT risk_level, context_summary, profile_version "
+                        "FROM behavioral_profiles "
+                        "WHERE user_id = ? AND agent_id = ?",
+                        (user_id, agent_id),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        return dict(row)
+
+                # Fall back to user-level profile (agent_id='')
                 cur.execute(
                     "SELECT risk_level, context_summary, profile_version "
-                    "FROM behavioral_profiles WHERE user_id = ?",
+                    "FROM behavioral_profiles "
+                    "WHERE user_id = ? AND agent_id = ''",
                     (user_id,),
                 )
                 row = cur.fetchone()

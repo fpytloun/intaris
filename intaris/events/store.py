@@ -181,6 +181,8 @@ class EventStore:
         event_types: set[str] | None = None,
         sources: set[str] | None = None,
         exclude_sources: set[str] | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
     ) -> list[dict]:
         """Read events from storage and buffer.
 
@@ -194,6 +196,8 @@ class EventStore:
             sources: Include only events from these sources. None = all.
             exclude_sources: Exclude events from these sources. None = no
                 exclusion. Applied after ``sources`` include filter.
+            after_ts: Return events with ts >= this ISO 8601 timestamp.
+            before_ts: Return events with ts <= this ISO 8601 timestamp.
 
         Returns:
             List of event dicts ordered by seq.
@@ -222,6 +226,12 @@ class EventStore:
                 seen.add(seq)
                 deduped.append(event)
         events = deduped
+
+        # Filter by timestamp range (ISO 8601 strings compare lexicographically)
+        if after_ts:
+            events = [e for e in events if e.get("ts", "") >= after_ts]
+        if before_ts:
+            events = [e for e in events if e.get("ts", "") <= before_ts]
 
         # Filter by event type
         if event_types:

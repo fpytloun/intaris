@@ -313,6 +313,28 @@ async def update_session_status(
                         exc_info=True,
                     )
 
+        # Enqueue a summary task on session completion/termination
+        if request.status in ("completed", "terminated"):
+            bg_worker = getattr(http_request.app.state, "background_worker", None)
+            if bg_worker is not None and bg_worker.analyzer_ready:
+                try:
+                    tq = bg_worker._task_queue
+                    if not tq.recently_completed(
+                        "summary",
+                        ctx.user_id,
+                        session_id,
+                        cooldown_seconds=60,
+                    ):
+                        tq.enqueue(
+                            "summary",
+                            ctx.user_id,
+                            session_id=session_id,
+                            payload={"trigger": "close"},
+                            priority=2,
+                        )
+                except Exception:
+                    logger.debug("Failed to enqueue close summary", exc_info=True)
+
         return StatusUpdateResponse(ok=True)
     except ValueError as e:
         detail = str(e)

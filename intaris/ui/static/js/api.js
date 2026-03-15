@@ -246,6 +246,8 @@ const IntarisAPI = {
     if (params.type) qs.set('type', params.type);
     if (params.source) qs.set('source', params.source);
     if (params.exclude_source) qs.set('exclude_source', params.exclude_source);
+    if (params.after_ts) qs.set('after_ts', params.after_ts);
+    if (params.before_ts) qs.set('before_ts', params.before_ts);
     const query = qs.toString();
     return this.get(`/session/${encodeURIComponent(sessionId)}/events${query ? '?' + query : ''}`);
   },
@@ -256,6 +258,51 @@ const IntarisAPI = {
    */
   flushSessionEvents(sessionId) {
     return this.post(`/session/${encodeURIComponent(sessionId)}/events/flush`);
+  },
+
+  // ── Behavioral Analysis ──────────────────────────────────────
+
+  /**
+   * Get session summaries (Intaris + agent-reported).
+   * @param {string} sessionId
+   */
+  getSessionSummaries(sessionId) {
+    return this.get(`/session/${encodeURIComponent(sessionId)}/summary`);
+  },
+
+  /**
+   * Trigger summary generation for a session.
+   * @param {string} sessionId
+   */
+  triggerSessionSummary(sessionId) {
+    return this.post(`/session/${encodeURIComponent(sessionId)}/summary/trigger`);
+  },
+
+  /**
+   * Get behavioral risk profile.
+   * @param {Object} params - { agent_id }
+   */
+  getProfile(params = {}) {
+    return this.get('/profile', params);
+  },
+
+  /**
+   * List behavioral analyses.
+   * @param {Object} params - { agent_id, page, limit }
+   */
+  listAnalyses(params = {}) {
+    return this.get('/analysis', params);
+  },
+
+  /**
+   * Trigger cross-session behavioral analysis.
+   * @param {Object} params - { agent_id }
+   */
+  triggerAnalysis(params = {}) {
+    const qs = new URLSearchParams();
+    if (params.agent_id) qs.set('agent_id', params.agent_id);
+    const query = qs.toString();
+    return this.post(`/analysis/trigger${query ? '?' + query : ''}`);
   },
 
   // ── WebSocket ───────────────────────────────────────────────

@@ -368,6 +368,18 @@ class Database:
             )
             logger.info("Migration: added injection_detected column to audit_log")
 
+        # Migration: add agent_id to behavioral_analyses
+        if not self._sqlite_column_exists(conn, "behavioral_analyses", "agent_id"):
+            conn.execute("ALTER TABLE behavioral_analyses ADD COLUMN agent_id TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_analyses_agent "
+                "ON behavioral_analyses(user_id, agent_id, created_at)"
+            )
+            logger.info("Migration: added agent_id column to behavioral_analyses")
+
+        # Migration: add agent_id to behavioral_profiles (recreate with compound PK)
+        self._migrate_behavioral_profiles_sqlite(conn)
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
             "ON sessions(status, last_activity_at)"
@@ -384,6 +396,59 @@ class Database:
         cursor = conn.execute(f"PRAGMA table_info({table})")
         columns = {row[1] for row in cursor.fetchall()}
         return column in columns
+
+    @staticmethod
+    def _migrate_behavioral_profiles_sqlite(conn: sqlite3.Connection) -> None:
+        """Recreate behavioral_profiles with compound PK (user_id, agent_id).
+
+        The original table had user_id as the sole PK. The new schema uses
+        (user_id, agent_id) for agent-scoped profiles. Since this table is
+        typically empty (Phase 1 stubs never populated it), this migration
+        is safe. Any existing rows get agent_id='' (the default).
+        """
+        cursor = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='behavioral_profiles'"
+        )
+        row = cursor.fetchone()
+        if not row:
+            return
+        create_sql = row[0]
+        if "agent_id" in create_sql:
+            return  # Already migrated
+
+        logger.info(
+            "Migration: recreating behavioral_profiles with compound PK "
+            "(user_id, agent_id)"
+        )
+        conn.execute(
+            """
+            CREATE TABLE behavioral_profiles_new (
+                user_id         TEXT NOT NULL,
+                agent_id        TEXT NOT NULL DEFAULT '',
+                risk_level      TEXT NOT NULL DEFAULT 'low'
+                    CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
+                active_alerts   TEXT,
+                context_summary TEXT,
+                profile_version INTEGER NOT NULL DEFAULT 0,
+                last_analysis_id TEXT,
+                updated_at      TEXT NOT NULL,
+                PRIMARY KEY (user_id, agent_id)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO behavioral_profiles_new "
+            "(user_id, agent_id, risk_level, active_alerts, context_summary, "
+            "profile_version, last_analysis_id, updated_at) "
+            "SELECT user_id, '', risk_level, active_alerts, context_summary, "
+            "profile_version, last_analysis_id, updated_at "
+            "FROM behavioral_profiles"
+        )
+        conn.execute("DROP TABLE behavioral_profiles")
+        conn.execute(
+            "ALTER TABLE behavioral_profiles_new RENAME TO behavioral_profiles"
+        )
 
     @staticmethod
     def _migrate_analysis_tasks_check_sqlite(conn: sqlite3.Connection) -> None:
@@ -458,6 +523,8 @@ class Database:
                 ("notification_channels", "events", "TEXT"),
                 ("sessions", "alignment_overridden", "BOOLEAN DEFAULT FALSE"),
                 ("audit_log", "injection_detected", "BOOLEAN DEFAULT FALSE"),
+                ("behavioral_analyses", "agent_id", "TEXT"),
+                ("behavioral_profiles", "agent_id", "TEXT NOT NULL DEFAULT ''"),
             ]
             for table, column, col_type in migrations:
                 cur.execute(
@@ -499,6 +566,10 @@ class Database:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_agent "
                 "ON audit_log(user_id, agent_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_analyses_agent "
+                "ON behavioral_analyses(user_id, agent_id, created_at)"
             )
         finally:
             cur.close()
@@ -662,10 +733,11 @@ CREATE TABLE IF NOT EXISTS agent_summaries (
     FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
 );
 
--- Behavioral guardrails: cross-session analysis results
+-- Behavioral guardrails: cross-session analysis results (agent-scoped)
 CREATE TABLE IF NOT EXISTS behavioral_analyses (
     id              TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL,
+    agent_id        TEXT,
     analysis_type   TEXT NOT NULL
         CHECK (analysis_type IN ('session_end', 'periodic', 'on_demand')),
     sessions_scope  TEXT,
@@ -678,17 +750,20 @@ CREATE TABLE IF NOT EXISTS behavioral_analyses (
 
 CREATE INDEX IF NOT EXISTS idx_analyses_user_time
     ON behavioral_analyses(user_id, created_at);
+-- idx_analyses_agent created by migration (after agent_id column is added)
 
--- Behavioral guardrails: pre-computed behavioral profiles (fast evaluator lookup)
+-- Behavioral guardrails: pre-computed behavioral profiles (agent-scoped, fast evaluator lookup)
 CREATE TABLE IF NOT EXISTS behavioral_profiles (
-    user_id         TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    agent_id        TEXT NOT NULL DEFAULT '',
     risk_level      TEXT NOT NULL DEFAULT 'low'
         CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
     active_alerts   TEXT,
     context_summary TEXT,
     profile_version INTEGER NOT NULL DEFAULT 0,
     last_analysis_id TEXT,
-    updated_at      TEXT NOT NULL
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (user_id, agent_id)
 );
 
 -- Behavioral guardrails: SQLite-backed task queue for background reliability
@@ -874,6 +949,7 @@ CREATE TABLE IF NOT EXISTS agent_summaries (
 CREATE TABLE IF NOT EXISTS behavioral_analyses (
     id              TEXT PRIMARY KEY,
     user_id         TEXT NOT NULL,
+    agent_id        TEXT,
     analysis_type   TEXT NOT NULL
         CHECK (analysis_type IN ('session_end', 'periodic', 'on_demand')),
     sessions_scope  TEXT,
@@ -886,16 +962,19 @@ CREATE TABLE IF NOT EXISTS behavioral_analyses (
 
 CREATE INDEX IF NOT EXISTS idx_analyses_user_time
     ON behavioral_analyses(user_id, created_at);
+-- idx_analyses_agent created by migration (after agent_id column is added)
 
 CREATE TABLE IF NOT EXISTS behavioral_profiles (
-    user_id         TEXT PRIMARY KEY,
+    user_id         TEXT NOT NULL,
+    agent_id        TEXT NOT NULL DEFAULT '',
     risk_level      TEXT NOT NULL DEFAULT 'low'
         CHECK (risk_level IN ('low', 'medium', 'high', 'critical')),
     active_alerts   TEXT,
     context_summary TEXT,
     profile_version INTEGER NOT NULL DEFAULT 0,
     last_analysis_id TEXT,
-    updated_at      TIMESTAMPTZ NOT NULL
+    updated_at      TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (user_id, agent_id)
 );
 
 CREATE TABLE IF NOT EXISTS analysis_tasks (

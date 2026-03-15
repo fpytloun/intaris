@@ -405,6 +405,132 @@ class AuditStore:
 
         return self.get_by_call_id(call_id, user_id=user_id)
 
+    def get_window(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        from_ts: str,
+        to_ts: str,
+        record_types: set[str] | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Get audit records within a time window for a session.
+
+        Optimized for L2 session summary generation — fetches records
+        within a specific time range, optionally filtered by record type.
+
+        Args:
+            session_id: Session to query.
+            user_id: Tenant identifier.
+            from_ts: Window start (inclusive) as ISO timestamp.
+            to_ts: Window end (inclusive) as ISO timestamp.
+            record_types: Optional set of record types to include
+                (e.g., {"tool_call", "reasoning"}). None = all types.
+            limit: Max records to return.
+
+        Returns:
+            List of audit record dicts, ordered by timestamp ASC
+            (chronological order for analysis).
+        """
+        conditions = [
+            "session_id = ?",
+            "user_id = ?",
+            "timestamp >= ?",
+            "timestamp <= ?",
+        ]
+        params: list[Any] = [session_id, user_id, from_ts, to_ts]
+
+        if record_types:
+            valid = record_types & self.VALID_RECORD_TYPES
+            if not valid:
+                return []
+            placeholders = ", ".join("?" for _ in valid)
+            conditions.append(f"record_type IN ({placeholders})")
+            params.extend(sorted(valid))
+
+        where = "WHERE " + " AND ".join(conditions)
+
+        with self._db.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT * FROM audit_log
+                {where}
+                ORDER BY timestamp ASC
+                LIMIT ?
+                """,
+                params + [limit],
+            )
+            rows = cur.fetchall()
+
+        return [_row_to_dict(row) for row in rows]
+
+    def get_session_stats(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        from_ts: str | None = None,
+        to_ts: str | None = None,
+    ) -> dict[str, int]:
+        """Get aggregated stats for a session within an optional time window.
+
+        Returns counts of approved, denied, escalated tool calls.
+
+        Args:
+            session_id: Session to query.
+            user_id: Tenant identifier.
+            from_ts: Optional window start (inclusive).
+            to_ts: Optional window end (inclusive).
+
+        Returns:
+            Dict with approved_count, denied_count, escalated_count, total.
+        """
+        conditions = [
+            "session_id = ?",
+            "user_id = ?",
+            "record_type = 'tool_call'",
+        ]
+        params: list[Any] = [session_id, user_id]
+
+        if from_ts:
+            conditions.append("timestamp >= ?")
+            params.append(from_ts)
+        if to_ts:
+            conditions.append("timestamp <= ?")
+            params.append(to_ts)
+
+        where = "WHERE " + " AND ".join(conditions)
+
+        with self._db.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*) as total,
+                    SUM(CASE WHEN decision = 'approve' THEN 1 ELSE 0 END) as approved,
+                    SUM(CASE WHEN decision = 'deny' THEN 1 ELSE 0 END) as denied,
+                    SUM(CASE WHEN decision = 'escalate' THEN 1 ELSE 0 END) as escalated
+                FROM audit_log
+                {where}
+                """,
+                params,
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return {
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+                "total": 0,
+            }
+        return {
+            "approved_count": row["approved"] or 0,
+            "denied_count": row["denied"] or 0,
+            "escalated_count": row["escalated"] or 0,
+            "total": row["total"] or 0,
+        }
+
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
     """Convert a sqlite3.Row to a plain dict, parsing JSON fields."""

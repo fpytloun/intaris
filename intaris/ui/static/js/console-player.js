@@ -672,13 +672,17 @@ function consolePlayer() {
     ws: null,
     autoScroll: true,
 
+    // Time range filter
+    afterTs: '',
+    beforeTs: '',
+
     // Collapsible state
     expandedTools: {},
     expandedReasoning: {},
 
     // ── Lifecycle ──
 
-    async open(sessionId) {
+    async open(sessionId, opts = {}) {
       this.sessionId = sessionId;
       this.parentSessionId = null;
       this.events = [];
@@ -689,6 +693,8 @@ function consolePlayer() {
       this.error = null;
       this.visible = true;
       this.autoScroll = true;
+      this.afterTs = opts.afterTs ? this._toLocalDatetime(opts.afterTs) : '';
+      this.beforeTs = opts.beforeTs ? this._toLocalDatetime(opts.beforeTs) : '';
       this.expandedTools = {};
       this.expandedReasoning = {};
       this.stopLiveTail();
@@ -711,6 +717,58 @@ function consolePlayer() {
       this.stopLiveTail();
     },
 
+    // ── Time range filtering ──
+
+    /**
+     * Apply time range filter and reload.
+     */
+    async applyTimeFilter() {
+      this.events = [];
+      this.blocks = [];
+      this.lastSeq = 0;
+      this.hasMore = false;
+      this.autoScroll = true;
+      await this.loadEvents();
+      this.processEvents();
+    },
+
+    /**
+     * Clear time range filter and reload.
+     */
+    async clearTimeFilter() {
+      this.afterTs = '';
+      this.beforeTs = '';
+      this.events = [];
+      this.blocks = [];
+      this.lastSeq = 0;
+      this.hasMore = false;
+      this.autoScroll = true;
+      await this.loadEvents();
+      this.processEvents();
+    },
+
+    /**
+     * Whether a time filter is active.
+     */
+    get timeFilterActive() {
+      return !!(this.afterTs || this.beforeTs);
+    },
+
+    /**
+     * Convert ISO 8601 timestamp to datetime-local input value.
+     */
+    _toLocalDatetime(iso) {
+      if (!iso) return '';
+      return iso.replace(/\.\d+Z?$/, '').replace(/Z$/, '').substring(0, 19);
+    },
+
+    /**
+     * Convert datetime-local input value to ISO 8601 string.
+     */
+    _toISOString(local) {
+      return local || '';
+    },
+
     // ── Data loading ──
 
     async loadEvents() {
@@ -724,6 +782,8 @@ function consolePlayer() {
           limit: this.pageSize,
           exclude_source: 'intaris',
         };
+        if (this.afterTs) params.after_ts = this._toISOString(this.afterTs);
+        if (this.beforeTs) params.before_ts = this._toISOString(this.beforeTs);
 
         const result = await IntarisAPI.getSessionEvents(this.sessionId, params);
         const newEvents = result.events || [];

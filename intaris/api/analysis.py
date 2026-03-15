@@ -469,10 +469,12 @@ async def get_session_summaries(
 async def trigger_analysis(
     http_request: Request,
     ctx: SessionContext = Depends(get_session_context),
+    agent_id: str | None = Query(None, description="Agent to analyze"),
 ) -> AnalysisTriggerResponse:
     """Manually trigger cross-session behavioral analysis.
 
     Enqueues an analysis task in the background task queue.
+    Optionally scoped to a specific agent_id.
     """
     worker = getattr(http_request.app.state, "background_worker", None)
     if worker is None or not worker._config.enabled:
@@ -489,7 +491,10 @@ async def trigger_analysis(
         task_id = task_queue.enqueue(
             "analysis",
             ctx.user_id,
-            payload={"triggered_by": "manual"},
+            payload={
+                "triggered_by": "manual",
+                "agent_id": agent_id or "",
+            },
         )
 
         return AnalysisTriggerResponse(ok=True, task_id=task_id)
@@ -504,31 +509,42 @@ async def trigger_analysis(
 @router.get("/analysis", response_model=AnalysisListResponse)
 async def list_analyses(
     ctx: SessionContext = Depends(get_session_context),
+    agent_id: str | None = Query(None, description="Filter by agent_id"),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
 ) -> AnalysisListResponse:
-    """List behavioral analyses for the current user."""
+    """List behavioral analyses for the current user.
+
+    Optionally filtered by agent_id.
+    """
     from intaris.server import _get_db
 
     try:
         db = _get_db()
         offset = (page - 1) * limit
 
+        agent_cond = ""
+        agent_params: tuple[str, ...] = ()
+        if agent_id:
+            agent_cond = " AND agent_id = ?"
+            agent_params = (agent_id,)
+
         with db.cursor() as cur:
             cur.execute(
-                "SELECT COUNT(*) FROM behavioral_analyses WHERE user_id = ?",
-                (ctx.user_id,),
+                "SELECT COUNT(*) FROM behavioral_analyses "
+                f"WHERE user_id = ?{agent_cond}",
+                (ctx.user_id, *agent_params),
             )
             total = cur.fetchone()[0]
 
             cur.execute(
-                """
+                f"""
                 SELECT * FROM behavioral_analyses
-                WHERE user_id = ?
+                WHERE user_id = ?{agent_cond}
                 ORDER BY created_at DESC
                 LIMIT ? OFFSET ?
                 """,
-                (ctx.user_id, limit, offset),
+                (ctx.user_id, *agent_params, limit, offset),
             )
             rows = cur.fetchall()
 
@@ -556,11 +572,13 @@ async def list_analyses(
 @router.get("/profile", response_model=ProfileResponse)
 async def get_profile(
     ctx: SessionContext = Depends(get_session_context),
+    agent_id: str | None = Query(None, description="Agent to get profile for"),
 ) -> ProfileResponse:
     """Get the behavioral risk profile for the current user.
 
     Admin-only: requires user_bound=True (API key maps to a specific
     user). This prevents agents from querying their own risk profile.
+    Optionally scoped to a specific agent_id.
     """
     if not ctx.user_bound:
         raise HTTPException(
@@ -577,10 +595,25 @@ async def get_profile(
         db = _get_db()
 
         with db.cursor() as cur:
-            cur.execute(
-                "SELECT * FROM behavioral_profiles WHERE user_id = ?",
-                (ctx.user_id,),
-            )
+            if agent_id:
+                cur.execute(
+                    "SELECT * FROM behavioral_profiles "
+                    "WHERE user_id = ? AND agent_id = ?",
+                    (ctx.user_id, agent_id),
+                )
+            else:
+                # Return the highest-risk profile across all agents
+                cur.execute(
+                    "SELECT * FROM behavioral_profiles "
+                    "WHERE user_id = ? "
+                    "ORDER BY CASE risk_level "
+                    "  WHEN 'critical' THEN 0 "
+                    "  WHEN 'high' THEN 1 "
+                    "  WHEN 'medium' THEN 2 "
+                    "  ELSE 3 END "
+                    "LIMIT 1",
+                    (ctx.user_id,),
+                )
             row = cur.fetchone()
 
         if row is None:

@@ -18,6 +18,7 @@
   <script src="/ui/js/console-player.js"></script>
   <script src="/ui/js/audit.js"></script>
   <script src="/ui/js/approvals.js"></script>
+  <script src="/ui/js/analysis.js"></script>
   <script src="/ui/js/servers.js"></script>
   <script src="/ui/js/settings.js"></script>
   <script src="/ui/vendor/alpine.min.js" defer></script>
@@ -94,6 +95,7 @@
               { id: 'sessions', label: 'Sessions' },
               { id: 'audit', label: 'Audit' },
               { id: 'approvals', label: 'Approvals' },
+              { id: 'analysis', label: 'Analysis' },
               { id: 'servers', label: 'Servers' },
               { id: 'settings', label: 'Settings' },
             ]">
@@ -152,7 +154,7 @@
         <template x-if="stats">
           <div>
             <!-- Stat Cards -->
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
               <div class="stat-card">
                 <div class="stat-value" x-text="stats.total_sessions"></div>
                 <div class="stat-label">Sessions</div>
@@ -168,6 +170,19 @@
               <div class="stat-card">
                 <div class="stat-value" x-text="stats.pending_approvals"></div>
                 <div class="stat-label">Pending Approvals</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-value flex items-center justify-center gap-2">
+                  <span class="inline-block w-2.5 h-2.5 rounded-full"
+                        :class="{
+                          'bg-green-500': (stats.analysis?.behavioral_risk_level || 'low') === 'low',
+                          'bg-yellow-500': (stats.analysis?.behavioral_risk_level) === 'medium',
+                          'bg-orange-500': (stats.analysis?.behavioral_risk_level) === 'high',
+                          'bg-red-500': (stats.analysis?.behavioral_risk_level) === 'critical',
+                        }"></span>
+                  <span x-text="((stats.analysis?.behavioral_risk_level) || 'low').toUpperCase()"></span>
+                </div>
+                <div class="stat-label">Behavioral Risk</div>
               </div>
             </div>
 
@@ -417,6 +432,96 @@
                   <div class="mb-3">
                     <div class="text-xs text-muted mb-1">Parent Session</div>
                     <span class="font-mono text-xs text-brand-accent" x-text="session.parent_session_id"></span>
+                  </div>
+                </template>
+
+                <!-- Session Summaries -->
+                <template x-if="session._summaries !== undefined">
+                  <div class="mb-4">
+                    <div class="flex items-center justify-between mb-2">
+                      <div class="text-xs text-muted font-medium">Session Summaries</div>
+                      <button @click.stop="triggerSummary(session)" class="btn-secondary text-xs py-0.5 px-2"
+                              :disabled="session._summaryTriggering">
+                        <span x-show="!session._summaryTriggering">Trigger Summary</span>
+                        <span x-show="session._summaryTriggering">Running...</span>
+                      </button>
+                    </div>
+
+                    <!-- Intaris Summaries -->
+                    <template x-if="session._summaries.intaris_summaries && session._summaries.intaris_summaries.length > 0">
+                      <div class="space-y-2 mb-3">
+                        <template x-for="summary in session._summaries.intaris_summaries" :key="summary.id">
+                          <div class="bg-brand-elevated rounded-lg p-3">
+                            <!-- Header: window range, alignment badge, call count -->
+                            <div class="flex items-center gap-2 flex-wrap">
+                              <span class="text-xs text-secondary"
+                                    x-text="'Window ' + (summary.window_start || '').substring(0,16) + ' \u2192 ' + (summary.window_end || '').substring(0,16)"></span>
+                              <span class="text-xs px-1.5 py-0.5 rounded"
+                                    :class="{
+                                      'badge-approve': summary.intent_alignment === 'aligned',
+                                      'badge-escalate': summary.intent_alignment === 'partially_aligned',
+                                      'badge-deny': summary.intent_alignment === 'misaligned',
+                                      'badge-fast': summary.intent_alignment === 'unclear',
+                                    }"
+                                    x-text="summary.intent_alignment"></span>
+                              <span class="text-xs text-secondary" x-text="summary.call_count + ' calls'"></span>
+                            </div>
+                            <!-- Summary text (always visible) -->
+                            <div class="text-sm mt-2 text-secondary" x-text="summary.summary"></div>
+                            <!-- Footer: risk indicators toggle + Console/Events buttons -->
+                            <div class="flex items-center justify-between mt-2">
+                              <div>
+                                <template x-if="summary.risk_indicators && summary.risk_indicators.length > 0">
+                                  <button @click.stop="summary._expanded = !summary._expanded"
+                                          class="text-xs text-yellow-400 hover:text-yellow-300">
+                                    <span x-text="(summary._expanded ? '\u25BE' : '\u25B8') + ' ' + summary.risk_indicators.length + ' risk indicators'"></span>
+                                  </button>
+                                </template>
+                              </div>
+                              <div class="flex gap-1">
+                                <button @click.stop="openSummaryConsole(session, summary)"
+                                        class="btn-primary text-xs py-0.5 px-2">Console</button>
+                                <button @click.stop="openSummaryEvents(session, summary)"
+                                        class="btn-secondary text-xs py-0.5 px-2">Events</button>
+                              </div>
+                            </div>
+                            <!-- Expanded risk indicators -->
+                            <template x-if="summary._expanded && summary.risk_indicators && summary.risk_indicators.length > 0">
+                              <div class="mt-2 space-y-1">
+                                <template x-for="(ind, i) in summary.risk_indicators" :key="i">
+                                  <div class="text-xs flex items-center gap-1">
+                                    <span class="px-1.5 py-0.5 rounded"
+                                          :class="{
+                                            'badge-low': ind.severity === 'low',
+                                            'badge-medium': ind.severity === 'medium',
+                                            'badge-high': ind.severity === 'high',
+                                            'badge-critical': ind.severity === 'critical',
+                                          }"
+                                          x-text="ind.severity"></span>
+                                    <span class="font-medium" x-text="ind.indicator"></span>
+                                    <span class="text-secondary" x-text="ind.detail"></span>
+                                  </div>
+                                </template>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <!-- Agent-Reported Summary -->
+                    <template x-if="session._summaries.agent_summaries && session._summaries.agent_summaries.length > 0">
+                      <div class="border-t border-brand-border pt-2">
+                        <div class="text-xs text-muted mb-1">Agent-Reported Summary (untrusted)</div>
+                        <template x-for="as in session._summaries.agent_summaries" :key="as.id">
+                          <div class="text-xs text-secondary bg-brand-elevated rounded p-2 mb-1" x-text="as.summary"></div>
+                        </template>
+                      </div>
+                    </template>
+
+                    <template x-if="(!session._summaries.intaris_summaries || session._summaries.intaris_summaries.length === 0) && (!session._summaries.agent_summaries || session._summaries.agent_summaries.length === 0)">
+                      <div class="text-xs text-secondary text-center py-2">No summaries yet.</div>
+                    </template>
                   </div>
                 </template>
 
@@ -847,6 +952,203 @@
             <button @click="prevResolvedPage()" :disabled="resolvedPage <= 1" class="btn-secondary text-sm">Previous</button>
             <span class="text-sm text-muted" x-text="`Page ${resolvedPage} of ${resolvedPages}`"></span>
             <button @click="nextResolvedPage()" :disabled="resolvedPage >= resolvedPages" class="btn-secondary text-sm">Next</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Analysis Tab -->
+      <div x-show="$store.nav.activeTab === 'analysis'" x-data="analysisTab()" x-init="init()">
+
+        <!-- Behavioral Profile Card -->
+        <div class="card mb-6">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-medium">Behavioral Profile</h2>
+            <button @click="triggerAnalysis()" class="btn-primary text-sm"
+                    :disabled="triggeringAnalysis">
+              <span x-show="!triggeringAnalysis">Trigger Analysis</span>
+              <span x-show="triggeringAnalysis">Running...</span>
+            </button>
+          </div>
+
+          <div x-show="profileLoading" class="text-center py-8 text-secondary">Loading profile...</div>
+
+          <div x-show="!profileLoading">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+              <div class="stat-card">
+                <div class="stat-label">Risk Level</div>
+                <div class="stat-value flex items-center gap-2">
+                  <span class="inline-block w-3 h-3 rounded-full"
+                        :class="{
+                          'bg-green-500': profile.risk_level === 'low',
+                          'bg-yellow-500': profile.risk_level === 'medium',
+                          'bg-orange-500': profile.risk_level === 'high',
+                          'bg-red-500': profile.risk_level === 'critical',
+                        }"></span>
+                  <span x-text="(profile.risk_level || 'low').toUpperCase()" class="text-lg"></span>
+                </div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Profile Version</div>
+                <div class="stat-value" x-text="profile.profile_version || 0"></div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">Last Updated</div>
+                <div class="stat-value text-sm" x-text="profile.updated_at ? new Date(profile.updated_at).toLocaleString() : 'Never'"></div>
+              </div>
+            </div>
+
+            <!-- Context Summary -->
+            <template x-if="profile.context_summary">
+              <div class="bg-surface-secondary rounded-lg p-3 mb-4">
+                <div class="text-xs text-secondary mb-1 font-medium">Context Summary</div>
+                <div class="text-sm" x-text="profile.context_summary"></div>
+              </div>
+            </template>
+
+            <!-- Active Alerts -->
+            <template x-if="profile.active_alerts && profile.active_alerts.length > 0">
+              <div class="space-y-2">
+                <div class="text-xs text-secondary font-medium">Active Alerts</div>
+                <template x-for="alert in profile.active_alerts" :key="alert.detail">
+                  <div class="flex items-start gap-2 bg-surface-secondary rounded-lg p-3">
+                    <span class="text-xs font-medium px-2 py-0.5 rounded"
+                          :class="{
+                            'badge-high': alert.severity === 'high',
+                            'badge-critical': alert.severity === 'critical',
+                            'badge-medium': alert.severity === 'medium',
+                          }"
+                          x-text="alert.severity"></span>
+                    <div>
+                      <div class="text-sm font-medium" x-text="alert.category"></div>
+                      <div class="text-xs text-secondary" x-text="alert.detail"></div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+            </template>
+
+            <template x-if="!profile.context_summary && (!profile.active_alerts || profile.active_alerts.length === 0) && profile.profile_version === 0">
+              <div class="text-center py-4 text-secondary text-sm">
+                No behavioral analysis has been run yet. Click "Trigger Analysis" to start.
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Analysis History -->
+        <div class="card">
+          <h2 class="text-lg font-medium mb-4">Analysis History</h2>
+
+          <div x-show="analysesLoading" class="text-center py-8 text-secondary">Loading analyses...</div>
+
+          <div x-show="!analysesLoading && analyses.length === 0" class="text-center py-8 text-secondary">
+            No analyses yet.
+          </div>
+
+          <div x-show="!analysesLoading && analyses.length > 0" class="space-y-3">
+            <template x-for="analysis in analyses" :key="analysis.id">
+              <div class="bg-surface-secondary rounded-lg p-4 cursor-pointer"
+                   @click="analysis._expanded = !analysis._expanded">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-3">
+                    <span class="text-sm" x-text="new Date(analysis.created_at).toLocaleString()"></span>
+                    <span class="text-xs px-2 py-0.5 rounded bg-surface-tertiary" x-text="analysis.analysis_type"></span>
+                    <span class="text-xs font-medium px-2 py-0.5 rounded"
+                          :class="{
+                            'badge-low': analysis.risk_level === 'low',
+                            'badge-medium': analysis.risk_level === 'medium',
+                            'badge-high': analysis.risk_level === 'high',
+                            'badge-critical': analysis.risk_level === 'critical',
+                          }"
+                          x-text="analysis.risk_level"></span>
+                  </div>
+                  <div class="text-xs text-secondary">
+                    <span x-text="(analysis.findings || []).length"></span> findings,
+                    <span x-text="(analysis.recommendations || []).length"></span> recommendations
+                  </div>
+                </div>
+
+                <!-- Expanded detail -->
+                <div x-show="analysis._expanded" x-cloak class="mt-3 space-y-3" @click.stop>
+                  <!-- Scope -->
+                  <template x-if="analysis.sessions_scope">
+                    <div>
+                      <div class="text-xs text-secondary font-medium mb-1">Sessions Scope</div>
+                      <div class="flex flex-wrap gap-1">
+                        <template x-for="sid in analysis.sessions_scope" :key="sid">
+                          <span class="text-xs font-mono text-brand-accent hover:underline cursor-pointer"
+                                @click="Alpine.store('nav').openSessionModal(sid)"
+                                x-text="sid"></span>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- Findings -->
+                  <template x-if="analysis.findings && analysis.findings.length > 0">
+                    <div>
+                      <div class="text-xs text-secondary font-medium mb-1">Findings</div>
+                      <div class="space-y-2">
+                        <template x-for="(finding, i) in analysis.findings" :key="i">
+                          <div class="bg-surface rounded-lg p-3">
+                            <div class="flex items-center gap-2 mb-1">
+                              <span class="text-xs font-medium px-2 py-0.5 rounded"
+                                    :class="{
+                                      'badge-low': finding.severity === 'low',
+                                      'badge-medium': finding.severity === 'medium',
+                                      'badge-high': finding.severity === 'high',
+                                      'badge-critical': finding.severity === 'critical',
+                                    }"
+                                    x-text="finding.severity"></span>
+                              <span class="text-sm font-medium" x-text="finding.category"></span>
+                            </div>
+                            <div class="text-xs text-secondary" x-text="finding.detail"></div>
+                            <template x-if="finding.session_ids && finding.session_ids.length > 0">
+                              <div class="text-xs text-secondary mt-1 flex flex-wrap items-center gap-1">
+                                <span>Sessions:</span>
+                                <template x-for="sid in finding.session_ids" :key="sid">
+                                  <span class="font-mono text-brand-accent hover:underline cursor-pointer"
+                                        @click="Alpine.store('nav').openSessionModal(sid)"
+                                        x-text="sid"></span>
+                                </template>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- Recommendations -->
+                  <template x-if="analysis.recommendations && analysis.recommendations.length > 0">
+                    <div>
+                      <div class="text-xs text-secondary font-medium mb-1">Recommendations</div>
+                      <div class="space-y-2">
+                        <template x-for="(rec, i) in analysis.recommendations" :key="i">
+                          <div class="bg-surface rounded-lg p-3">
+                            <div class="flex items-center gap-2 mb-1">
+                              <span class="text-xs font-medium px-2 py-0.5 rounded bg-surface-tertiary"
+                                    x-text="rec.priority"></span>
+                              <span class="text-sm font-medium" x-text="rec.action"></span>
+                            </div>
+                            <div class="text-xs text-secondary" x-text="rec.rationale"></div>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <!-- Pagination -->
+            <div x-show="analysesPages > 1" class="flex justify-center gap-2 mt-4">
+              <button @click="loadAnalyses(analysesPage - 1)" :disabled="analysesPage <= 1"
+                      class="btn-ghost text-xs">Prev</button>
+              <span class="text-xs text-secondary py-1" x-text="`${analysesPage} / ${analysesPages}`"></span>
+              <button @click="loadAnalyses(analysesPage + 1)" :disabled="analysesPage >= analysesPages"
+                      class="btn-ghost text-xs">Next</button>
+            </div>
           </div>
         </div>
       </div>
@@ -1478,7 +1780,7 @@
 
   <!-- ── Console Recording Modal ─────────────────────────────── -->
   <div x-data="consolePlayer()" x-show="visible" x-cloak
-       @intaris:open-console.window="open($event.detail.sessionId)"
+       @intaris:open-console.window="open($event.detail.sessionId, $event.detail)"
        @keydown.escape.window="if (visible) close()"
        class="modal-overlay" @click.self="close()">
     <div class="modal-content max-w-6xl overflow-x-hidden" @click.stop>
@@ -1501,6 +1803,18 @@
           </button>
           <button @click="close()" class="text-muted hover:text-[#E6EDF3] text-lg leading-none px-1">&times;</button>
         </div>
+      </div>
+
+      <!-- Time range filter -->
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs text-muted">From</span>
+        <input type="datetime-local" x-model="afterTs" @change="applyTimeFilter()"
+               class="input text-xs py-1 px-2 w-auto" step="1">
+        <span class="text-xs text-muted">&rarr;</span>
+        <input type="datetime-local" x-model="beforeTs" @change="applyTimeFilter()"
+               class="input text-xs py-1 px-2 w-auto" step="1">
+        <button x-show="timeFilterActive" @click.stop="clearTimeFilter()"
+                class="btn-ghost text-xs py-0.5 px-2">Clear</button>
       </div>
 
       <!-- Error -->
@@ -1633,7 +1947,7 @@
 
   <!-- ── Session Recording Modal ─────────────────────────────── -->
   <div x-data="sessionPlayer()" x-show="visible" x-cloak
-       @intaris:open-recording.window="open($event.detail.sessionId)"
+       @intaris:open-recording.window="open($event.detail.sessionId, $event.detail)"
        @keydown.escape.window="if (visible) close()"
        class="modal-overlay" @click.self="close()">
     <div class="modal-content max-w-[95vw] overflow-x-hidden" @click.stop>
@@ -1689,6 +2003,18 @@
           <span x-text="eventCount"></span> events
           <span x-show="hasMore"> (more available)</span>
         </div>
+      </div>
+
+      <!-- Time range filter -->
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs text-muted">From</span>
+        <input type="datetime-local" x-model="afterTs" @change="applyTimeFilter()"
+               class="input text-xs py-1 px-2 w-auto" step="1">
+        <span class="text-xs text-muted">&rarr;</span>
+        <input type="datetime-local" x-model="beforeTs" @change="applyTimeFilter()"
+               class="input text-xs py-1 px-2 w-auto" step="1">
+        <button x-show="timeFilterActive" @click.stop="clearTimeFilter()"
+                class="btn-ghost text-xs py-0.5 px-2">Clear</button>
       </div>
 
       <!-- Error -->

@@ -25,6 +25,10 @@ function sessionPlayer() {
     typeFilter: '__all__',
     sourceFilter: '__agent__',
 
+    // Time range filter
+    afterTs: '',
+    beforeTs: '',
+
     // Live tail
     liveTail: false,
     ws: null,
@@ -46,8 +50,10 @@ function sessionPlayer() {
 
     /**
      * Open the player for a session.
+     * @param {string} sessionId
+     * @param {Object} [opts] - Optional: { afterTs, beforeTs } for time range filtering
      */
-    async open(sessionId) {
+    async open(sessionId, opts = {}) {
       this.sessionId = sessionId;
       this.events = [];
       this.lastSeq = 0;
@@ -56,6 +62,8 @@ function sessionPlayer() {
       this.expandedSeq = null;
       this.visible = true;
       this.autoScroll = true;
+      this.afterTs = opts.afterTs ? this._toLocalDatetime(opts.afterTs) : '';
+      this.beforeTs = opts.beforeTs ? this._toLocalDatetime(opts.beforeTs) : '';
       this.stopLiveTail();
       this.stopPlaying();
       await this.loadEvents();
@@ -92,6 +100,8 @@ function sessionPlayer() {
         } else if (this.sourceFilter !== '__all__') {
           params.source = this.sourceFilter;
         }
+        if (this.afterTs) params.after_ts = this._toISOString(this.afterTs);
+        if (this.beforeTs) params.before_ts = this._toISOString(this.beforeTs);
 
         const result = await IntarisAPI.getSessionEvents(this.sessionId, params);
         const newEvents = result.events || [];
@@ -134,6 +144,56 @@ function sessionPlayer() {
       this.hasMore = false;
       this.autoScroll = true;
       await this.loadEvents();
+    },
+
+    /**
+     * Apply time range filter and reload.
+     */
+    async applyTimeFilter() {
+      this.events = [];
+      this.lastSeq = 0;
+      this.hasMore = false;
+      this.autoScroll = true;
+      await this.loadEvents();
+    },
+
+    /**
+     * Clear time range filter and reload.
+     */
+    async clearTimeFilter() {
+      this.afterTs = '';
+      this.beforeTs = '';
+      this.events = [];
+      this.lastSeq = 0;
+      this.hasMore = false;
+      this.autoScroll = true;
+      await this.loadEvents();
+    },
+
+    /**
+     * Whether a time filter is active.
+     */
+    get timeFilterActive() {
+      return !!(this.afterTs || this.beforeTs);
+    },
+
+    /**
+     * Convert ISO 8601 timestamp to datetime-local input value.
+     * "2026-03-14T10:00:00.123Z" → "2026-03-14T10:00:00"
+     */
+    _toLocalDatetime(iso) {
+      if (!iso) return '';
+      // Strip trailing Z and fractional seconds, truncate to seconds
+      return iso.replace(/\.\d+Z?$/, '').replace(/Z$/, '').substring(0, 19);
+    },
+
+    /**
+     * Convert datetime-local input value to ISO 8601 string.
+     * "2026-03-14T10:00:00" → "2026-03-14T10:00:00"
+     * (Server compares lexicographically, so no Z suffix needed.)
+     */
+    _toISOString(local) {
+      return local || '';
     },
 
     /**

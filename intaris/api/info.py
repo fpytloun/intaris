@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -219,6 +220,9 @@ async def stats(
         except Exception:
             pass  # MCP tables may not exist in older DBs.
 
+        # Behavioral analysis stats
+        analysis_stats = _get_analysis_stats(db, ctx.user_id, agent_id, request)
+
         return {
             "total_sessions": total_sessions,
             "sessions_by_status": status_counts,
@@ -235,6 +239,7 @@ async def stats(
             "users": users,
             "agents": agents,
             "mcp": mcp_stats,
+            "analysis": analysis_stats,
         }
     except Exception:
         logger.exception("Error in /stats")
@@ -242,6 +247,88 @@ async def stats(
             status_code=500,
             detail="Internal error computing stats",
         )
+
+
+def _get_analysis_stats(
+    db: Any,
+    user_id: str,
+    agent_id: str | None,
+    request: Request,
+) -> dict:
+    """Compute behavioral analysis stats for the dashboard.
+
+    Returns profile risk level, summary/analysis counts, and queue depth.
+    """
+    from typing import Any as _Any
+
+    stats: dict[str, _Any] = {
+        "behavioral_risk_level": "low",
+        "profile_version": 0,
+        "total_summaries": 0,
+        "total_analyses": 0,
+        "last_analysis_at": None,
+        "pending_tasks": 0,
+    }
+
+    try:
+        # Get behavioral profile for the agent (or user-level)
+        with db.cursor() as cur:
+            if agent_id:
+                cur.execute(
+                    "SELECT risk_level, profile_version FROM behavioral_profiles "
+                    "WHERE user_id = ? AND agent_id = ?",
+                    (user_id, agent_id),
+                )
+            else:
+                cur.execute(
+                    "SELECT risk_level, profile_version FROM behavioral_profiles "
+                    "WHERE user_id = ? ORDER BY profile_version DESC LIMIT 1",
+                    (user_id,),
+                )
+            row = cur.fetchone()
+            if row:
+                stats["behavioral_risk_level"] = row["risk_level"]
+                stats["profile_version"] = row["profile_version"]
+
+        # Total summaries
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM session_summaries WHERE user_id = ?",
+                (user_id,),
+            )
+            stats["total_summaries"] = cur.fetchone()[0]
+
+        # Total analyses and last analysis timestamp
+        agent_cond = ""
+        agent_params: tuple[str, ...] = ()
+        if agent_id:
+            agent_cond = " AND agent_id = ?"
+            agent_params = (agent_id,)
+
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*), MAX(created_at) FROM behavioral_analyses "
+                f"WHERE user_id = ?{agent_cond}",
+                (user_id, *agent_params),
+            )
+            row = cur.fetchone()
+            if row:
+                stats["total_analyses"] = row[0] or 0
+                stats["last_analysis_at"] = row[1]
+
+        # Pending tasks in queue
+        bg_worker = getattr(
+            getattr(request, "app", None),
+            "state",
+            None,
+        )
+        bg_worker = getattr(bg_worker, "background_worker", None)
+        if bg_worker is not None:
+            stats["pending_tasks"] = bg_worker.metrics.task_queue_depth
+    except Exception:
+        logger.debug("Failed to compute analysis stats", exc_info=True)
+
+    return stats
 
 
 @router.get("/config")

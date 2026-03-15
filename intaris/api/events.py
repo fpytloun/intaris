@@ -147,6 +147,14 @@ async def read_events(
         None,
         description="Comma-separated source exclude filter (e.g., 'intaris')",
     ),
+    after_ts: str | None = Query(
+        None,
+        description="Return events with ts >= this ISO 8601 timestamp",
+    ),
+    before_ts: str | None = Query(
+        None,
+        description="Return events with ts <= this ISO 8601 timestamp",
+    ),
 ) -> EventReadResponse:
     """Read events from a session's event log."""
     event_store = _get_event_store(request)
@@ -187,6 +195,8 @@ async def read_events(
             event_types=event_types,
             sources=event_sources,
             exclude_sources=event_exclude_sources,
+            after_ts=after_ts,
+            before_ts=before_ts,
         )
     except Exception as e:
         logger.exception("Failed to read events for %s/%s", ctx.user_id, session_id)
