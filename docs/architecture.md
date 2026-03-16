@@ -1,6 +1,6 @@
 # Architecture
 
-Intaris is a guardrails service that sits between AI coding agents and their tools. Every tool call passes through a classification and evaluation pipeline before execution is allowed.
+Intaris is a guardrails service that sits between AI agents and their tools. Every tool call passes through a classification and evaluation pipeline before execution is allowed.
 
 ## System Overview
 

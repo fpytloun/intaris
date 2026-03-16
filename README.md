@@ -1,6 +1,6 @@
 # intaris
 
-Guardrails service for AI coding agents. Intaris sits between your AI agent and its tools, evaluating every tool call for safety and alignment before allowing execution. Works with [OpenCode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and any MCP-compatible client.
+Guardrails service for AI agents. Intaris sits between your AI agent and its tools, evaluating every tool call for safety and alignment before allowing execution. Works with [OpenCode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and any MCP-compatible client.
 
 **Default-deny.** Every tool call is classified and evaluated. Read-only operations are fast-pathed; everything else goes through LLM safety evaluation. Unknown tools are never auto-approved.
 
@@ -30,21 +30,37 @@ Part of the [Cognara](https://github.com/fpytloun) platform (Cognis controller, 
 
 ## Quick Start
 
-```bash
-pip install -e .
-export LLM_API_KEY=sk-your-key
-intaris
-```
-
-The server starts at `http://localhost:8060`. Open `http://localhost:8060/ui` for the management dashboard.
-
-**Docker:**
+Intaris needs an OpenAI-compatible API key for safety evaluation. It picks up `LLM_API_KEY` from your environment automatically.
 
 ```bash
-docker compose up -d
+LLM_API_KEY=sk-your-key uvx intaris
 ```
 
-See the [Quick Start Guide](docs/quickstart.md) for connecting your first client, or the [Deployment Guide](docs/deployment.md) for production setup.
+That's it. Intaris starts on `http://localhost:8060`, management UI at `http://localhost:8060/ui`.
+
+Now connect your client — for **OpenCode**, install the plugin:
+
+```bash
+export INTARIS_URL=http://localhost:8060
+cp integrations/opencode/intaris.ts ~/.config/opencode/plugins/
+```
+
+Or for **any MCP client**, use the MCP proxy — add to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "intaris": {
+      "type": "streamable-http",
+      "url": "http://localhost:8060/mcp"
+    }
+  }
+}
+```
+
+Every tool call is now evaluated for safety before execution.
+
+Also available via [Docker, pip, or production setup](docs/deployment.md). See the [full quick start guide](docs/quickstart.md) for more clients and options.
 
 ## Screenshots
 

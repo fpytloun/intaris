@@ -1,4 +1,4 @@
-"""intaris — Guardrails service for AI coding agents."""
+"""intaris — Guardrails service for AI agents."""
 
 from importlib.metadata import PackageNotFoundError, version
 

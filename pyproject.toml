@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "intaris"
 version = "0.1.0"
-description = "Guardrails service for AI coding agents — safety evaluation, audit, and approval workflows"
+description = "Guardrails service for AI agents — safety evaluation, audit, and approval workflows"
 readme = "README.md"
 license = "LicenseRef-BSL-1.1"
 requires-python = ">=3.11"

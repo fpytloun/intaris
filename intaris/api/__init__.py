@@ -19,7 +19,7 @@ def create_api_app() -> FastAPI:
     """
     app = FastAPI(
         title="intaris",
-        description="Guardrails for AI coding agents — REST API",
+        description="Guardrails for AI agents — REST API",
         version=__version__,
         docs_url="/docs",
         openapi_url="/openapi.json",

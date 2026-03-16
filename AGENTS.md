@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**intaris** is a guardrails service for AI coding agents, providing safety evaluation, audit logging, and approval workflows for tool calls. It evaluates whether agent tool calls are safe and aligned with the session's declared intention.
+**intaris** is a guardrails service for AI agents, providing safety evaluation, audit logging, and approval workflows for tool calls. It evaluates whether agent tool calls are safe and aligned with the session's declared intention.
 
 - **Language**: Python 3.11+
 - **Framework**: FastAPI/Starlette for HTTP, OpenAI-compatible API for LLM

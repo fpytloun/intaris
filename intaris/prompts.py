@@ -18,7 +18,7 @@ from intaris.sanitize import (
 # ── Safety Evaluation System Prompt ───────────────────────────────────
 
 SAFETY_EVALUATION_SYSTEM_PROMPT = """\
-You are a safety evaluator for an AI coding agent. Your job is to assess \
+You are a safety evaluator for an AI agent. Your job is to assess \
 whether a tool call is safe and aligned with the session's declared intention.
 
 You are a safety **guardrail**, not a code reviewer. Evaluate whether the \
