@@ -21,7 +21,7 @@ Overview of evaluation metrics, decision distribution, and system performance.
 </p>
 
 **Features:**
-- Summary stat cards: Sessions, Evaluations, Approval Rate, Pending Approvals
+- Summary stat cards: Sessions, Evaluations, Approval Rate, Pending Approvals, Behavioral Risk (with latest analysis findings, clickable to Analysis tab)
 - Donut charts: Decisions (approve/deny/escalate), Risk Levels, Evaluation Paths, Sessions by status, Classification (read/write/critical)
 - Evaluations bar chart (last 24 hours)
 - Top Tools horizontal bar chart
@@ -99,13 +99,26 @@ MCP server management with tool listing and per-tool preference overrides.
 - Edit/Disable/Delete buttons per server
 - Force-refresh tools cache
 
+### Analysis
+
+Behavioral risk profile, analysis history, and trend charts.
+
+**Features:**
+- Behavioral risk profile card: risk level, context summary, active alerts (severity >= 7)
+- Run Analysis button for on-demand L3 cross-session analysis
+- Doughnut charts: findings by category, findings by severity band (from latest analysis)
+- Time series charts: risk level timeline, findings-by-severity over time, categories over time
+- Paginated analysis history with expandable findings and recommendations
+- Findings sorted by severity, recommendations sorted by priority
+- Task status indicator (pending/running summaries and analyses)
+
 ### Settings
 
 Read-only display of server configuration.
 
 **Features:**
 - Non-sensitive server configuration (LLM base URL masked)
-- LLM model and timeout settings
+- LLM model and timeout settings (evaluation, L2 analysis, L3 analysis)
 - Rate limit configuration
 - Analysis settings
 - Event store configuration

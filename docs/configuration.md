@@ -38,17 +38,29 @@ Clients authenticate via `Authorization: Bearer <key>` header or `X-API-Key: <ke
 
 The evaluation model should be fast and inexpensive -- it's called on every non-read-only tool call. `gpt-5-nano` or similar small models work well. The model must support structured output (JSON mode).
 
-## LLM (Behavioral Analysis)
+## LLM (L2 Behavioral Analysis)
 
-Separate LLM configuration for analysis tasks (session summaries, cross-session analysis). Typically a more capable model with longer timeout.
+Separate LLM configuration for L2 analysis tasks (session summaries). Typically a more capable model with longer timeout than the evaluation model.
 
 | Variable | Default | Description |
 |---|---|---|
 | `ANALYSIS_LLM_API_KEY` | (falls back to `LLM_API_KEY`) | API key for analysis LLM |
 | `ANALYSIS_LLM_BASE_URL` | (falls back to `LLM_BASE_URL`) | Base URL for analysis LLM |
-| `ANALYSIS_LLM_MODEL` | `gpt-5-mini` | Model for analysis tasks |
+| `ANALYSIS_LLM_MODEL` | `gpt-5-mini` | Model for L2 analysis tasks |
 | `ANALYSIS_LLM_REASONING_EFFORT` | `low` | Reasoning effort for analysis |
 | `ANALYSIS_LLM_TIMEOUT_MS` | `30000` | Timeout for analysis LLM calls (30s) |
+
+## LLM (L3 Cross-Session Analysis)
+
+Separate LLM configuration for L3 cross-session behavioral analysis. L3 detects subtle patterns across sessions (progressive escalation, coordinated access, intent masking) and typically uses a more capable model than L2. Falls back to the L2 analysis config, then the evaluate LLM config.
+
+| Variable | Default | Description |
+|---|---|---|
+| `ANALYSIS_L3_LLM_API_KEY` | (falls back to `ANALYSIS_LLM_API_KEY`, then `LLM_API_KEY`) | API key for L3 analysis |
+| `ANALYSIS_L3_LLM_BASE_URL` | (falls back to `ANALYSIS_LLM_BASE_URL`, then `LLM_BASE_URL`) | Base URL for L3 analysis |
+| `ANALYSIS_L3_LLM_MODEL` | (falls back to `ANALYSIS_LLM_MODEL`, then `gpt-5.4`) | Model for L3 analysis |
+| `ANALYSIS_L3_LLM_REASONING_EFFORT` | (falls back to `ANALYSIS_LLM_REASONING_EFFORT`) | Reasoning effort for L3 analysis |
+| `ANALYSIS_L3_LLM_TIMEOUT_MS` | (falls back to `ANALYSIS_LLM_TIMEOUT_MS`, default `30000`) | Timeout for L3 analysis LLM calls |
 
 ## Database
 
@@ -65,12 +77,16 @@ Separate LLM configuration for analysis tasks (session summaries, cross-session 
 | `SUMMARY_VOLUME_THRESHOLD` | `50` | Evaluate calls per session before triggering a summary |
 | `ANALYSIS_INTERVAL_MINUTES` | `60` | Minutes between periodic cross-session analysis runs |
 | `ANALYSIS_LOOKBACK_DAYS` | `7` | Days of history to include in cross-session analysis |
+| `ANALYSIS_WORKER_COUNT` | `4` | Number of parallel task queue workers |
+| `ANALYSIS_WINDOW_CHARS` | `150000` | Max chars per L2 analysis window prompt. The partitioner creates more windows when data exceeds this budget. Tune for smaller/larger model context windows. |
+| `ANALYSIS_L3_WINDOW_CHARS` | `200000` | Max chars per L3 cross-session analysis prompt. Progressive summarization compresses older sessions when the prompt exceeds this budget. |
 
 ## Barriers
 
 | Variable | Default | Description |
 |---|---|---|
 | `INTENTION_BARRIER_TIMEOUT_MS` | `1000` | Max time (ms) the evaluate endpoint waits for a pending intention update |
+| `INTENTION_BARRIER_POLL_TIMEOUT_MS` | `2000` | Max time (ms) the evaluate endpoint waits for `/reasoning` to arrive when `intention_pending=true` |
 | `ALIGNMENT_BARRIER_TIMEOUT_MS` | `15000` | Max time (ms) the evaluate endpoint waits for a pending alignment check |
 
 ## Webhook

@@ -203,7 +203,21 @@ Parent sessions incorporate child session data into their summaries. The flow:
 3. **Summary compaction** synthesizes multiple window summaries into a single session-level assessment with supersede semantics (old compacted deleted, new one inserted)
 4. **L3 analysis** operates only on root sessions (`parent_session_id IS NULL`) -- child data is already embedded in parent compacted summaries
 
-Task-queue orchestration ensures children are summarized before parents: parent tasks check for unsummarized children, enqueue child tasks at higher priority, and re-enqueue themselves with a 30s delay (max 10 re-enqueues).
+Task-queue orchestration ensures children are summarized before parents: parent tasks check for unsummarized children, enqueue child tasks at higher priority, and re-enqueue themselves with a 30s delay (max 5 re-enqueues).
+
+### Budget-Aware Partitioning
+
+Both the event-enriched path and the audit_log-only fallback path use budget-aware partitioning -- no content is ever silently dropped. When data exceeds the window budget (150k chars, configurable via `ANALYSIS_WINDOW_CHARS`), more windows are created, each getting its own LLM call. Per-entry safety valves at generous limits (e.g., 5k chars for reasoning, 2k for WRITE args content) ensure individual entries don't dominate the budget, with explicit truncation metadata appended when triggered.
+
+Tool call arguments are summarized differently by classification: WRITE/CRITICAL operations include up to 2000 chars of content with content security flags; READ operations stay brief. File paths are never truncated.
+
+Content security scanning (`_scan_content_flags`) provides defense-in-depth by scanning full, untruncated tool args for dangerous patterns (SSH access, code execution, credential access, etc.) and appending compact flag strings to prompt lines.
+
+### L3 Cross-Session Analysis
+
+L3 uses a **separate LLM configuration** (`ANALYSIS_L3_LLM_*` env vars) -- typically a more capable model (default `gpt-5.4`) with its own context budget (`ANALYSIS_L3_WINDOW_CHARS`, default 200k chars). L3 uses **progressive summarization** to stay within budget: recent sessions (last 3 days) get full summary narratives, older sessions get compressed structured metadata only.
+
+Compaction prompts include cross-window aggregate metrics (total denial/escalation rates, alignment trajectory, indicator frequency) to surface distributed patterns invisible at the per-window level.
 
 ### Risk Indicators
 

@@ -419,7 +419,7 @@ L3: Cross-Session Analysis (per-user, root sessions only)
 
 8. **Summary compaction**: Multiple window summaries are synthesized into a single session-level compacted summary. Compaction uses supersede semantics — old compacted summaries are deleted and replaced. Compaction runs automatically when a session has > 1 window summaries.
 
-9. **Task-queue orchestration**: Parent summary tasks check for unsummarized children, enqueue child tasks at higher priority, and re-enqueue themselves with a 30s delay (max 10 re-enqueues). This avoids recursive LLM calls blocking the single-threaded task queue.
+9. **Task-queue orchestration**: Parent summary tasks check for unsummarized children, enqueue child tasks at higher priority, and re-enqueue themselves with a 30s delay (max 5 re-enqueues). This avoids recursive LLM calls blocking the single-threaded task queue.
 
 ### Hierarchical summary flow
 
@@ -464,6 +464,10 @@ L3 analysis operates only on **root sessions** (`parent_session_id IS NULL`) in 
 
 When fetching session summaries for L3, compacted summaries are preferred over window summaries. If a session has a compacted summary, only that is included. Otherwise, all window summaries are used.
 
+L3 uses a **separate LLM configuration** (`ANALYSIS_L3_LLM_*` env vars) — typically a more capable model (default `gpt-5.4`) than the L2 model.  Falls back to the L2 analysis config, then the evaluate LLM config.
+
+L3 uses **progressive summarization** to stay within context budget — see [L3 progressive summarization](#l3-progressive-summarization) below.
+
 ### Database tables (analysis)
 
 | Table | Key columns | Description |
@@ -481,10 +485,67 @@ Key indexes: `idx_sessions_parent ON sessions(user_id, parent_session_id)` for e
 | Constant | Value | Description |
 |---|---|---|
 | `_MAX_CHILD_SESSIONS` | 20 | Max children included in parent summary (breadth limit) |
-| `_MAX_COMPACTION_WINDOWS` | 30 | Max window summaries in compaction prompt (token budget) |
-| `_MAX_CHILD_SUMMARY_CHARS` | 500 | Max chars per child summary in prompts |
-| `_MAX_PARENT_RECHECK` | 10 | Max re-enqueue attempts for parent waiting on children |
+| `_MAX_COMPACTION_WINDOWS` | 50 | Max window summaries in compaction prompt (token budget) |
+| `_MAX_SUMMARY_CHARS` | 3000 | Max chars per child/prior summary narrative |
+| `_MAX_PARENT_RECHECK` | 5 | Max re-enqueue attempts for parent waiting on children |
 | `_PARENT_RECHECK_DELAY_S` | 30 | Seconds between parent re-enqueue checks |
+
+### Analyzer constants
+
+Budget-aware windowing and per-entry safety valves.  No content is ever silently dropped — when data exceeds the window budget, more windows (and LLM calls) are created.  Per-entry safety valves are rarely-hit safeguards that append explicit truncation metadata and content security flags when triggered.
+
+| Constant | Value | Description |
+|---|---|---|
+| `_MAX_WINDOW_CHARS` | 150,000 | Max chars per L2 window prompt (configurable via `ANALYSIS_WINDOW_CHARS`). Designed for 200k-token models. |
+| `_CONTEXT_OVERHEAD` | 8,000 | Subtracted from window budget for system prompt + output tokens |
+| `_L3_MAX_WINDOW_CHARS` | 200,000 | Max chars per L3 analysis prompt (configurable via `ANALYSIS_L3_WINDOW_CHARS`) |
+| `_L3_RECENT_DAYS` | 3 | Sessions within this range get full detail in L3; older sessions get compressed format |
+| `_ENTRY_CONTENT_LIMIT` | 5,000 | Per-entry safety valve for reasoning entries |
+| `_WRITE_ARGS_CONTENT_LIMIT` | 2,000 | Per-entry safety valve for WRITE/CRITICAL tool args content |
+| `_READ_ARGS_CONTENT_LIMIT` | 200 | Per-entry limit for READ tool args (compressed anyway) |
+| `_ARGS_VALUE_LIMIT` | 1,000 | Per-entry limit for generic arg values |
+| `_EVAL_REASONING_LIMIT` | 500 | Intaris evaluation reasoning brief |
+| `_USER_NOTE_LIMIT` | 500 | Human user's escalation notes |
+
+### Content security scanning
+
+Defense-in-depth: `_scan_content_flags()` scans the **full, untruncated** tool args for security-sensitive patterns and produces compact flag strings (e.g., `["ssh_access", "code_exec"]`).  Flags are appended to every WRITE/CRITICAL tool call line in analysis prompts, ensuring dangerous patterns are visible even when content is summarized.
+
+Detected patterns: `system_files`, `ssh_access`, `remote_exec`, `code_exec`, `dangerous_rm`, `permission_mod`, `network_bind`, `encoding`, `cron_modification`, `firewall_mod`, `credential_access`, `env_exfiltration`.
+
+Static regex patterns are evadable by sophisticated attackers.  The primary defense is budget-aware partitioning ensuring all data reaches an LLM analysis window.  Content security flags are a supplementary signal.
+
+### Safety valve system
+
+`_apply_safety_valve()` replaces silent truncation with explicit metadata.  When a per-entry limit is exceeded, the truncated text includes a suffix showing what was omitted and any content security flags from the full content:
+
+```
+[2000 of 47000 chars shown flags:code_exec,ssh_access]
+```
+
+Safety valve activations are counted via `drain_safety_valve_hits()` and propagated to `Metrics.safety_valve_hits_total` by the background worker after each task.
+
+### L3 progressive summarization
+
+L3 cross-session analysis uses progressive summarization to stay within the context budget.  Sessions are tiered by recency:
+
+- **Recent** (within `_L3_RECENT_DAYS`): Full summary narrative + all risk indicators with detail + tools list
+- **Older**: Intention + alignment + stats + indicator categories only (no narrative, no detail)
+
+If the prompt exceeds the L3 budget after progressive summarization, the recent threshold is reduced to 1 day before falling back.  The L3 system prompt instructs the LLM to weight recent sessions more heavily.
+
+### Cross-window aggregates in compaction
+
+Compaction prompts include a "Cross-Window Aggregates" section that surfaces cumulative patterns invisible at the per-window level: total calls, denial/escalation rates, alignment trajectory across windows, and risk indicator frequency.  This partially mitigates distributed attacks where malicious activity stays below detection threshold in each individual window.
+
+### Classification-aware args summarization
+
+Tool call arguments are summarized differently based on classification:
+
+- **File paths**: Never truncated (the full path is the security signal)
+- **WRITE/CRITICAL content**: Up to `_WRITE_ARGS_CONTENT_LIMIT` chars + content security flags
+- **READ content**: Brief summaries (compressed into batch counts anyway)
+- **Generic values**: Up to `_ARGS_VALUE_LIMIT` chars
 
 ### Observability metrics
 
@@ -494,6 +555,7 @@ Key indexes: `idx_sessions_parent ON sessions(user_id, parent_session_id)` for e
 | `summary_max_children_per_task` | High-water mark of children per parent task |
 | `summary_parent_recheck_count` | Total parent re-enqueue cycles |
 | `compaction_total` | Total compacted summaries generated |
+| `safety_valve_hits_total` | Total safety valve activations (content truncated with metadata) |
 
 ### Session lifecycle extensions
 

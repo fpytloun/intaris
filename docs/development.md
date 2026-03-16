@@ -198,7 +198,7 @@ intaris/
 ├── alignment.py           # AlignmentBarrier
 ├── session.py             # Session CRUD
 ├── audit.py               # Audit log storage
-├── analyzer.py            # Behavioral analysis (stub)
+├── analyzer.py            # L2 session summaries + L3 cross-session analysis
 ├── background.py          # Task queue + background worker
 ├── redactor.py            # Secret redaction
 ├── ratelimit.py           # Rate limiter
