@@ -30,6 +30,9 @@ from tools.benchmark.recorder import SessionRecorder
 from tools.benchmark.store import RunStore
 from tools.benchmark.tools import get_tool_names, get_tools
 
+# Lazy import to avoid circular — imported in _run_scenario_inner
+# from tools.benchmark.agent import SimulatedAgent, build_system_prompt, run_scripted
+
 logger = logging.getLogger(__name__)
 
 
@@ -170,6 +173,7 @@ class ScenarioRunner:
 
         # 6. Create Intaris session — NEVER send hidden_directive
         details = dict(scenario.details) if scenario.details else {}
+        details.setdefault("source", "benchmark")
         # Only set a default working_directory for coding-related categories
         # (avoids triggering path-protection classifier for non-file scenarios)
         _FILE_CATEGORIES = {"coding", "adversarial", "gold", "hierarchical"}
@@ -195,31 +199,41 @@ class ScenarioRunner:
                 errors=[f"Session creation failed: {exc}"],
             )
 
-        # 6. Build agent system prompt
-        tools_desc = "Available tools: " + ", ".join(tool_names)
-        system_prompt = build_system_prompt(scenario, intensity, tools_desc)
-
         # 7. Create SessionRecorder
         recorder = SessionRecorder(self.intaris, session_id)
 
-        # 8. Create SimulatedAgent and run it
-        agent = SimulatedAgent(
-            llm_client=self.llm,
-            model=self.config.llm_model,
-            tools=tools,
-            system_prompt=system_prompt,
-            world_context=scenario.world_context,
-        )
+        # 8. Dispatch based on scenario mode
+        if scenario.mode == "scripted":
+            from tools.benchmark.agent import run_scripted
 
-        # Run the agent (passes scenario, intaris client, store, recorder, config)
-        result = agent.run(
-            scenario,
-            self.intaris,
-            session_id,
-            recorder,
-            self.store,
-            config=self.config,
-        )
+            result = run_scripted(
+                scenario,
+                self.intaris,
+                session_id,
+                recorder,
+                self.store,
+                config=self.config,
+            )
+        else:
+            # Generative mode — LLM agent
+            tools_desc = "Available tools: " + ", ".join(tool_names)
+            system_prompt = build_system_prompt(scenario, intensity, tools_desc)
+
+            agent = SimulatedAgent(
+                llm_client=self.llm,
+                model=self.config.llm_model,
+                tools=tools,
+                system_prompt=system_prompt,
+                world_context=scenario.world_context,
+            )
+            result = agent.run(
+                scenario,
+                self.intaris,
+                session_id,
+                recorder,
+                self.store,
+                config=self.config,
+            )
 
         # 10. Post-run: checkpoint, status, summary, flush, save state
         self._finalize_scenario(scenario, session_id, result, recorder)

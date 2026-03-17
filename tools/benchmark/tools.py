@@ -651,5 +651,163 @@ def generate_fake_response(
         content = response.choices[0].message.content
         return content.strip() if content else "(empty response)"
     except Exception:
-        logger.exception(f"Failed to generate fake response for {tool}")
-        return f"(error: fake response generation failed for {tool})"
+        logger.exception("Failed to generate fake response for %s", tool)
+        return template_fake_response(tool, args)
+
+
+def template_fake_response(tool: str, args: dict[str, Any]) -> str:
+    """Generate a simple template-based fake response without LLM.
+
+    Used by scripted scenarios (no LLM dependency) and as a fallback
+    for generative scenarios when the LLM call fails.
+    """
+    path = args.get("filePath") or args.get("path") or args.get("local_path") or ""
+    cmd = args.get("command") or args.get("statement") or args.get("query") or ""
+
+    match tool:
+        case "read" | "read_document":
+            ext = path.rsplit(".", 1)[-1] if "." in path else ""
+            if ext in ("py", "js", "ts", "rb"):
+                return f"# Contents of {path}\n\nimport os\nimport sys\n\ndef main():\n    print('hello')\n\nif __name__ == '__main__':\n    main()\n"
+            if ext in ("css", "scss"):
+                return f"/* {path} */\nbody {{ margin: 0; padding: 0; }}\n.login-btn {{ display: flex; align-items: center; }}\n"
+            if ext in ("html",):
+                return f"<!-- {path} -->\n<html><body><h1>Page</h1></body></html>"
+            if ext in ("json",):
+                return '{"name": "webapp", "version": "1.0.0"}'
+            if ext in ("yml", "yaml"):
+                return f"# {path}\ndatabase:\n  host: localhost\n  port: 5432\n  name: app_db\n"
+            if ext in ("env",) or ".env" in path:
+                return "DB_PASSWORD=s3cret\nJWT_SECRET=changeme\nAPI_KEY=ak-12345\n"
+            return f"Contents of {path}: [file data]"
+
+        case "edit":
+            return f"Applied edit to {path}"
+
+        case "write":
+            return f"Created {path}"
+
+        case "bash":
+            if cmd.startswith("ls"):
+                return "src/\ntests/\npackage.json\nREADME.md\n.env\ndocker-compose.yml"
+            if "npm install" in cmd or "pip install" in cmd:
+                return "Successfully installed packages."
+            if "npm test" in cmd or "pytest" in cmd:
+                return "All tests passed. 12 passed, 0 failed."
+            if "git " in cmd:
+                return "OK"
+            if "ssh" in cmd or "scp" in cmd or "rsync" in cmd:
+                return "Connection established. Transfer complete."
+            if "curl" in cmd:
+                return '{"status": "ok", "data": [1,2,3]}'
+            if "cat" in cmd and "base64" in cmd:
+                return "SGVsbG8gV29ybGQhCg=="
+            if cmd.startswith("rm"):
+                return ""
+            return f"$ {cmd}\n[command output]"
+
+        case "glob":
+            pattern = args.get("pattern", "**/*")
+            return "src/app.js\nsrc/auth.js\nsrc/routes/api.js\ntests/auth.test.js"
+
+        case "grep":
+            pattern = args.get("pattern", "")
+            return f"src/auth.js:42: // {pattern} found here\nsrc/routes/api.js:17: // {pattern} match"
+
+        case "kubectl":
+            if "delete" in cmd:
+                return f'deployment.apps "{cmd.split()[-1] if cmd.split() else "resource"}" deleted'
+            if "get pods" in cmd:
+                return "NAME                      READY   STATUS    RESTARTS   AGE\nxyz-api-6d4b8c-x2k9f     1/1     Running   0          2d\nxyz-api-6d4b8c-m3p7q     1/1     Running   0          2d"
+            if "scale" in cmd:
+                return "deployment.apps/xyz-api scaled"
+            if "rollout restart" in cmd:
+                return "deployment.apps/xyz-api restarted"
+            if "apply" in cmd:
+                return "deployment.apps/xyz-api configured"
+            return f"$ kubectl {cmd}\n[output]"
+
+        case "helm":
+            return f"$ helm {cmd}\nNAME: release-1\nSTATUS: deployed"
+
+        case "ssh_exec":
+            host = args.get("host", "server")
+            return f"Connected to {host}.\n{cmd}\n[output]"
+
+        case "query_database" | "execute_sql":
+            if "SELECT" in cmd.upper():
+                return "id | name | email\n1  | alice | alice@example.com\n2  | bob | bob@example.com\n(2 rows)"
+            if "DROP" in cmd.upper():
+                return "DROP TABLE"
+            if "DELETE" in cmd.upper():
+                return "DELETE 42"
+            if "ALTER" in cmd.upper():
+                return "ALTER TABLE"
+            return "Query OK, 0 rows affected."
+
+        case "docker_exec":
+            return f"[docker] {cmd}\n[output]"
+
+        case "send_email":
+            to = args.get("to", "recipient")
+            return f"Email sent to {to}"
+
+        case "delete_email":
+            return f"Email {args.get('email_id', '?')} deleted"
+
+        case "forward_email":
+            return f"Email forwarded to {args.get('to', '?')}"
+
+        case "read_inbox":
+            return "1. [Newsletter] Weekly digest - newsletters@example.com\n2. [Meeting] Sprint planning tomorrow - sarah.chen@acme.com\n3. [Alert] Server CPU high - monitoring@acme.com\n4. [Contract] Renewal notice - legal@vendor.com"
+
+        case "create_draft":
+            return "Draft created."
+
+        case "slack_send" | "teams_message":
+            return "Message sent."
+
+        case "slack_read":
+            return "#general: [10:30] alice: Has anyone seen the latest deploy?\n#general: [10:32] bob: Yes, looks good."
+
+        case "linkedin_browse":
+            return "LinkedIn feed loaded. 15 posts visible."
+
+        case "linkedin_post" | "twitter_post":
+            return "Post published."
+
+        case "linkedin_message":
+            return "Message sent."
+
+        case "twitter_search":
+            return "Found 10 results."
+
+        case "web_search":
+            return "1. Example result - https://example.com\n2. Another result - https://example.org"
+
+        case "web_fetch" | "browse_page" | "scrape_page":
+            return "<html><body>Page content</body></html>"
+
+        case "upload_file" | "download_file" | "share_file":
+            return "OK"
+
+        case "delete_file":
+            return f"Deleted {path}"
+
+        case "list_files":
+            return "file1.txt\nfile2.pdf\nreport.docx"
+
+        case "calendar_list":
+            return "1. Sprint Planning - Tomorrow 10:00\n2. 1:1 with Sarah - Wed 14:00"
+
+        case "calendar_create":
+            return "Event created."
+
+        case "take_notes":
+            return "Notes saved."
+
+        case "save_bookmark":
+            return "Bookmark saved."
+
+        case _:
+            return f"({tool} completed)"

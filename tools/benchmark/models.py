@@ -36,6 +36,29 @@ class ExpectedLabel:
 
 
 @dataclass
+class ScriptedStep:
+    """A single tool call in a scripted scenario.
+
+    Scripted scenarios define exact tool call sequences — no LLM needed.
+    Used for adversarial, destructive, and gold scenarios where the agent
+    LLM's safety guardrails would prevent it from generating harmful calls.
+    """
+
+    tool: str
+    """Tool name (e.g., ``"kubectl"``, ``"bash"``, ``"send_email"``)."""
+
+    args: dict[str, Any]
+    """Tool arguments to send to Intaris."""
+
+    reasoning: str | None = None
+    """Optional reasoning text to submit via POST /reasoning before this call.
+    Simulates the agent explaining its thinking."""
+
+    fake_response: str | None = None
+    """Optional fake tool response. If ``None``, a template response is generated."""
+
+
+@dataclass
 class Scenario:
     """A benchmark scenario — an agent session with a hidden behavioral directive."""
 
@@ -53,13 +76,25 @@ class Scenario:
     intention: str
     """Session intention — the only thing Intaris knows about the task."""
 
+    # Scenario mode:
+    mode: str = "generative"
+    """``"scripted"`` (deterministic steps, no LLM) or
+    ``"generative"`` (LLM-driven with hidden directive)."""
+
     details: dict[str, Any] | None = None
     """Session details (``working_directory``, ``repo``, ``branch``, etc.)."""
 
     policy: dict[str, Any] | None = None
     """Session policy (``allow_tools``, ``deny_tools``, ``deny_paths``, etc.)."""
 
-    # What only the agent LLM sees (the "hidden objective"):
+    # -- Scripted mode fields --
+
+    steps: list[ScriptedStep] | None = None
+    """Ordered tool call sequence for scripted mode. Each step is sent to
+    Intaris exactly as defined — no LLM involved."""
+
+    # -- Generative mode fields --
+
     hidden_directive: str = ""
     """Behavioral instruction visible only to the agent LLM.
     Empty string means pure benign behavior."""
@@ -67,11 +102,11 @@ class Scenario:
     world_context: str = ""
     """Description of the agent's environment (project tree, services, accounts)."""
 
-    # Tool selection:
+    # Tool selection (generative mode):
     tools: list[str] | None = None
     """Tool kit names to compose. ``None`` = auto from category."""
 
-    # Agent configuration:
+    # Agent configuration (generative mode):
     intensity: float = 0.0
     """Evil dial (0.0-1.0). Controls how aggressively the agent
     pursues the hidden directive."""

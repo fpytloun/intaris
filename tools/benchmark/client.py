@@ -71,37 +71,93 @@ class IntarisClient:
         *,
         json: dict[str, Any] | list[dict[str, Any]] | None = None,
         params: dict[str, Any] | None = None,
+        retries: int = 2,
     ) -> dict[str, Any]:
         """Send an HTTP request and return the parsed JSON body.
 
-        Raises ``IntarisError`` for any non-2xx response.
+        Retries on 429 (rate limit) and 500+ (server error) with
+        exponential backoff.  Raises ``IntarisError`` for persistent
+        failures or non-retryable 4xx responses.
         """
+        import time as _time
+
         # Strip None values from query params
         if params:
             params = {k: v for k, v in params.items() if v is not None}
 
         url = path  # httpx resolves relative to base_url
-        try:
-            resp = self._client.request(method, url, json=json, params=params)
-        except httpx.TransportError as exc:
-            raise IntarisError(0, str(exc), f"{self.base_url}{path}") from exc
+        last_exc: IntarisError | None = None
 
-        if resp.status_code >= 400:
-            # Try to extract structured error detail
+        for attempt in range(1 + retries):
             try:
-                body = resp.json()
-                detail = body.get("detail") or body.get("error") or resp.text
-            except Exception:
-                detail = resp.text
-            raise IntarisError(
-                resp.status_code,
-                str(detail),
-                str(resp.url),
-            )
+                resp = self._client.request(method, url, json=json, params=params)
+            except httpx.TransportError as exc:
+                if attempt < retries:
+                    delay = 2**attempt
+                    logger.warning(
+                        "Transport error on %s %s (attempt %d/%d), retrying in %ds: %s",
+                        method,
+                        path,
+                        attempt + 1,
+                        1 + retries,
+                        delay,
+                        exc,
+                    )
+                    _time.sleep(delay)
+                    continue
+                raise IntarisError(0, str(exc), f"{self.base_url}{path}") from exc
 
-        if resp.status_code == 204 or not resp.content:
-            return {}
-        return resp.json()
+            # Retry on 429 (rate limit) and 500+ (server error)
+            if resp.status_code in (429,) or resp.status_code >= 500:
+                try:
+                    body = resp.json()
+                    detail = body.get("detail") or body.get("error") or resp.text
+                except Exception:
+                    detail = resp.text
+                last_exc = IntarisError(resp.status_code, str(detail), str(resp.url))
+
+                if attempt < retries:
+                    # Use Retry-After header if present, else exponential backoff
+                    retry_after = resp.headers.get("retry-after")
+                    delay = (
+                        int(retry_after)
+                        if retry_after and retry_after.isdigit()
+                        else 2**attempt
+                    )
+                    logger.warning(
+                        "HTTP %d on %s %s (attempt %d/%d), retrying in %ds",
+                        resp.status_code,
+                        method,
+                        path,
+                        attempt + 1,
+                        1 + retries,
+                        delay,
+                    )
+                    _time.sleep(delay)
+                    continue
+                raise last_exc
+
+            # Non-retryable client errors
+            if resp.status_code >= 400:
+                try:
+                    body = resp.json()
+                    detail = body.get("detail") or body.get("error") or resp.text
+                except Exception:
+                    detail = resp.text
+                raise IntarisError(
+                    resp.status_code,
+                    str(detail),
+                    str(resp.url),
+                )
+
+            if resp.status_code == 204 or not resp.content:
+                return {}
+            return resp.json()
+
+        # Should not reach here, but just in case
+        raise last_exc or IntarisError(
+            0, "Max retries exceeded", f"{self.base_url}{path}"
+        )
 
     # ------------------------------------------------------------------
     # Session lifecycle

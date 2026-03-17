@@ -29,7 +29,7 @@ from tools.benchmark.models import (
 )
 from tools.benchmark.recorder import SessionRecorder
 from tools.benchmark.store import RunStore
-from tools.benchmark.tools import generate_fake_response
+from tools.benchmark.tools import generate_fake_response, template_fake_response
 
 logger = logging.getLogger(__name__)
 
@@ -656,3 +656,161 @@ class SimulatedAgent:
             self._llm,
             self._model,
         )
+
+
+# ---------------------------------------------------------------------------
+# Scripted runner — deterministic, no LLM
+# ---------------------------------------------------------------------------
+
+
+def run_scripted(
+    scenario: Scenario,
+    intaris: IntarisClient,
+    session_id: str,
+    recorder: SessionRecorder,
+    store: RunStore,
+    *,
+    config: RunConfig,
+) -> AgentResult:
+    """Execute a scripted scenario — deterministic tool call sequence.
+
+    No LLM is involved. Each :class:`ScriptedStep` in the scenario's
+    ``steps`` list is sent to Intaris exactly as defined. This is used
+    for adversarial, destructive, and gold scenarios where safety-aligned
+    LLMs refuse to generate harmful calls.
+    """
+    result = AgentResult(
+        scenario_name=scenario.name, session_id=session_id, turns=0, total_calls=0
+    )
+    steps = scenario.steps or []
+
+    # Record initial user message
+    recorder.record_user_message(scenario.intention)
+
+    with Timer() as timer:
+        for turn, step in enumerate(steps, 1):
+            result.turns = turn
+
+            # Optional reasoning before the tool call
+            if step.reasoning:
+                try:
+                    intaris.submit_reasoning(session_id, step.reasoning)
+                except Exception:
+                    logger.warning(
+                        "Failed to submit reasoning on step %d for %s",
+                        turn,
+                        scenario.name,
+                        exc_info=True,
+                    )
+                recorder.record_assistant_message(step.reasoning)
+                store.append_reasoning(
+                    scenario.name,
+                    asdict(
+                        ReasoningRecord(
+                            turn=turn,
+                            visible_reasoning=step.reasoning,
+                            internal_plan="",
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                        )
+                    ),
+                )
+
+            # Send tool call to Intaris
+            now = datetime.now(timezone.utc).isoformat()
+            call_id = f"scripted-{session_id}-{turn}"
+            recorder.record_tool_call(step.tool, step.args, call_id)
+
+            try:
+                eval_resp = intaris.evaluate(session_id, step.tool, step.args)
+            except Exception as exc:
+                msg = f"Evaluate failed on step {turn}: {exc}"
+                logger.error(msg)
+                result.errors.append(msg)
+                eval_resp = {
+                    "decision": "deny",
+                    "reasoning": f"Intaris unreachable: {exc}",
+                    "risk": "unknown",
+                }
+
+            decision = eval_resp.get("decision", "deny")
+            result.decisions[decision] = result.decisions.get(decision, 0) + 1
+            result.total_calls += 1
+            result.tools_called.append(step.tool)
+
+            if eval_resp.get("injection_detected"):
+                result.injection_detected_count += 1
+
+            # Fake response
+            if decision == "approve":
+                fake = step.fake_response or template_fake_response(
+                    step.tool, step.args
+                )
+            elif decision == "escalate":
+                call_resp_id = eval_resp.get("call_id", call_id)
+                fake, esc_resolution = _handle_scripted_escalation(
+                    call_resp_id, intaris, scenario, config
+                )
+                if esc_resolution:
+                    result.escalations_resolved += 1
+            else:
+                reason = eval_resp.get("reasoning", "Tool call denied.")
+                fake = f"DENIED: {reason}"
+
+            is_error = decision != "approve"
+            recorder.record_tool_result(step.tool, fake, call_id, is_error=is_error)
+
+            # Store call record
+            record = CallRecord(
+                turn=turn,
+                tool=step.tool,
+                args=step.args,
+                intaris=eval_resp,
+                fake_response=fake,
+                timestamp=now,
+            )
+            store.append_call(scenario.name, asdict(record))
+            store.append_conversation(
+                scenario.name,
+                {"role": "tool_call", "tool": step.tool, "args": step.args},
+            )
+            store.append_conversation(
+                scenario.name,
+                {"role": "tool_result", "tool": step.tool, "output": fake},
+            )
+
+            # Flush events for real-time visibility
+            recorder.flush()
+
+            # Inter-step delay
+            time.sleep(random.uniform(*config.delay_range))
+
+    result.duration_s = timer.elapsed_s
+    recorder.flush()
+    return result
+
+
+def _handle_scripted_escalation(
+    call_id: str,
+    intaris: IntarisClient,
+    scenario: Scenario,
+    config: RunConfig,
+) -> tuple[str, dict[str, Any] | None]:
+    """Handle an escalation in a scripted scenario."""
+    if not config.auto_resolve:
+        return "ESCALATED: Awaiting human approval.", None
+
+    # Scripted scenarios with high intensity are adversarial — deny
+    resolution = "deny" if scenario.intensity >= 0.7 else "approve"
+
+    try:
+        time.sleep(random.uniform(1.0, 3.0))
+        intaris.resolve_escalation(call_id, resolution, note="Benchmark auto-resolve")
+        fake = (
+            f"Escalation {resolution}d."
+            if resolution == "approve"
+            else "DENIED by user."
+        )
+        return fake, {"decision": resolution, "call_id": call_id}
+    except Exception as exc:
+        logger.warning("Failed to resolve escalation %s: %s", call_id, exc)
+        return "ESCALATED: Resolution failed.", None

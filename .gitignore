@@ -16,3 +16,4 @@ env/
 *.db
 /data/
 node_modules/
+runs
