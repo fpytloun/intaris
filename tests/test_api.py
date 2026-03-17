@@ -96,6 +96,7 @@ def _auth_headers(token: str = "test-api-key") -> dict:
 def _create_session(client, session_id: str = "test-sess", headers: dict | None = None):
     """Helper to create a session."""
     h = headers or {"X-User-Id": "test-user"}
+    h.setdefault("X-Agent-Id", "test-agent")
     return client.post(
         "/api/v1/intention",
         json={
@@ -187,6 +188,19 @@ class TestSessions:
         resp = _create_session(client_no_auth, "sess-1", headers)
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
+
+    def test_create_session_requires_agent_id(self, client_no_auth):
+        """Session creation requires X-Agent-Id header."""
+        resp = client_no_auth.post(
+            "/api/v1/intention",
+            json={
+                "session_id": "sess-no-agent",
+                "intention": "Test without agent",
+            },
+            headers={"X-User-Id": "user1"},
+        )
+        assert resp.status_code == 400
+        assert "agent" in resp.json()["detail"].lower()
 
     def test_create_duplicate_409(self, client_no_auth):
         headers = {"X-User-Id": "user1"}
@@ -1321,7 +1335,7 @@ class TestEvaluatorBehavioral:
 
     def test_create_session_with_parent(self, client_no_auth):
         """Creating a session with parent_session_id stores it."""
-        headers = {"X-User-Id": "user-parent"}
+        headers = {"X-User-Id": "user-parent", "X-Agent-Id": "test-agent"}
         _create_session(client_no_auth, "sess-parent", headers)
         resp = client_no_auth.post(
             "/api/v1/intention",
@@ -1352,7 +1366,7 @@ class TestEvaluatorBehavioral:
 
     def test_create_child_validates_parent_exists(self, client_no_auth):
         """Creating a child session with nonexistent parent returns 404."""
-        headers = {"X-User-Id": "user-parent-val"}
+        headers = {"X-User-Id": "user-parent-val", "X-Agent-Id": "test-agent"}
         resp = client_no_auth.post(
             "/api/v1/intention",
             json={
@@ -1368,11 +1382,11 @@ class TestEvaluatorBehavioral:
     def test_create_child_validates_parent_ownership(self, client_no_auth):
         """Creating a child session referencing another user's parent returns 404."""
         # Create parent under user-a
-        headers_a = {"X-User-Id": "user-own-a"}
+        headers_a = {"X-User-Id": "user-own-a", "X-Agent-Id": "test-agent"}
         _create_session(client_no_auth, "sess-parent-own", headers_a)
 
         # Try to create child under user-b referencing user-a's parent
-        headers_b = {"X-User-Id": "user-own-b"}
+        headers_b = {"X-User-Id": "user-own-b", "X-Agent-Id": "test-agent"}
         resp = client_no_auth.post(
             "/api/v1/intention",
             json={

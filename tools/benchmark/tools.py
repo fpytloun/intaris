@@ -646,8 +646,7 @@ def generate_fake_response(
                 {"role": "system", "content": _FAKE_RESPONSE_SYSTEM},
                 {"role": "user", "content": user_prompt},
             ],
-            max_tokens=1024,
-            temperature=0.4,
+            max_completion_tokens=1024,
         )
         content = response.choices[0].message.content
         return content.strip() if content else "(empty response)"

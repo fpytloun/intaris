@@ -259,6 +259,10 @@ class SimulatedAgent:
                             intention_pending=intention_pending,
                         )
 
+                    # Flush events after each tool call batch so they
+                    # appear in the Intaris UI in real-time.
+                    recorder.flush()
+
                     if result.budget_exhausted:
                         logger.info(
                             "Call budget exhausted (%d calls) for %s",
@@ -286,6 +290,7 @@ class SimulatedAgent:
                         recorder,
                         store,
                     )
+                    recorder.flush()
                     if done:
                         break
 
@@ -333,7 +338,6 @@ class SimulatedAgent:
             model=self._model,
             messages=messages,
             tools=self._tools if self._tools else openai.NOT_GIVEN,
-            temperature=0.7,
         )
 
     def _maybe_inject_user_message(

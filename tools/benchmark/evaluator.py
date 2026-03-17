@@ -355,7 +355,6 @@ def _evaluate_scenario(
                 "type": "json_schema",
                 "json_schema": EVALUATOR_RESPONSE_SCHEMA,
             },
-            temperature=0.1,
             timeout=60,
         )
         result = json.loads(response.choices[0].message.content)

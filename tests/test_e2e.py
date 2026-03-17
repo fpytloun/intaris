@@ -119,7 +119,7 @@ def _create_session(
     resp = client.post(
         "/api/v1/intention",
         json=body,
-        headers={"X-User-Id": user_id},
+        headers={"X-User-Id": user_id, "X-Agent-Id": "test-agent"},
     )
     assert resp.status_code == 200, f"Session creation failed: {resp.text}"
 

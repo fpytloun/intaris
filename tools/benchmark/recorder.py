@@ -29,7 +29,7 @@ class SessionRecorder:
         session_id: str,
         *,
         source: str = "benchmark",
-        flush_size: int = 50,
+        flush_size: int = 5,
     ) -> None:
         self._client = client
         self._session_id = session_id

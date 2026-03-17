@@ -40,6 +40,15 @@ async def declare_intention(
     from intaris.server import _get_db
     from intaris.session import SessionStore
 
+    if not ctx.agent_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Agent identity required for session creation. "
+                "Set the X-Agent-Id header to identify the agent."
+            ),
+        )
+
     try:
         store = SessionStore(_get_db())
 
