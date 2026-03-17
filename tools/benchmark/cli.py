@@ -62,7 +62,7 @@ def _handle_run(args: argparse.Namespace) -> None:
         from tools.benchmark.runner import run_showcase
 
         logger.info("Starting showcase run against %s", config.intaris_url)
-        run_showcase(config)
+        report = run_showcase(config)
     else:
         from tools.benchmark.runner import run_filtered
 
@@ -72,7 +72,37 @@ def _handle_run(args: argparse.Namespace) -> None:
             scenario or "*",
             category or "*",
         )
-        run_filtered(config, scenario=scenario, category=category)
+        report = run_filtered(config, scenario=scenario, category=category)
+
+    # Auto-evaluate after run completes
+    if args.evaluate and not config.dry_run and report.run_id:
+        from pathlib import Path
+
+        from tools.benchmark.evaluator import evaluate_run
+        from tools.benchmark.report import (
+            format_benchmark_report,
+            generate_markdown_report,
+        )
+        from tools.benchmark.store import RunStore
+
+        run_dir = str(Path(config.output_dir) / report.run_id)
+        logger.info("Auto-evaluating run %s ...", report.run_id)
+        try:
+            benchmark = evaluate_run(
+                run_dir=run_dir,
+                llm_api_key=config.llm_api_key,
+                llm_base_url=config.llm_base_url,
+                llm_model=args.eval_model,
+                intaris_url=config.intaris_url,
+                intaris_api_key=config.intaris_api_key,
+            )
+            print(format_benchmark_report(benchmark))  # noqa: T201
+            store = RunStore(config.output_dir, report.run_id)
+            store.save_report(generate_markdown_report(benchmark))
+        except Exception:
+            logger.exception(
+                "Auto-evaluation failed (run data is saved, evaluate manually)"
+            )
 
 
 def _handle_evaluate(args: argparse.Namespace) -> None:
@@ -268,6 +298,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Log planned calls without executing",
+    )
+    run_parser.add_argument(
+        "--evaluate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Auto-evaluate after run completes (default: --evaluate)",
+    )
+    run_parser.add_argument(
+        "--eval-model",
+        default="gpt-5.4",
+        help="LLM model for the evaluator (default: gpt-5.4)",
     )
 
     # -- evaluate -----------------------------------------------------------

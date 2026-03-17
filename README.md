@@ -118,6 +118,7 @@ See the [Architecture](docs/architecture.md) and [Evaluation Pipeline](docs/eval
 | [Development](docs/development.md) | Contributing, tests, and code conventions |
 | [OpenCode Integration](docs/clients/opencode.md) | OpenCode plugin setup |
 | [Claude Code Integration](docs/clients/claude-code.md) | Claude Code hooks setup |
+| [Benchmarking](docs/benchmarking.md) | Guardrails benchmark system |
 
 ## License
 

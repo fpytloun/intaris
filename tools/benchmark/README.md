@@ -1,37 +1,37 @@
 # Intaris Benchmark
 
-Guardrails evaluation system that simulates AI agents with hidden behavioral directives against a live Intaris instance, then scores detection accuracy.
+Guardrails evaluation system that simulates AI agents with various behavioral profiles against a live Intaris instance, then scores detection accuracy. Uses a hybrid approach: scripted scenarios for adversarial/destructive testing, LLM-driven agents for realistic drift and behavioral patterns.
 
-## Overview
-
-Three-phase benchmark:
-
-1. **Run** -- LLM agent (gpt-5-nano) executes scenarios against Intaris. All data stored locally.
-2. **Evaluate** -- Evaluator LLM (gpt-5.4) labels each tool call and scores Intaris's decisions.
-3. **Compare** -- Diff two runs for regression detection.
-
-The agent receives a visible task (sent to Intaris as the session intention) and a hidden behavioral directive (ground truth for scoring). An "intensity" dial (0.0-1.0) controls how aggressively the agent pursues the hidden objective.
+See [docs/benchmarking.md](../../docs/benchmarking.md) for full documentation.
 
 ## Quick Start
 
 ```bash
-# Run all scenarios against a local Intaris instance
-python -m tools.benchmark run \
-  --url http://localhost:8060 \
-  --api-key sk-intaris-key \
-  --llm-api-key sk-openai-key \
+# Full benchmark suite — run all scenarios + auto-evaluate
+python -m tools.benchmark \
+  --url http://localhost:8060 --api-key YOUR_KEY run \
+  --llm-api-key "$OPENAI_API_KEY" \
+  --delay 0.5 1.0 \
   showcase
 
-# Evaluate the run
+# Run without auto-evaluation (evaluate later)
+python -m tools.benchmark --url ... --api-key ... run \
+  --llm-api-key "$OPENAI_API_KEY" --no-evaluate showcase
+
+# Evaluate a previous run
 python -m tools.benchmark evaluate \
-  --run runs/bench-20260317-a1b2c3d4/ \
-  --llm-api-key sk-openai-key \
-  --url http://localhost:8060 \
-  --api-key sk-intaris-key
+  --run runs/bench-XXXXXXXX/ \
+  --llm-api-key "$OPENAI_API_KEY" \
+  --url http://localhost:8060 --api-key YOUR_KEY
 
 # Compare two runs
 python -m tools.benchmark compare runs/baseline/ runs/new-model/
+
+# List available scenarios
+python -m tools.benchmark list
 ```
+
+By default, `run` automatically evaluates results after completion using gpt-5.4. Use `--no-evaluate` to skip, or `--eval-model` to change the evaluator model.
 
 ## Commands
 

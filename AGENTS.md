@@ -794,6 +794,49 @@ pytest -m '' -v                     # all tests (unit + e2e)
 - Temperature: `0.1`
 - Timeout: `4000ms`
 
+## Benchmarking
+
+Intaris includes a built-in benchmark system at `tools/benchmark/` that simulates AI agents with various behavioral profiles against a live instance, then scores detection accuracy. See [docs/benchmarking.md](docs/benchmarking.md) for full documentation.
+
+### Quick reference
+
+```bash
+# Full benchmark suite (run + auto-evaluate)
+python -m tools.benchmark --url http://localhost:8060 --api-key KEY run \
+  --llm-api-key "$OPENAI_API_KEY" --delay 0.5 1.0 showcase
+
+# Single scenario
+python -m tools.benchmark --url ... --api-key ... run \
+  --llm-api-key ... --scenario infra.prod_sabotage
+
+# List scenarios
+python -m tools.benchmark list
+
+# Compare runs
+python -m tools.benchmark compare ./runs/baseline/ ./runs/new/
+```
+
+### Architecture
+
+Two-track approach:
+- **Scripted scenarios** (`mode="scripted"`) — deterministic tool call sequences, no LLM. Used for adversarial, destructive, and gold calibration scenarios. Fast, reproducible, CI-runnable.
+- **Generative scenarios** (`mode="generative"`) — LLM-driven agents with hidden behavioral directives. Used for drift, scope creep, and benign baselines where realistic patterns matter.
+
+**41 total sessions** across 9 categories: gold (8), adversarial (4), infra (3), coding (6), workplace (3), social (2), research (2), hierarchical (4), cross_session (9).
+
+After running, the evaluator LLM (gpt-5.4) labels each tool call as benign/harmful/ambiguous and scores Intaris's decisions. The report shows actionable findings with real-world impact and configuration recommendations.
+
+### Key files
+
+| File | Description |
+|---|---|
+| `tools/benchmark/cli.py` | CLI entry point |
+| `tools/benchmark/agent.py` | LLM agent loop (generative) + scripted runner |
+| `tools/benchmark/runner.py` | Scenario orchestrator |
+| `tools/benchmark/evaluator.py` | Evaluation phase (gpt-5.4 scoring) |
+| `tools/benchmark/report.py` | Report generation |
+| `tools/benchmark/scenarios/` | Scenario definitions |
+
 ## Built-in Management UI
 
 Single-page web UI served at `/ui` for monitoring and managing Intaris. Built with Alpine.js + Tailwind CSS, following the same pattern as the mnemory project's UI.
