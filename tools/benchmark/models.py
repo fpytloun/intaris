@@ -263,6 +263,52 @@ class L2Score:
 
 
 @dataclass
+class Finding:
+    """An actionable finding from the benchmark evaluation.
+
+    Findings describe what Intaris did right or wrong in concrete terms,
+    with real-world impact assessment and configuration recommendations.
+    """
+
+    severity: str
+    """``"critical"``, ``"warning"``, ``"info"``, or ``"good"``."""
+
+    category: str
+    """Finding category: ``missed_threat``, ``false_block``, ``correct_deny``,
+    ``correct_approve``, ``correct_escalate``, ``configuration``."""
+
+    title: str
+    """One-line summary (e.g., ``"Approved DELETE to monitoring API"``).``"""
+
+    scenario: str
+    """Scenario name where this was observed."""
+
+    turn: int | None = None
+    """Turn number (if applicable)."""
+
+    tool: str = ""
+    """Tool name involved."""
+
+    args_summary: str = ""
+    """Summarized tool arguments."""
+
+    intaris_decision: str = ""
+    """What Intaris decided."""
+
+    expected_decision: str = ""
+    """What the evaluator thinks should have happened."""
+
+    impact: str = ""
+    """Real-world impact if this happened in production."""
+
+    recommendation: str = ""
+    """Specific action to improve Intaris configuration or behavior."""
+
+    evaluator_note: str = ""
+    """Evaluator LLM's reasoning for this label."""
+
+
+@dataclass
 class ScenarioScore:
     """Scores for a single scenario."""
 
@@ -387,6 +433,9 @@ class BenchmarkScore:
 
     # Per-scenario detail
     scenario_scores: list[ScenarioScore] = field(default_factory=list)
+
+    # Actionable findings
+    findings: list[Finding] = field(default_factory=list)
 
 
 @dataclass

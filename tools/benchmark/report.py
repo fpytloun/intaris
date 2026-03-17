@@ -9,6 +9,7 @@ from __future__ import annotations
 from tools.benchmark.models import (
     BenchmarkScore,
     ComparisonResult,
+    Finding,
     ShowcaseReport,
 )
 
@@ -33,56 +34,76 @@ def format_benchmark_report(score: BenchmarkScore) -> str:
 
     _w(f"Intaris Benchmark -- Run {score.run_id}")
     _w(_SEPARATOR)
+
+    # -- Findings (the most important section) -----------------------------
+
+    findings = score.findings or []
+    critical = [f for f in findings if f.severity == "critical"]
+    warnings = [f for f in findings if f.severity == "warning"]
+    good = [f for f in findings if f.severity == "good"]
+    info = [f for f in findings if f.severity == "info"]
+
+    if critical or warnings:
+        _w("")
+        _w("FINDINGS")
+        _w(_THIN_SEP)
+
+    if critical:
+        _w("")
+        _w(f"  CRITICAL ({len(critical)} missed threats)")
+        _w("")
+        for f in critical:
+            _format_finding(f, lines)
+
+    if warnings:
+        _w("")
+        _w(f"  WARNINGS ({len(warnings)} missed threats)")
+        _w("")
+        for f in warnings:
+            _format_finding(f, lines)
+
+    if info:
+        _w("")
+        _w(f"  FALSE BLOCKS ({len(info)} legitimate calls blocked)")
+        _w("")
+        for f in info:
+            _format_finding(f, lines)
+
+    if good:
+        _w("")
+        _w(f"  CORRECT DENIALS ({len(good)} threats caught)")
+        _w("")
+        for f in good:
+            _format_finding_brief(f, lines)
+
+    if not findings:
+        _w("")
+        _w("  No findings generated (no scenarios evaluated?)")
+
+    # -- Summary metrics ---------------------------------------------------
+
     _w("")
-    _w("IMPORTANT: Absolute scores measure agreement between Intaris and the")
-    _w("evaluator LLM. They are evaluator-model-dependent and should be")
-    _w("interpreted as regression indicators, not objective quality metrics.")
-
-    # -- Evaluator calibration ---------------------------------------------
-
+    _w("SCORES")
+    _w(_THIN_SEP)
     _w("")
-    _w("Evaluator Calibration (Gold Subset):")
-    if score.gold_agreement_rate is not None:
-        _w(f"  Agreement: {score.gold_agreement_rate * 100:.1f}%")
-        if score.gold_disagreements:
-            _w(f"  Disagreements: {len(score.gold_disagreements)}")
-        if score.gold_agreement_rate < 0.95:
-            _w(
-                "  WARNING: Agreement below 95% -- evaluator may be unreliable."
-                " Interpret scores with caution."
-            )
-    else:
-        _w("  No gold scenarios in this run.")
-
-    # -- Hidden directive isolation ----------------------------------------
-
-    _w("")
-    _w("Hidden Directive Isolation:")
-    pct = score.reasoning_leakage_rate * 100
-    n_leaks = len(score.reasoning_leakage_instances)
-    _w(f"  Leakage rate: {pct:.1f}% ({n_leaks} instance{'s' if n_leaks != 1 else ''})")
-    if score.reasoning_leakage_rate > 0:
-        _w(
-            "  CRITICAL: Hidden directives leaked into visible reasoning."
-            " Benchmark validity is compromised."
-        )
-
-    # -- Overall scores ----------------------------------------------------
-
-    _w("")
-    _w("Overall Scores:")
-    _w(f"  Precision:       {score.overall_precision:.3f}")
-    _w(f"  Recall:          {score.overall_recall:.3f}")
+    _w(
+        f"  Precision:       {score.overall_precision:.3f}  (of blocked calls, how many were actually harmful)"
+    )
+    _w(
+        f"  Recall:          {score.overall_recall:.3f}  (of harmful calls, how many were caught)"
+    )
     _w(f"  F1:              {score.overall_f1:.3f}")
-    _w(f"  FPR:             {score.overall_fpr:.3f}")
-    _w(f"  Critical Misses: {score.critical_miss_count}")
+    _w(
+        f"  False Pos Rate:  {score.overall_fpr:.3f}  (benign calls incorrectly blocked)"
+    )
+    _w(
+        f"  Critical Misses: {score.critical_miss_count}  (dangerous calls that were approved)"
+    )
 
     # -- By category -------------------------------------------------------
 
     if score.category_scores:
         _w("")
-        _w("By Category:")
-        # Compute column widths for alignment.
         max_cat = max(len(c) for c in score.category_scores)
         for cat in sorted(score.category_scores):
             cs = score.category_scores[cat]
@@ -93,74 +114,97 @@ def format_benchmark_report(score: BenchmarkScore) -> str:
                 f"  ({cs.scenario_count} scenario{'s' if cs.scenario_count != 1 else ''})"
             )
 
-    # -- By intensity ------------------------------------------------------
-
-    if score.intensity_scores:
-        _w("")
-        _w("By Intensity:")
-        # Collect per-band details for richer output.
-        band_details = _collect_band_details(score)
-        for label, detail in band_details:
-            _w(f"  {label:<30} {detail}")
-
     # -- Detection latency -------------------------------------------------
 
-    _w("")
-    _w("Detection Latency:")
     if score.avg_detection_latency is not None:
-        _w(f"  Average: {score.avg_detection_latency:.1f} turns")
-    else:
-        _w("  No multi-turn detection data.")
-
-    # -- L2 summary quality ------------------------------------------------
-
-    if score.avg_l2_quality is not None:
         _w("")
-        _w("L2 Summary Quality:")
-        _w(f"  Narrative quality: {score.avg_l2_quality:.2f}")
+        _w(
+            f"  Detection latency: {score.avg_detection_latency:.1f} turns"
+            " (avg turns from first harmful call to first correct block)"
+        )
 
-    # -- L3 cross-session --------------------------------------------------
+    # -- L2/L3 quality ----------------------------------------------------
 
-    if score.l3 is not None:
+    if score.avg_l2_quality is not None or score.l3 is not None:
         _w("")
-        _w("L3 Cross-Session:")
-        if score.l3.risk_level is not None:
-            _w(f"  Risk level: {score.l3.risk_level}/10")
-        if score.l3.risk_level_appropriate is not None:
-            _w(f"  Appropriateness: {score.l3.risk_level_appropriate:.2f}")
-        if score.l3.finding_quality is not None:
-            _w(f"  Finding quality: {score.l3.finding_quality:.2f}")
-        if score.l3.sessions_analyzed > 0:
-            _w(f"  Sessions analyzed: {score.l3.sessions_analyzed}")
+        _w("ANALYSIS QUALITY")
+        _w(_THIN_SEP)
+        if score.avg_l2_quality is not None:
+            _w(f"  L2 narrative quality: {score.avg_l2_quality:.2f}")
+        if score.l3 is not None:
+            if score.l3.risk_level is not None:
+                _w(f"  L3 risk level: {score.l3.risk_level}/10")
+            if score.l3.sessions_analyzed > 0:
+                _w(f"  L3 sessions analyzed: {score.l3.sessions_analyzed}")
 
     # -- Performance -------------------------------------------------------
 
     _w("")
-    _w("Performance:")
+    _w("PERFORMANCE")
+    _w(_THIN_SEP)
     _w(f"  Avg latency: {score.avg_latency_ms:.0f}ms")
     _w(f"  P95 latency: {score.p95_latency_ms:.0f}ms")
+    if score.p95_latency_ms > 4000:
+        _w(
+            "  WARNING: P95 exceeds 4s circuit breaker. "
+            "Consider increasing LLM_TIMEOUT_MS or using a faster model."
+        )
 
-    # -- Feature coverage --------------------------------------------------
+    # -- Calibration -------------------------------------------------------
 
     _w("")
-    if score.features_tested:
-        _w(f"Features Tested:   {', '.join(score.features_tested)}")
+    _w("CALIBRATION")
+    _w(_THIN_SEP)
+    if score.gold_agreement_rate is not None:
+        _w(f"  Evaluator-gold agreement: {score.gold_agreement_rate * 100:.1f}%")
+        if score.gold_agreement_rate < 0.95:
+            _w("  WARNING: Below 95% -- evaluator may be unreliable.")
+        if score.gold_disagreements:
+            _w(f"  Disagreements: {len(score.gold_disagreements)}")
+            for d in score.gold_disagreements[:5]:
+                _w(
+                    f"    turn {d.get('turn', '?')}: {d.get('tool', '?')} "
+                    f"gold={d.get('gold_label', '?')} "
+                    f"evaluator={d.get('evaluator_label', '?')}"
+                )
     else:
-        _w("Features Tested:   (none)")
-    if score.features_untested:
-        _w(f"Features Untested: {', '.join(score.features_untested)}")
+        _w("  No gold scenarios in this run.")
 
-    # -- Weakest scenarios -------------------------------------------------
+    pct = score.reasoning_leakage_rate * 100
+    n_leaks = len(score.reasoning_leakage_instances)
+    _w(f"  Directive leakage: {pct:.1f}% ({n_leaks} instances)")
 
-    weakest = _find_weakest(score)
-    if weakest:
-        _w("")
-        _w("Weakest Scenarios:")
-        for i, (name, recall, reason) in enumerate(weakest, 1):
-            _w(f"  {i}. {name} -- recall={recall:.3f} ({reason})")
-
+    _w("")
+    _w("Note: Scores measure agreement between Intaris and the evaluator")
+    _w("LLM. Use for regression detection, not absolute quality measurement.")
     _w("")
     return "\n".join(lines)
+
+
+def _format_finding(f: Finding, lines: list[str]) -> None:
+    """Format a single finding with full detail."""
+    _w = lines.append
+    _w(f"  [{f.severity.upper()}] {f.title}")
+    _w(f"    Scenario: {f.scenario}" + (f" (turn {f.turn})" if f.turn else ""))
+    if f.args_summary:
+        _w(f"    Args: {f.args_summary}")
+    _w(f"    Intaris decided: {f.intaris_decision}  |  Expected: {f.expected_decision}")
+    if f.impact:
+        _w(f"    Impact: {f.impact}")
+    if f.recommendation:
+        _w(f"    Action: {f.recommendation}")
+    if f.evaluator_note:
+        _w(f"    Note: {f.evaluator_note}")
+    _w("")
+
+
+def _format_finding_brief(f: Finding, lines: list[str]) -> None:
+    """Format a finding as a brief one-liner."""
+    _w = lines.append
+    turn_str = f" (turn {f.turn})" if f.turn else ""
+    _w(f"  [GOOD] {f.title} -- {f.scenario}{turn_str}")
+    if f.evaluator_note:
+        _w(f"    {f.evaluator_note}")
 
 
 def format_showcase_report(report: ShowcaseReport) -> str:
