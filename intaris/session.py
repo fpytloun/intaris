@@ -433,6 +433,13 @@ class SessionStore:
 
         return [{"user_id": row[0], "session_id": row[1]} for row in rows]
 
+    # Allowed sort columns — maps API name to SQL expression.
+    _SORT_COLUMNS: dict[str, str] = {
+        "created_at": "sessions.created_at",
+        "last_activity_at": "sessions.last_activity_at",
+        "alignment": "sessions.last_alignment",
+    }
+
     def list_sessions(
         self,
         *,
@@ -441,6 +448,11 @@ class SessionStore:
         search: str | None = None,
         agent_id: str | None = None,
         parent_session_id: str | None = None,
+        alignment: str | None = None,
+        min_risk: int | None = None,
+        risk_category: str | None = None,
+        sort: str | None = None,
+        sort_dir: str | None = None,
         page: int = 1,
         limit: int = 50,
         tree: bool = False,
@@ -454,6 +466,19 @@ class SessionStore:
             agent_id: Optional agent_id filter (exact match).
             parent_session_id: Optional filter for child sessions of a
                 given parent (exact match).
+            alignment: Optional alignment filter — matches sessions whose
+                latest summary has this ``intent_alignment`` value
+                (e.g. ``aligned``, ``partially_aligned``, ``not_aligned``).
+                Uses a subquery against ``session_summaries``.
+            min_risk: Optional minimum risk severity (1-10).  Matches
+                sessions that have at least one risk indicator with
+                severity >= this value in any summary.
+            risk_category: Optional risk indicator category filter
+                (e.g. ``intent_drift``).  Matches sessions that have
+                a risk indicator with this category in any summary.
+            sort: Sort column: ``created_at`` (default),
+                ``last_activity_at``, ``alignment``.
+            sort_dir: Sort direction: ``desc`` (default), ``asc``.
             page: Page number (1-indexed).
             limit: Max results per page.
             tree: When True, enables tree-aware filtering:
@@ -472,6 +497,11 @@ class SessionStore:
                 status=status,
                 search=search,
                 agent_id=agent_id,
+                alignment=alignment,
+                min_risk=min_risk,
+                risk_category=risk_category,
+                sort=sort,
+                sort_dir=sort_dir,
                 page=page,
                 limit=limit,
             )
@@ -494,6 +524,46 @@ class SessionStore:
             conditions.append("parent_session_id = ?")
             params.append(parent_session_id)
 
+        if alignment:
+            # Match the LATEST summary per session (compacted supersedes
+            # window; ROW_NUMBER by created_at DESC picks the most recent).
+            conditions.append(
+                """session_id IN (
+                    SELECT session_id FROM (
+                        SELECT session_id, intent_alignment,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY session_id
+                                   ORDER BY created_at DESC
+                               ) AS rn
+                        FROM session_summaries
+                        WHERE user_id = ?
+                    ) WHERE rn = 1 AND intent_alignment = ?
+                )"""
+            )
+            params.extend([user_id, alignment])
+
+        if min_risk is not None:
+            conditions.append(
+                """session_id IN (
+                    SELECT DISTINCT s2.session_id
+                    FROM session_summaries s2, json_each(s2.risk_indicators) AS ri
+                    WHERE s2.user_id = ?
+                      AND json_extract(ri.value, '$.severity') >= ?
+                )"""
+            )
+            params.extend([user_id, min_risk])
+
+        if risk_category:
+            conditions.append(
+                """session_id IN (
+                    SELECT DISTINCT s3.session_id
+                    FROM session_summaries s3, json_each(s3.risk_indicators) AS ri
+                    WHERE s3.user_id = ?
+                      AND json_extract(ri.value, '$.indicator') = ?
+                )"""
+            )
+            params.extend([user_id, risk_category])
+
         if search:
             conditions.append(
                 "(session_id LIKE ? ESCAPE '\\' OR intention LIKE ? ESCAPE '\\')"
@@ -507,6 +577,10 @@ class SessionStore:
 
         where = " AND ".join(conditions)
 
+        # Resolve sort order
+        order_col = self._SORT_COLUMNS.get(sort or "", "sessions.created_at")
+        order_dir = "ASC" if sort_dir == "asc" else "DESC"
+
         with self._db.cursor() as cur:
             # Count total matching sessions
             cur.execute(f"SELECT COUNT(*) FROM sessions WHERE {where}", params)
@@ -517,7 +591,7 @@ class SessionStore:
                 f"""
                 SELECT * FROM sessions
                 WHERE {where}
-                ORDER BY created_at DESC
+                ORDER BY {order_col} {order_dir}
                 LIMIT ? OFFSET ?
                 """,
                 [*params, limit, offset],
@@ -539,6 +613,11 @@ class SessionStore:
         status: str | None = None,
         search: str | None = None,
         agent_id: str | None = None,
+        alignment: str | None = None,
+        min_risk: int | None = None,
+        risk_category: str | None = None,
+        sort: str | None = None,
+        sort_dir: str | None = None,
         page: int = 1,
         limit: int = 50,
     ) -> dict[str, Any]:
@@ -565,6 +644,46 @@ class SessionStore:
             if status:
                 root_conditions.append("status = ?")
                 root_params.append(status)
+
+            if alignment:
+                root_conditions.append(
+                    """session_id IN (
+                        SELECT session_id FROM (
+                            SELECT session_id, intent_alignment,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY session_id
+                                       ORDER BY created_at DESC
+                                   ) AS rn
+                            FROM session_summaries
+                            WHERE user_id = ?
+                        ) WHERE rn = 1 AND intent_alignment = ?
+                    )"""
+                )
+                root_params.extend([user_id, alignment])
+
+            if min_risk is not None:
+                root_conditions.append(
+                    """session_id IN (
+                        SELECT DISTINCT s2.session_id
+                        FROM session_summaries s2,
+                             json_each(s2.risk_indicators) AS ri
+                        WHERE s2.user_id = ?
+                          AND json_extract(ri.value, '$.severity') >= ?
+                    )"""
+                )
+                root_params.extend([user_id, min_risk])
+
+            if risk_category:
+                root_conditions.append(
+                    """session_id IN (
+                        SELECT DISTINCT s3.session_id
+                        FROM session_summaries s3,
+                             json_each(s3.risk_indicators) AS ri
+                        WHERE s3.user_id = ?
+                          AND json_extract(ri.value, '$.indicator') = ?
+                    )"""
+                )
+                root_params.extend([user_id, risk_category])
 
             if search:
                 root_conditions.append(
@@ -613,11 +732,15 @@ class SessionStore:
             total = cur.fetchone()[0]
 
             # -- Step 4: Paginate root IDs ---------------------------------
+            order_col = self._SORT_COLUMNS.get(sort or "", "sessions.created_at")
+            # In this context, table alias is 's'
+            order_col_aliased = order_col.replace("sessions.", "s.")
+            order_dir_sql = "ASC" if sort_dir == "asc" else "DESC"
             paginated_root_sql = f"""
                 SELECT s.* FROM sessions s
                 INNER JOIN ({root_id_sql}) AS roots
                     ON s.session_id = roots.session_id
-                ORDER BY s.created_at DESC
+                ORDER BY {order_col_aliased} {order_dir_sql}
                 LIMIT ? OFFSET ?
             """
             paginated_root_params = [*root_id_params, limit, offset]

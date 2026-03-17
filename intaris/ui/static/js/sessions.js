@@ -13,6 +13,11 @@ function sessionsTab() {
     page: 1,
     pages: 1,
     statusFilter: '',
+    alignmentFilter: '',
+    minRiskFilter: '',
+    riskCategoryFilter: '',
+    sortBy: 'created_at',
+    sortDir: 'desc',
     searchQuery: '',
     expandedId: null,
     expandedSession: null,
@@ -172,6 +177,11 @@ function sessionsTab() {
       try {
         const params = { page: this.page, limit: 20 };
         if (this.statusFilter) params.status = this.statusFilter;
+        if (this.alignmentFilter) params.alignment = this.alignmentFilter;
+        if (this.minRiskFilter) params.min_risk = this.minRiskFilter;
+        if (this.riskCategoryFilter) params.risk_category = this.riskCategoryFilter;
+        if (this.sortBy && this.sortBy !== 'created_at') params.sort = this.sortBy;
+        if (this.sortDir === 'asc') params.sort_dir = 'asc';
         if (this.searchQuery) params.q = this.searchQuery;
         const agentFilter = Alpine.store('nav').selectedAgent;
         if (agentFilter) params.agent_id = agentFilter;
@@ -264,6 +274,35 @@ function sessionsTab() {
 
     filterByStatus(status) {
       this.statusFilter = status;
+      this.page = 1;
+      this.load();
+    },
+
+    filterByAlignment(alignment) {
+      this.alignmentFilter = alignment;
+      this.page = 1;
+      this.load();
+    },
+
+    filterByMinRisk(val) {
+      this.minRiskFilter = val;
+      this.page = 1;
+      this.load();
+    },
+
+    filterByRiskCategory(val) {
+      this.riskCategoryFilter = val;
+      this.page = 1;
+      this.load();
+    },
+
+    setSort(col) {
+      if (this.sortBy === col) {
+        this.sortDir = this.sortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        this.sortBy = col;
+        this.sortDir = 'desc';
+      }
       this.page = 1;
       this.load();
     },

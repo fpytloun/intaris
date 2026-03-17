@@ -40,9 +40,10 @@ const RISK_COLORS = {
 };
 
 const PATH_COLORS = {
-  fast:     CHART_COLORS.cyan,
-  llm:      CHART_COLORS.purple,
-  critical: CHART_COLORS.red,
+  fast:      CHART_COLORS.cyan,
+  llm:       CHART_COLORS.purple,
+  critical:  CHART_COLORS.red,
+  alignment: CHART_COLORS.amber,
 };
 
 const SESSION_COLORS = {
@@ -292,6 +293,7 @@ function dashboardTab() {
       this._renderDoughnut('pathsChart', 'Eval Paths', this.stats.path_distribution || {}, PATH_COLORS);
       this._renderDoughnut('sessionsChart', 'Sessions', this.stats.sessions_by_status || {}, SESSION_COLORS);
       this._renderDoughnut('classificationChart', 'Classification', this.stats.classification_distribution || {}, CLASSIFICATION_COLORS);
+      this._renderSessionsTimeline();
       this._renderTimeline();
       this._renderTopTools();
     },
@@ -398,6 +400,90 @@ function dashboardTab() {
         // Chart.js may throw if layout state is stale after tab switch;
         // the next full load() will recreate the chart from scratch.
       }
+    },
+
+    _renderSessionsTimeline() {
+      const timeline = this.stats.sessions_timeline || [];
+
+      // Build full 24h label set (fill gaps with 0)
+      const now = new Date();
+      const hours = [];
+      const countMap = {};
+      timeline.forEach(t => { countMap[t.hour] = t.count; });
+
+      for (let i = 23; i >= 0; i--) {
+        const d = new Date(now.getTime() - i * 3600000);
+        const key = d.getFullYear() + '-' +
+          String(d.getMonth() + 1).padStart(2, '0') + '-' +
+          String(d.getDate()).padStart(2, '0') + 'T' +
+          String(d.getHours()).padStart(2, '0') + ':00';
+        hours.push({
+          label: String(d.getHours()).padStart(2, '0') + ':00',
+          key: key,
+          count: countMap[key] || 0,
+        });
+      }
+
+      // Update existing chart in-place if possible
+      const existing = this._charts.sessionsTimelineChart;
+      if (existing && existing.canvas && existing.canvas.isConnected) {
+        existing.data.labels = hours.map(h => h.label);
+        existing.data.datasets[0].data = hours.map(h => h.count);
+        try { existing.update('none'); } catch (e) { /* stale layout */ }
+        return;
+      }
+
+      const canvas = document.getElementById('sessionsTimelineChart');
+      if (!canvas || !canvas.getContext('2d')) return;
+
+      if (existing) {
+        existing.destroy();
+        delete this._charts.sessionsTimelineChart;
+      }
+
+      this._charts.sessionsTimelineChart = new Chart(canvas, {
+        type: 'bar',
+        data: {
+          labels: hours.map(h => h.label),
+          datasets: [{
+            label: 'Active Sessions',
+            data: hours.map(h => h.count),
+            backgroundColor: CHART_COLORS.teal + 'B3',
+            hoverBackgroundColor: CHART_COLORS.teal,
+            borderRadius: 3,
+            borderSkipped: false,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                title(items) { return items[0].label; },
+                label(ctx) { return ' ' + ctx.raw + ' sessions'; },
+              },
+            },
+          },
+          scales: {
+            x: {
+              grid: { display: false },
+              ticks: {
+                maxRotation: 0,
+                autoSkip: true,
+                maxTicksLimit: 12,
+                font: { size: 10 },
+              },
+            },
+            y: {
+              beginAtZero: true,
+              grid: { color: CHART_COLORS.border },
+              ticks: { precision: 0, font: { size: 10 } },
+            },
+          },
+        },
+      });
     },
 
     _renderTimeline() {

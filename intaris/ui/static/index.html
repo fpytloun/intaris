@@ -154,25 +154,35 @@
         <template x-if="stats">
           <div>
             <!-- Stat Cards -->
-            <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-              <div class="stat-card">
+            <div class="grid grid-cols-3 lg:grid-cols-6 gap-4 mb-6">
+              <div class="stat-card cursor-pointer hover:ring-1 hover:ring-brand-accent/30 transition-all"
+                   @click="Alpine.store('nav').setTab('sessions')"
+                   title="View sessions">
                 <div class="stat-value" x-text="stats.total_sessions"></div>
                 <div class="stat-label">Sessions</div>
               </div>
               <div class="stat-card">
+                <div class="stat-value" x-text="stats.sessions_by_status?.active || 0"></div>
+                <div class="stat-label">Active Sessions</div>
+              </div>
+              <div class="stat-card cursor-pointer hover:ring-1 hover:ring-brand-accent/30 transition-all"
+                   @click="Alpine.store('nav').setTab('audit')"
+                   title="View audit log">
                 <div class="stat-value" x-text="stats.total_evaluations"></div>
-                <div class="stat-label">Evaluations</div>
+                <div class="stat-label">Tool Evaluations</div>
               </div>
               <div class="stat-card">
                 <div class="stat-value" x-text="approvalRate"></div>
                 <div class="stat-label">Approval Rate</div>
               </div>
-              <div class="stat-card">
+              <div class="stat-card cursor-pointer hover:ring-1 hover:ring-brand-accent/30 transition-all"
+                   @click="Alpine.store('nav').setTab('approvals')"
+                   title="View pending approvals">
                 <div class="stat-value" x-text="stats.pending_approvals"></div>
                 <div class="stat-label">Pending Approvals</div>
               </div>
               <div class="stat-card cursor-pointer hover:ring-1 hover:ring-brand-accent/30 transition-all"
-                   @click="Alpine.store('nav').activeTab = 'analysis'"
+                   @click="Alpine.store('nav').setTab('analysis')"
                    title="Click to view full analysis">
                 <div class="stat-value flex items-center justify-center gap-2">
                   <span class="inline-block w-2.5 h-2.5 rounded-full"
@@ -234,9 +244,17 @@
               </div>
             </div>
 
-            <!-- Activity Timeline -->
+            <!-- Active Sessions Timeline -->
             <div class="card mb-6">
-              <h3 class="chart-title">Evaluations — Last 24 Hours</h3>
+              <h3 class="chart-title">Active Sessions — Last 24 Hours</h3>
+              <div class="chart-container-timeline">
+                <canvas id="sessionsTimelineChart"></canvas>
+              </div>
+            </div>
+
+            <!-- Evaluations Timeline -->
+            <div class="card mb-6">
+              <h3 class="chart-title">Tool Evaluations — Last 24 Hours</h3>
               <div class="chart-container-timeline">
                 <canvas id="timelineChart"></canvas>
               </div>
@@ -323,14 +341,59 @@
                  class="input text-sm w-full md:w-80">
         </div>
         <div class="flex items-center justify-between mb-4">
-          <div class="flex items-center gap-2">
-            <button @click="filterByStatus('')"
-                    :class="statusFilter === '' ? 'btn-primary text-sm' : 'btn-secondary text-sm'">All</button>
-            <template x-for="s in ['active', 'idle', 'completed', 'suspended', 'terminated']">
-              <button @click="filterByStatus(s)"
-                      :class="statusFilter === s ? 'btn-primary text-sm' : 'btn-secondary text-sm'"
-                      x-text="s"></button>
-            </template>
+          <div class="flex flex-wrap items-center gap-2">
+            <select @change="filterByStatus($event.target.value)"
+                    :value="statusFilter"
+                    class="input text-sm py-1.5 px-2 w-auto">
+              <option value="">All statuses</option>
+              <option value="active">active</option>
+              <option value="idle">idle</option>
+              <option value="completed">completed</option>
+              <option value="suspended">suspended</option>
+              <option value="terminated">terminated</option>
+            </select>
+            <select @change="filterByAlignment($event.target.value)"
+                    :value="alignmentFilter"
+                    class="input text-sm py-1.5 px-2 w-auto">
+              <option value="">All alignments</option>
+              <option value="aligned">aligned</option>
+              <option value="partially_aligned">partially aligned</option>
+              <option value="not_aligned">not aligned</option>
+            </select>
+            <select @change="filterByMinRisk($event.target.value)"
+                    :value="minRiskFilter"
+                    class="input text-sm py-1.5 px-2 w-auto">
+              <option value="">Any risk</option>
+              <option value="3">Low+ (3)</option>
+              <option value="5">Moderate+ (5)</option>
+              <option value="7">Elevated+ (7)</option>
+              <option value="9">High+ (9)</option>
+            </select>
+            <select @change="filterByRiskCategory($event.target.value)"
+                    :value="riskCategoryFilter"
+                    class="input text-sm py-1.5 px-2 w-auto">
+              <option value="">Any category</option>
+              <option value="intent_drift">intent drift</option>
+              <option value="restriction_circumvention">restriction circumvention</option>
+              <option value="scope_creep">scope creep</option>
+              <option value="insecure_reasoning">insecure reasoning</option>
+              <option value="unusual_tool_pattern">unusual tool pattern</option>
+              <option value="injection_attempt">injection attempt</option>
+              <option value="escalation_pattern">escalation pattern</option>
+              <option value="delegation_misalignment">delegation misalignment</option>
+            </select>
+            <span class="text-muted mx-1">|</span>
+            <select @change="setSort($event.target.value)"
+                    :value="sortBy"
+                    class="input text-sm py-1.5 px-2 w-auto">
+              <option value="created_at">Sort: Created</option>
+              <option value="last_activity_at">Sort: Last Activity</option>
+              <option value="alignment">Sort: Alignment</option>
+            </select>
+            <button @click="sortDir = sortDir === 'desc' ? 'asc' : 'desc'; load()"
+                    class="btn-secondary text-sm py-1.5 px-2"
+                    :title="sortDir === 'desc' ? 'Descending' : 'Ascending'"
+                    x-text="sortDir === 'desc' ? '↓' : '↑'"></button>
           </div>
           <div class="flex items-center gap-2">
             <button x-show="treeView && hasParents"
@@ -916,6 +979,14 @@
                 </div>
               </div>
 
+              <!-- Intention -->
+              <template x-if="item.intention">
+                <div class="mb-3">
+                  <div class="text-xs text-muted mb-0.5">Intention</div>
+                  <div class="text-sm text-secondary" x-text="item.intention"></div>
+                </div>
+              </template>
+
               <!-- Reasoning -->
               <div class="text-sm bg-brand-elevated rounded p-3 mb-3" x-text="item.reasoning" x-show="item.reasoning"></div>
 
@@ -1201,13 +1272,13 @@
           <!-- Doughnut row (latest analysis, session counts) -->
           <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
             <div>
-              <h3 class="chart-title">Sessions by Category</h3>
+              <h3 class="chart-title">Findings by Category</h3>
               <div class="chart-container-doughnut-wide">
                 <canvas id="analysisCategoriesChart"></canvas>
               </div>
             </div>
             <div>
-              <h3 class="chart-title">Sessions by Severity</h3>
+              <h3 class="chart-title">Findings by Severity</h3>
               <div class="chart-container-doughnut-wide">
                 <canvas id="analysisSeverityChart"></canvas>
               </div>
@@ -1222,17 +1293,17 @@
             </div>
           </div>
 
-          <!-- Sessions by Severity Over Time -->
-          <div class="mb-6" x-show="analyses.length >= 2">
-            <h3 class="chart-title">Sessions by Severity Over Time</h3>
+          <!-- Findings by Severity Over Time -->
+          <div class="mb-6">
+            <h3 class="chart-title">Findings by Severity Over Time</h3>
             <div class="chart-container-bar">
               <canvas id="analysisFindingsTimeChart"></canvas>
             </div>
           </div>
 
-          <!-- Sessions by Category Over Time -->
-          <div x-show="analyses.length >= 2">
-            <h3 class="chart-title">Sessions by Category Over Time</h3>
+          <!-- Findings by Category Over Time -->
+          <div class="mb-6">
+            <h3 class="chart-title">Findings by Category Over Time</h3>
             <div class="chart-container-bar">
               <canvas id="analysisCategoriesTimeChart"></canvas>
             </div>
@@ -1279,10 +1350,19 @@
                     <div>
                       <div class="text-xs text-secondary font-medium mb-1">Sessions Scope</div>
                       <div class="flex flex-wrap gap-1">
-                        <template x-for="sid in analysis.sessions_scope" :key="sid">
+                        <template x-for="sid in (analysis._scopeExpanded ? analysis.sessions_scope : analysis.sessions_scope.slice(0, 4))" :key="sid">
                           <span class="text-xs font-mono text-brand-accent hover:underline cursor-pointer"
                                 @click="Alpine.store('nav').openSessionModal(sid)"
                                 x-text="sid"></span>
+                        </template>
+                        <template x-if="!analysis._scopeExpanded && analysis.sessions_scope.length > 4">
+                          <span class="text-xs text-brand-accent hover:underline cursor-pointer"
+                                @click.stop="analysis._scopeExpanded = true"
+                                x-text="'+' + (analysis.sessions_scope.length - 4) + ' more'"></span>
+                        </template>
+                        <template x-if="analysis._scopeExpanded && analysis.sessions_scope.length > 4">
+                          <span class="text-xs text-brand-accent hover:underline cursor-pointer"
+                                @click.stop="analysis._scopeExpanded = false">show less</span>
                         </template>
                       </div>
                     </div>

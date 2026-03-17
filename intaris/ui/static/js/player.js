@@ -10,6 +10,22 @@
  * - Play/pause mode with configurable speed
  * - Auto-scroll to bottom on new events
  */
+/**
+ * Extract a brief summary from tool args for single-line display.
+ * Shows file path, command, or query — whichever is present.
+ */
+function _argsBrief(args) {
+  if (!args || typeof args !== 'object') return '';
+  for (const key of ['filePath', 'file_path', 'path', 'command', 'query', 'pattern']) {
+    if (args[key]) {
+      const val = String(args[key]);
+      const display = val.length > 60 ? val.substring(0, 57) + '...' : val;
+      return `${key}=${display}`;
+    }
+  }
+  return '';
+}
+
 function sessionPlayer() {
   return {
     // State
@@ -368,8 +384,14 @@ function sessionPlayer() {
           return data.tool || 'tool call';
         case 'tool_result':
           return (data.tool || 'result') + (data.isError ? ' (error)' : '');
-        case 'evaluation':
-          return `${data.tool || '?'}: ${data.decision || '?'} (${data.risk || '?'})`;
+        case 'evaluation': {
+          let evalSummary = `${data.tool || '?'}: ${data.decision || '?'} (${data.risk || '?'})`;
+          if (data.args_redacted) {
+            const brief = _argsBrief(data.args_redacted);
+            if (brief) evalSummary += ` — ${brief}`;
+          }
+          return evalSummary;
+        }
         case 'message':
           if (data.role === 'user') return 'User: ' + (data.text || '');
           return (data.role || 'message') + (data.model ? ` [${data.model}]` : '');

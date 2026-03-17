@@ -191,6 +191,19 @@ async def stats(
                 {"hour": row[0], "count": row[1]} for row in cur.fetchall()
             ]
 
+        # Sessions timeline (unique active sessions per hour, last 24h)
+        with db.cursor() as cur:
+            cur.execute(
+                f"SELECT {hour_expr} as hour, "
+                "COUNT(DISTINCT session_id) as cnt FROM audit_log "
+                f"WHERE user_id = ? AND timestamp >= ?{audit_agent_cond} "
+                "GROUP BY hour ORDER BY hour",
+                (ctx.user_id, cutoff, *audit_agent_params),
+            )
+            sessions_timeline = [
+                {"hour": row[0], "count": row[1]} for row in cur.fetchall()
+            ]
+
         # MCP proxy stats
         mcp_stats = {}
         try:
@@ -237,6 +250,7 @@ async def stats(
             "classification_distribution": classification_distribution,
             "top_tools": top_tools,
             "activity_timeline": activity_timeline,
+            "sessions_timeline": sessions_timeline,
             "users": users,
             "agents": agents,
             "mcp": mcp_stats,

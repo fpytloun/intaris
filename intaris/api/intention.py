@@ -161,6 +161,30 @@ async def list_sessions(
         None, description="Filter child sessions by parent"
     ),
     q: str | None = Query(None, description="Search session_id and intention"),
+    alignment: str | None = Query(
+        None,
+        description="Filter by alignment from latest summary "
+        "(aligned, partially_aligned, not_aligned)",
+    ),
+    min_risk: int | None = Query(
+        None,
+        ge=1,
+        le=10,
+        description="Minimum risk indicator severity (1-10)",
+    ),
+    risk_category: str | None = Query(
+        None,
+        description="Filter by risk indicator category "
+        "(e.g. intent_drift, scope_creep, injection_attempt)",
+    ),
+    sort: str | None = Query(
+        None,
+        description="Sort column: created_at (default), last_activity_at, alignment",
+    ),
+    sort_dir: str | None = Query(
+        None,
+        description="Sort direction: desc (default), asc",
+    ),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
     tree: bool = Query(
@@ -180,6 +204,11 @@ async def list_sessions(
             status=status,
             agent_id=agent_id,
             parent_session_id=parent_session_id,
+            alignment=alignment,
+            min_risk=min_risk,
+            risk_category=risk_category,
+            sort=sort,
+            sort_dir=sort_dir,
             search=q,
             page=page,
             limit=limit,

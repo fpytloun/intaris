@@ -309,7 +309,11 @@ function analysisTab() {
       this.initialized = true;
 
       if (Alpine.store('nav').activeTab === 'analysis') {
-        requestAnimationFrame(() => this._renderAllCharts());
+        // Delay slightly to ensure Alpine has updated x-show visibility
+        // before Chart.js tries to measure hidden canvas elements.
+        // Fixes charts not rendering on programmatic tab switch
+        // (e.g. clicking Behavioral Risk card on dashboard).
+        setTimeout(() => requestAnimationFrame(() => this._renderAllCharts()), 50);
       }
     },
 
@@ -363,7 +367,7 @@ function analysisTab() {
         const agent = this._agentFilter();
         if (agent) params.agent_id = agent;
         const data = await IntarisAPI.listAnalyses(params);
-        this.analyses = (data.items || []).map(a => ({ ...a, _expanded: false }));
+        this.analyses = (data.items || []).map(a => ({ ...a, _expanded: false, _scopeExpanded: false }));
         this.analysesPage = data.page;
         this.analysesPages = data.pages;
         this.analysesTotal = data.total;
@@ -481,7 +485,7 @@ function analysisTab() {
           'analysisCategoriesChart',
           _countSessionsByKey(latestFindings, 'category'),
           null,
-          'sessions',
+          'findings',
         );
       } catch (e) { console.warn('analysisCategoriesChart error:', e); }
 
@@ -490,7 +494,7 @@ function analysisTab() {
           'analysisSeverityChart',
           _countSessionsByBand(latestFindings),
           ANALYSIS_SEVERITY_BAND_COLORS,
-          'sessions',
+          'findings',
         );
       } catch (e) { console.warn('analysisSeverityChart error:', e); }
 
@@ -732,7 +736,8 @@ function analysisTab() {
           maintainAspectRatio: false,
           plugins: {
             legend: {
-              position: 'bottom',
+              position: 'right',
+              maxWidth: 150,
               labels: {
                 color: ANALYSIS_COLORS.text,
                 padding: 10,
@@ -747,7 +752,7 @@ function analysisTab() {
               callbacks: {
                 label(ctx) {
                   if (ctx.raw === 0) return null;
-                  return ' ' + ctx.dataset.label + ': ' + ctx.raw + ' sessions';
+                  return ' ' + ctx.dataset.label + ': ' + ctx.raw + ' findings';
                 },
               },
             },
