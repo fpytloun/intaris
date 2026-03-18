@@ -6,7 +6,7 @@ Guardrails service for AI agents. Intaris sits between your AI agent and its too
 
 **Real-time.** Sub-second evaluation with a priority-ordered decision matrix. Read-only calls resolve in under 1ms. LLM evaluations complete within the 5-second circuit breaker. WebSocket streaming for live monitoring.
 
-**Self-hosted.** Single Python process, SQLite storage, no external dependencies beyond an LLM API key. Your code and audit trail stay on your machine.
+**Self-hosted.** Single Python process, SQLite or PostgreSQL storage, no external dependencies beyond an LLM API key. Your code and audit trail stay under your control.
 
 Part of the [Cognara](https://github.com/fpytloun) platform (Cognis controller, Intaris guardrails, [Mnemory](https://github.com/fpytloun/mnemory) memory).
 
@@ -38,14 +38,15 @@ LLM_API_KEY=sk-your-key uvx intaris
 
 That's it. Intaris starts on `http://localhost:8060`, management UI at `http://localhost:8060/ui`.
 
-Now connect your client — for **OpenCode**, install the plugin:
+Now integrate with your agent. We already ship extensions for some clients. For
+example for **OpenCode**, install the plugin:
 
 ```bash
 export INTARIS_URL=http://localhost:8060
 cp integrations/opencode/intaris.ts ~/.config/opencode/plugins/
 ```
 
-Or for **any MCP client**, use the MCP proxy — add to your MCP config:
+Intaris can also serve as MCP proxy with audit trail and guardrails for tool calls. To use that, configure **any MCP client** to use intaris as a single MCP server:
 
 ```json
 {
@@ -58,9 +59,9 @@ Or for **any MCP client**, use the MCP proxy — add to your MCP config:
 }
 ```
 
-Every tool call is now evaluated for safety before execution.
+And add MCP servers via Intaris UI or config.
 
-Also available via [Docker, pip, or production setup](docs/deployment.md). See the [full quick start guide](docs/quickstart.md) for more clients and options.
+Intaris is also available via [Docker, pip, or production setup](docs/deployment.md). See the [full quick start guide](docs/quickstart.md) for more clients and options.
 
 ## Screenshots
 
@@ -102,6 +103,20 @@ See the [Management UI docs](docs/management-ui.md) for all tabs and features.
 **Decide.** The decision matrix applies priority-ordered rules: critical risk always denies, aligned low/medium risk approves, high risk and misalignment escalate for human review. The decision, reasoning, and full context are recorded in the audit trail.
 
 See the [Architecture](docs/architecture.md) and [Evaluation Pipeline](docs/evaluation-pipeline.md) docs for the full technical details.
+
+## Benchmark Results
+
+Intaris catches 100% of critical threats (destructive commands, data exfiltration, RCE) with near-zero false positives (0.4% FPR). Across 41 benchmark scenarios including adversarial attacks, social engineering, and cross-session patterns, Intaris achieves 83% F1 with 98% precision -- meaning it almost never blocks legitimate developer work.
+
+| Metric | Value |
+|---|---|
+| Precision | 97.9% |
+| F1 Score | 83.2% |
+| False Positive Rate | 0.4% |
+| Critical Misses | 0 |
+| Avg Latency | 1.7s |
+
+See the [Benchmarking docs](docs/benchmarking.md) for methodology, scenario details, and how to run your own benchmarks.
 
 ## Documentation
 

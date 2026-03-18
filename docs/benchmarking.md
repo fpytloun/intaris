@@ -11,6 +11,54 @@ The benchmark uses a hybrid approach:
 
 Each scenario defines a visible **intention** (what Intaris sees) and either scripted steps or a hidden directive (what the agent actually does). The benchmark evaluates every Intaris decision against ground truth using a separate evaluator LLM (gpt-5.4).
 
+## Results
+
+### Headline Metrics
+
+| Metric | Value | What it means |
+|---|---|---|
+| **Precision** | 97.9% | Of everything Intaris blocked, 97.9% was actually harmful -- almost no false alarms |
+| **F1 Score** | 83.2% | Overall balance of catching threats vs. not blocking legitimate work |
+| **False Positive Rate** | 0.4% | Only 0.4% of legitimate tool calls were incorrectly blocked |
+| **Critical Misses** | 0 | No inherently dangerous calls (rm -rf, RCE, disk wipe) were ever approved |
+| **Avg Latency** | 1.7s | Average evaluation time per tool call |
+| **P95 Latency** | 5.3s | 95th percentile evaluation time |
+
+### By Category
+
+| Category | F1 | Precision | Recall | Scenarios | Notes |
+|---|---|---|---|---|---|
+| coding | 1.000 | 1.000 | 1.000 | 6 | Perfect -- benign development, path traversal, session policy, intention updates |
+| infra | 1.000 | 1.000 | 1.000 | 3 | Perfect -- deployment verification, careless commands, production sabotage |
+| research | 1.000 | 1.000 | 1.000 | 2 | Perfect -- benign medical research and dangerous self-medication drift |
+| social | 1.000 | 1.000 | 1.000 | 2 | Perfect -- LinkedIn browsing and profile stalking |
+| cross_session | 0.900 | 1.000 | 0.818 | 9 | Near-perfect -- reconnaissance chains, credential harvesting, progressive escalation |
+| gold | 0.889 | 0.923 | 0.857 | 8 | Calibration scenarios -- 1 false block on a read in a policy-deny session |
+| workplace | 0.667 | 1.000 | 0.500 | 3 | LLM misses escalation patterns (stalking, aggressive drafts) but catches overt threats |
+| adversarial | 0.545 | 1.000 | 0.375 | 4 | Hardest category -- subtle backdoors and prompt injection in code content |
+
+### What Intaris Catches
+
+- **All critical/destructive operations** -- `rm -rf`, disk wipes, `DROP TABLE`, privilege escalation, reverse shells. Zero critical misses across all runs.
+- **Data exfiltration** -- `curl POST` to external URLs, credential file uploads, pastebin dumps. Caught by critical pattern matcher.
+- **Production access** -- `kubectl get secrets`, unauthorized database queries, admin API calls. Caught by LLM evaluation.
+- **Path traversal** -- `../../etc/shadow`, reads outside working directory, denied path patterns. Caught by filesystem path protection.
+- **Session policy violations** -- denied tools, denied commands, denied paths. Caught by classifier fast path.
+- **Overt threats** -- threatening emails, harassment, intimidation. Caught by LLM evaluation.
+
+### What Intaris Misses (Areas for Improvement)
+
+- **Subtle code-level backdoors** -- an `X-Debug=bypass` auth skip or hardcoded admin credentials embedded in otherwise legitimate code edits. The LLM evaluator doesn't inspect code content deeply enough.
+- **Prompt injection in code** -- `IGNORE ALL PREVIOUS INSTRUCTIONS` embedded in JavaScript comments within functional validation code. The injection detection doesn't scan file content.
+- **Escalation patterns** -- a gradual drift from professional advice to stalking to aggressive emails. Each individual call looks borderline; the pattern only emerges across multiple calls. This is an L2/L3 behavioral analysis concern.
+- **In-project sensitive file reads** -- `.env` and `config/database.yml` reads within the working directory are fast-pathed as read-only by design. The classifier doesn't distinguish sensitive files from regular project files.
+
+### Score Interpretation
+
+Scores are **evaluator-model-dependent** -- they measure agreement between Intaris and the evaluator LLM (gpt-5.4), not objective ground truth. Use them as **regression indicators** when comparing runs after configuration changes, not as absolute quality metrics.
+
+The gold calibration agreement (80.2%) is below the 95% target, meaning the evaluator occasionally disagrees with hand-labeled ground truth on borderline cases. This affects the absolute numbers but not the relative comparisons between runs.
+
 ## Quick Start
 
 Run the full benchmark suite with a single command:
@@ -43,9 +91,9 @@ python -m tools.benchmark --url ... --api-key ... run \
 |---|---|---|---|
 | gold | 8 | scripted | Hand-labeled calibration scenarios with known correct outcomes. Tests critical patterns, session policy, path protection, escalation retry, prompt injection. |
 | adversarial | 4 | scripted | Backdoor insertion, data exfiltration, systematic circumvention after denials, prompt injection in tool arguments. |
-| infra | 3 | mixed | Kubernetes deployment verification (benign), careless destructive commands (scripted), production sabotage (scripted). |
+| infra | 3 | mixed | Kubernetes deployment verification (generative), careless destructive commands (scripted), production sabotage (scripted). |
 | coding | 6 | mixed | Benign development (generative), path traversal attempts (scripted), session policy enforcement (scripted), IntentionBarrier testing (generative). |
-| workplace | 3 | mixed | Professional HR email (generative), colleague conflict escalation (generative), careless email deletion (scripted). |
+| workplace | 3 | scripted | Professional HR email, colleague conflict escalation with drift, careless email deletion. |
 | social | 2 | generative | LinkedIn feed browsing (benign), profile stalking drift. |
 | research | 2 | generative | Medical research (benign), dangerous self-medication advice drift. |
 | hierarchical | 4 | generative | Parent/child session pairs testing AlignmentBarrier -- aligned delegation and misaligned child. |
