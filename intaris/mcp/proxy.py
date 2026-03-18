@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import logging
+import time
 import uuid
 from datetime import timedelta
 from typing import Any
@@ -541,6 +542,202 @@ class MCPProxy:
             ]
 
         return contents or [TextContent(type="text", text="(empty response)")]
+
+    async def call_tool_rest(
+        self,
+        *,
+        user_id: str,
+        agent_id: str | None,
+        session_id: str,
+        server_name: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Call an upstream MCP tool via REST API with full safety evaluation.
+
+        Unlike ``_handle_call_tool`` (which reads identity from ContextVars
+        and auto-creates sessions), this method takes explicit parameters
+        and uses the caller-provided ``session_id``.  It is designed for
+        the ``POST /api/v1/mcp/call`` REST endpoint where the OpenClaw
+        plugin has already created an Intaris session.
+
+        The full evaluation pipeline runs (tool preferences + LLM safety
+        evaluation + audit logging), exactly like a local tool call.
+
+        Returns:
+            Dict with: content, isError, decision, call_id, reasoning,
+            latency_ms.
+        """
+        start = time.monotonic()
+        namespaced = f"{server_name}:{tool_name}"
+
+        # Fetch MCP tool preferences for the classifier.
+        tool_prefs = await asyncio.to_thread(
+            self._server_store.get_all_tool_preferences,
+            user_id=user_id,
+        )
+
+        # Run safety evaluation (sync evaluator wrapped in to_thread).
+        eval_result = await asyncio.to_thread(
+            self._evaluator.evaluate,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            tool=namespaced,
+            args=arguments,
+            tool_preferences=tool_prefs,
+        )
+
+        decision = eval_result["decision"]
+        call_id = eval_result.get("call_id")
+        reasoning = eval_result.get("reasoning")
+
+        if decision == "deny":
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Tool call denied by Intaris safety evaluation.\n"
+                            f"Reason: {reasoning or 'No reason provided'}\n"
+                            f"Call ID: {call_id}"
+                        ),
+                    }
+                ],
+                "isError": True,
+                "decision": "deny",
+                "call_id": call_id,
+                "reasoning": reasoning,
+                "latency_ms": round((time.monotonic() - start) * 1000),
+            }
+
+        if decision == "escalate":
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"This tool call has been escalated for human "
+                            f"approval (call_id: {call_id}).\n"
+                            f"Please wait for the approval to be resolved in "
+                            f"the Intaris UI, then retry this exact tool call. "
+                            f"Do not attempt alternative approaches until "
+                            f"resolved."
+                        ),
+                    }
+                ],
+                "isError": True,
+                "decision": "escalate",
+                "call_id": call_id,
+                "reasoning": reasoning,
+                "latency_ms": round((time.monotonic() - start) * 1000),
+            }
+
+        # Guard against unexpected decision values.
+        if decision != "approve":
+            logger.warning(
+                "Unexpected decision '%s' for %s:%s; treating as deny",
+                decision,
+                server_name,
+                tool_name,
+            )
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Unexpected evaluation decision: {decision}",
+                    }
+                ],
+                "isError": True,
+                "decision": decision,
+                "call_id": call_id,
+                "reasoning": reasoning,
+                "latency_ms": round((time.monotonic() - start) * 1000),
+            }
+
+        # Decision is "approve" — forward to upstream.
+        try:
+            server_with_secrets = await asyncio.to_thread(
+                self._server_store.get_server,
+                user_id=user_id,
+                name=server_name,
+                decrypt_secrets=True,
+            )
+        except ValueError:
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Error: MCP server '{server_name}' not found",
+                    }
+                ],
+                "isError": True,
+                "decision": "approve",
+                "call_id": call_id,
+                "reasoning": reasoning,
+                "latency_ms": round((time.monotonic() - start) * 1000),
+            }
+
+        # Acquire session lock to safely create/reuse the MCP session ID
+        # and persist it in the reverse index for connection pooling.
+        async with self._session_lock:
+            mcp_session_id = self._get_or_create_mcp_session_id(user_id, agent_id)
+            key = (user_id, agent_id)
+            if key not in self._user_session_index:
+                self._user_session_index[key] = mcp_session_id
+                self._session_map[mcp_session_id] = {
+                    "user_id": user_id,
+                    "session_id": session_id,
+                    "agent_id": agent_id,
+                }
+
+        try:
+            client = await self._conn_mgr.get_or_connect(
+                mcp_session_id=mcp_session_id,
+                server_config=server_with_secrets,
+                user_id=user_id,
+            )
+
+            result = await client.call_tool(
+                name=tool_name,
+                arguments=arguments,
+                read_timeout_seconds=timedelta(milliseconds=self._timeout_ms),
+            )
+
+            # Convert CallToolResult content to serializable dicts.
+            text_contents = self._convert_result(result)
+            content = [{"type": "text", "text": c.text} for c in text_contents]
+            is_error = result.isError or False
+
+            return {
+                "content": content,
+                "isError": is_error,
+                "decision": "approve",
+                "call_id": call_id,
+                "reasoning": reasoning,
+                "latency_ms": round((time.monotonic() - start) * 1000),
+            }
+
+        except Exception as exc:
+            logger.exception("Upstream call to '%s:%s' failed", server_name, tool_name)
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Error calling upstream server "
+                            f"'{server_name}': {exc}\n"
+                            f"The tool call was approved but the upstream "
+                            f"server returned an error."
+                        ),
+                    }
+                ],
+                "isError": True,
+                "decision": "approve",
+                "call_id": call_id,
+                "reasoning": reasoning,
+                "latency_ms": round((time.monotonic() - start) * 1000),
+            }
 
     def build_instructions(self, user_id: str) -> str:
         """Build aggregated server instructions for a user.

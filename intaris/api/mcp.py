@@ -92,6 +92,17 @@ class ToolPreferenceResponse(BaseModel):
     )
 
 
+class ToolCallRequest(BaseModel):
+    """Request to call an MCP tool via the REST proxy."""
+
+    session_id: str = Field(..., description="Intaris session ID")
+    server: str = Field(..., description="MCP server name")
+    tool: str = Field(..., description="Tool name on the MCP server")
+    arguments: dict[str, Any] = Field(
+        default_factory=dict, description="Tool arguments"
+    )
+
+
 # ── Helper ───────────────────────────────────────────────────────────
 
 
@@ -339,3 +350,94 @@ async def delete_tool_preference(
             "Failed to delete tool preference for %s:%s", server_name, tool_name
         )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── Tool Proxy (REST) ────────────────────────────────────────────────
+
+
+@router.get("/tools")
+async def list_tools(
+    request: Request,
+    # ctx is injected for its auth side-effect: get_session_context()
+    # validates the API key and sets ContextVars that _handle_list_tools()
+    # reads for user_id/agent_id filtering.
+    ctx: SessionContext = Depends(get_session_context),
+):
+    """List all available MCP tools aggregated from configured servers.
+
+    Returns tools from all enabled upstream MCP servers, filtered by
+    agent pattern and tool preferences.  Used by the OpenClaw plugin
+    to register MCP tools as agent tools.
+    """
+    from intaris.mcp.proxy import MCPProxy
+
+    mcp_proxy: MCPProxy | None = getattr(request.app.state, "mcp_proxy", None)
+    if mcp_proxy is None:
+        return {"tools": []}
+
+    try:
+        # _handle_list_tools reads user_id/agent_id from ContextVars
+        # which are already set by the auth middleware for REST requests.
+        tools = await mcp_proxy._handle_list_tools()
+    except Exception as exc:
+        logger.exception("Failed to list MCP tools")
+        raise HTTPException(
+            status_code=502, detail=_friendly_connection_error(exc)
+        ) from exc
+
+    # Convert Tool objects to the format expected by the OpenClaw plugin.
+    # Tools are namespaced as "server:tool" — split into separate fields.
+    result = []
+    for tool in tools:
+        if ":" in tool.name:
+            server, name = tool.name.split(":", 1)
+        else:
+            server, name = "unknown", tool.name
+        result.append(
+            {
+                "server": server,
+                "name": name,
+                "description": tool.description,
+                "inputSchema": tool.inputSchema or {"type": "object"},
+            }
+        )
+
+    return {"tools": result}
+
+
+@router.post("/call")
+async def call_tool(
+    body: ToolCallRequest,
+    request: Request,
+    ctx: SessionContext = Depends(get_session_context),
+):
+    """Proxy a tool call to an upstream MCP server via Intaris.
+
+    The call goes through the full safety evaluation pipeline
+    (tool preferences + LLM evaluation + audit logging) before
+    being forwarded to the upstream server.  This is the REST
+    equivalent of the MCP protocol ``tools/call`` handler.
+    """
+    from intaris.mcp.proxy import MCPProxy
+
+    mcp_proxy: MCPProxy | None = getattr(request.app.state, "mcp_proxy", None)
+    if mcp_proxy is None:
+        raise HTTPException(status_code=503, detail="MCP proxy is not available")
+
+    try:
+        result = await mcp_proxy.call_tool_rest(
+            user_id=ctx.user_id,
+            agent_id=ctx.agent_id,
+            session_id=body.session_id,
+            server_name=body.server,
+            tool_name=body.tool,
+            arguments=body.arguments,
+        )
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("MCP tool call failed: %s:%s", body.server, body.tool)
+        raise HTTPException(
+            status_code=502, detail=_friendly_connection_error(exc)
+        ) from exc

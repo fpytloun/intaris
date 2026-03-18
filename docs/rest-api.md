@@ -450,6 +450,75 @@ Valid preferences: `auto-approve`, `escalate`, `deny`.
 
 Remove a tool preference (revert to default evaluation).
 
+### GET /mcp/tools
+
+List all available MCP tools aggregated from configured upstream servers. Tools are filtered by agent pattern and tool preferences (denied tools are excluded).
+
+Used by the OpenClaw plugin to discover and register MCP tools as agent tools.
+
+**Response:**
+
+```json
+{
+  "tools": [
+    {
+      "server": "github",
+      "name": "create_issue",
+      "description": "Creates a GitHub issue",
+      "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}}}
+    }
+  ]
+}
+```
+
+Returns `{"tools": []}` if the MCP proxy is not configured.
+
+### POST /mcp/call
+
+Call an MCP tool via the REST proxy. The call goes through the full safety evaluation pipeline (tool preferences + LLM evaluation + audit logging) before being forwarded to the upstream MCP server.
+
+Used by the OpenClaw plugin to proxy MCP tool calls through Intaris with safety evaluation.
+
+**Request:**
+
+```json
+{
+  "session_id": "oc-abc123",
+  "server": "github",
+  "tool": "create_issue",
+  "arguments": {"title": "Bug report", "body": "..."}
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | yes | Intaris session ID (from the OpenClaw plugin) |
+| `server` | string | yes | MCP server name |
+| `tool` | string | yes | Tool name on the MCP server |
+| `arguments` | object | no | Tool arguments (default: `{}`) |
+
+**Response:**
+
+```json
+{
+  "content": [{"type": "text", "text": "Issue created: #42"}],
+  "isError": false,
+  "decision": "approve",
+  "call_id": "call_abc123",
+  "reasoning": null,
+  "latency_ms": 350
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `content` | array | Tool result content (text blocks) |
+| `isError` | boolean | Whether the call resulted in an error |
+| `decision` | string | Safety evaluation decision: `approve`, `deny`, or `escalate` |
+| `call_id` | string | Audit call ID |
+| `reasoning` | string | Evaluation reasoning (for deny/escalate) |
+| `latency_ms` | number | Total latency including evaluation and upstream call |
+
 ## Notifications
 
 ### GET /notifications/channels
