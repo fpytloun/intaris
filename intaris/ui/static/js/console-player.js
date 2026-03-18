@@ -71,6 +71,7 @@ function detectSource(events) {
 
   if (hasParts || sources.has('opencode')) return 'opencode';
   if (hasTranscripts || sources.has('claude-code')) return 'claude-code';
+  if (sources.has('openclaw')) return 'openclaw';
   return null;
 }
 
@@ -247,10 +248,24 @@ function processOpenCode(events) {
       continue;
     }
 
-    // Skip assistant message metadata — these fire after every assistant
-    // message (including intermediate tool-call turns) and add noise.
-    // Token/cost info is already visible in step-finish blocks.
+    // Assistant message handling — source-dependent.
+    // OpenCode sends assistant text via part events; these message events
+    // contain only metadata (model, tokens) so we skip them.
+    // Other sources (OpenClaw, etc.) send assistant text directly in
+    // message events, so we render them as assistant-text blocks.
     if (event.type === 'message' && data.role === 'assistant') {
+      if (event.source === 'opencode') {
+        continue;
+      }
+      if (data.text && data.text.trim()) {
+        blocks.push({
+          type: 'assistant-text',
+          id: 'b' + (blockId++),
+          text: data.text,
+          html: renderMarkdown(data.text),
+          ts: event.ts,
+        });
+      }
       continue;
     }
 
@@ -958,6 +973,7 @@ function consolePlayer() {
 
     sourceLabel() {
       if (this.source === 'opencode') return 'OpenCode';
+      if (this.source === 'openclaw') return 'OpenClaw';
       if (this.source === 'claude-code') return 'Claude Code';
       return 'Unknown';
     },
