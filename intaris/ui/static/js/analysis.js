@@ -475,15 +475,33 @@ function analysisTab() {
       const analyses = Alpine.raw(this.analyses);
       if (!analyses.length || typeof Chart === 'undefined') return;
 
-      const latest = analyses[0];
-      const latestFindings = latest?.findings || [];
+      // When "All Agents" is selected, aggregate findings from the latest
+      // analysis per agent (not just analyses[0] which is a single agent).
+      // When a specific agent is selected, use the latest analysis as before.
+      const agentFilter = Alpine.store('nav')?.selectedAgent;
+      let doughnutFindings;
+      if (!agentFilter) {
+        // Collect the latest analysis per unique agent_id
+        const latestByAgent = new Map();
+        for (const a of analyses) {
+          const aid = a.agent_id || '__none__';
+          if (!latestByAgent.has(aid)) latestByAgent.set(aid, a);
+        }
+        // Merge findings from all latest-per-agent analyses
+        doughnutFindings = [];
+        for (const a of latestByAgent.values()) {
+          if (a.findings) doughnutFindings.push(...a.findings);
+        }
+      } else {
+        doughnutFindings = analyses[0]?.findings || [];
+      }
 
       // Each chart is wrapped in try/catch so one failure doesn't
       // prevent the others from rendering.
       try {
         this._renderDoughnut(
           'analysisCategoriesChart',
-          _countSessionsByKey(latestFindings, 'category'),
+          _countSessionsByKey(doughnutFindings, 'category'),
           null,
           'findings',
         );
@@ -492,7 +510,7 @@ function analysisTab() {
       try {
         this._renderDoughnut(
           'analysisSeverityChart',
-          _countSessionsByBand(latestFindings),
+          _countSessionsByBand(doughnutFindings),
           ANALYSIS_SEVERITY_BAND_COLORS,
           'findings',
         );

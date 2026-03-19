@@ -248,6 +248,7 @@ document.addEventListener('alpine:init', () => {
         const stats = await IntarisAPI.stats();
         this.users = stats.users || [];
         Alpine.store('nav').agents = stats.agents || [];
+        Alpine.store('nav').restoreAgent();
       } catch {
         this.users = [];
       }
@@ -268,6 +269,7 @@ document.addEventListener('alpine:init', () => {
     logout() {
       IntarisAPI.clearKey();
       IntarisAPI.setSelectedUser('');
+      localStorage.removeItem('intaris_selected_agent');
       this.authenticated = false;
       this.identity = null;
       this.users = [];
@@ -306,9 +308,20 @@ document.addEventListener('alpine:init', () => {
 
     setAgent(agentId) {
       this.selectedAgent = agentId;
+      localStorage.setItem('intaris_selected_agent', agentId);
       window.dispatchEvent(new CustomEvent('intaris:agent-changed', {
         detail: { agentId }
       }));
+    },
+
+    /** Restore persisted agent selection after agents list is populated. */
+    restoreAgent() {
+      const saved = localStorage.getItem('intaris_selected_agent');
+      if (saved && this.agents.includes(saved)) {
+        this.selectedAgent = saved;
+      } else {
+        this.selectedAgent = '';
+      }
     },
 
     // ── Session modal ───────────────────────────────────────

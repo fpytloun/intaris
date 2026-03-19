@@ -119,6 +119,45 @@ if (typeof Chart !== 'undefined') {
   Chart.register(centerTextPlugin);
 }
 
+// ── Module-level chart storage (outside Alpine reactivity) ──────────
+//
+// Chart.js instances MUST NOT be stored on the Alpine reactive proxy.
+// Alpine wraps objects in Proxy, which breaks Chart.js internal property
+// access (e.g., plugin.events becomes undefined through the proxy,
+// causing silent update failures on agent/user switch).
+
+const _dashboardCharts = new Map();
+
+function _getDashChart(id) {
+  return _dashboardCharts.get(id);
+}
+
+function _setDashChart(id, chart) {
+  _dashboardCharts.set(id, chart);
+}
+
+function _deleteDashChart(id) {
+  const c = _dashboardCharts.get(id);
+  if (c) {
+    try { c.destroy(); } catch (e) { /* ignore */ }
+    _dashboardCharts.delete(id);
+  }
+}
+
+function _destroyAllDashCharts() {
+  _dashboardCharts.forEach((chart) => {
+    try { chart.destroy(); } catch (e) { /* ignore */ }
+  });
+  _dashboardCharts.clear();
+}
+
+/** Get a raw (non-proxied) canvas element by ID. */
+function _getDashCanvas(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  return typeof Alpine !== 'undefined' && Alpine.raw ? Alpine.raw(el) : el;
+}
+
 // ── Dashboard component ──────────────────────────────────────────────
 
 function dashboardTab() {
@@ -128,8 +167,6 @@ function dashboardTab() {
     stats: null,
     recentActivity: [],
 
-    // Chart instances (for cleanup)
-    _charts: {},
     _refreshTimer: null,
 
     init() {
@@ -271,7 +308,13 @@ function dashboardTab() {
 
         // Update agents list in nav store (always from unfiltered stats)
         if (stats.agents) {
+          const hadAgents = Alpine.store('nav').agents.length > 0;
           Alpine.store('nav').agents = stats.agents;
+          // Restore persisted agent on first population (non-can_switch_user mode
+          // where loadUsers() is not called during auth)
+          if (!hadAgents && stats.agents.length > 0) {
+            Alpine.store('nav').restoreAgent();
+          }
         }
 
         // Render charts after layout completes (rAF ensures canvas is renderable)
@@ -300,27 +343,24 @@ function dashboardTab() {
 
     _renderDoughnut(canvasId, label, data, colorMap) {
       // Update existing chart in-place if possible (avoids destroy/create cycle)
-      const existing = this._charts[canvasId];
+      const existing = _getDashChart(canvasId);
       if (existing && existing.canvas && existing.canvas.isConnected) {
         this._updateDoughnut(canvasId, data, colorMap);
         return;
       }
 
-      const canvas = document.getElementById(canvasId);
+      const canvas = _getDashCanvas(canvasId);
       if (!canvas || !canvas.getContext('2d')) return;
 
       // Destroy stale chart (canvas was replaced or detached)
-      if (existing) {
-        existing.destroy();
-        delete this._charts[canvasId];
-      }
+      _deleteDashChart(canvasId);
 
       const labels = Object.keys(data);
       const values = Object.values(data);
       const total = values.reduce((a, b) => a + b, 0);
       const colors = labels.map(l => colorMap[l] || CHART_COLORS.muted);
 
-      this._charts[canvasId] = new Chart(canvas, {
+      _setDashChart(canvasId, new Chart(canvas, {
         type: 'doughnut',
         data: {
           labels: labels,
@@ -372,11 +412,11 @@ function dashboardTab() {
             },
           },
         },
-      });
+      }));
     },
 
     _updateDoughnut(canvasId, data, colorMap) {
-      const chart = this._charts[canvasId];
+      const chart = _getDashChart(canvasId);
       if (!chart || !data) return;
 
       // Skip update if canvas is hidden (display:none) or detached.
@@ -425,7 +465,7 @@ function dashboardTab() {
       }
 
       // Update existing chart in-place if possible
-      const existing = this._charts.sessionsTimelineChart;
+      const existing = _getDashChart('sessionsTimelineChart');
       if (existing && existing.canvas && existing.canvas.isConnected) {
         existing.data.labels = hours.map(h => h.label);
         existing.data.datasets[0].data = hours.map(h => h.count);
@@ -433,15 +473,12 @@ function dashboardTab() {
         return;
       }
 
-      const canvas = document.getElementById('sessionsTimelineChart');
+      const canvas = _getDashCanvas('sessionsTimelineChart');
       if (!canvas || !canvas.getContext('2d')) return;
 
-      if (existing) {
-        existing.destroy();
-        delete this._charts.sessionsTimelineChart;
-      }
+      _deleteDashChart('sessionsTimelineChart');
 
-      this._charts.sessionsTimelineChart = new Chart(canvas, {
+      _setDashChart('sessionsTimelineChart', new Chart(canvas, {
         type: 'bar',
         data: {
           labels: hours.map(h => h.label),
@@ -483,7 +520,7 @@ function dashboardTab() {
             },
           },
         },
-      });
+      }));
     },
 
     _renderTimeline() {
@@ -509,7 +546,7 @@ function dashboardTab() {
       }
 
       // Update existing chart in-place if possible
-      const existing = this._charts.timelineChart;
+      const existing = _getDashChart('timelineChart');
       if (existing && existing.canvas && existing.canvas.isConnected) {
         existing.data.labels = hours.map(h => h.label);
         existing.data.datasets[0].data = hours.map(h => h.count);
@@ -517,15 +554,12 @@ function dashboardTab() {
         return;
       }
 
-      const canvas = document.getElementById('timelineChart');
+      const canvas = _getDashCanvas('timelineChart');
       if (!canvas || !canvas.getContext('2d')) return;
 
-      if (existing) {
-        existing.destroy();
-        delete this._charts.timelineChart;
-      }
+      _deleteDashChart('timelineChart');
 
-      this._charts.timelineChart = new Chart(canvas, {
+      _setDashChart('timelineChart', new Chart(canvas, {
         type: 'bar',
         data: {
           labels: hours.map(h => h.label),
@@ -572,7 +606,7 @@ function dashboardTab() {
             },
           },
         },
-      });
+      }));
     },
 
     _renderTopTools() {
@@ -589,7 +623,7 @@ function dashboardTab() {
       });
 
       // Update existing chart in-place if possible
-      const existing = this._charts.topToolsChart;
+      const existing = _getDashChart('topToolsChart');
       if (existing && existing.canvas && existing.canvas.isConnected) {
         existing.data.labels = reversed.map(t => t.tool);
         existing.data.datasets[0].data = reversed.map(t => t.count);
@@ -598,15 +632,12 @@ function dashboardTab() {
         return;
       }
 
-      const canvas = document.getElementById('topToolsChart');
+      const canvas = _getDashCanvas('topToolsChart');
       if (!canvas || !canvas.getContext('2d')) return;
 
-      if (existing) {
-        existing.destroy();
-        delete this._charts.topToolsChart;
-      }
+      _deleteDashChart('topToolsChart');
 
-      this._charts.topToolsChart = new Chart(canvas, {
+      _setDashChart('topToolsChart', new Chart(canvas, {
         type: 'bar',
         data: {
           labels: reversed.map(t => t.tool),
@@ -649,14 +680,11 @@ function dashboardTab() {
             },
           },
         },
-      });
+      }));
     },
 
     _destroyAllCharts() {
-      Object.values(this._charts).forEach(c => {
-        if (c && typeof c.destroy === 'function') c.destroy();
-      });
-      this._charts = {};
+      _destroyAllDashCharts();
     },
 
     // ── Computed properties ─────────────────────────────────────────
