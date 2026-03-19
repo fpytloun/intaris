@@ -102,6 +102,10 @@ def generate_intention(
     )
 
     if not recent_tools and not recent_messages:
+        logger.debug(
+            "No tool calls or messages for intention update: session=%s",
+            session_id,
+        )
         return None
 
     # Build tool call summary
@@ -203,6 +207,12 @@ def generate_intention(
         raw = llm.generate(messages, max_tokens=500)
         intention = raw.strip().strip('"').strip("'")
         if not intention or len(intention) < 5:
+            logger.info(
+                "LLM returned too-short intention (%d chars) for session=%s: %r",
+                len(intention or ""),
+                session_id,
+                intention,
+            )
             return None
 
         # Truncate to 500 chars
@@ -534,6 +544,11 @@ class IntentionBarrier:
             context: Optional conversational context for intention generation.
         """
         user_id, session_id = key
+        # Snapshot the timestamp set by trigger() so the finally block
+        # can tell whether a newer trigger has overwritten it (cancel-
+        # and-restart).  Without this guard, the cancelled task's
+        # cleanup would delete the newer trigger's timestamp.
+        my_trigger_time = self._last_user_message_time.get(key)
         try:
             loop = asyncio.get_running_loop()
             session_store = SessionStore(self._db)
@@ -554,7 +569,7 @@ class IntentionBarrier:
 
             if result is not None:
                 self.update_count += 1
-                logger.debug(
+                logger.info(
                     "Intention updated for user=%s session=%s: %s",
                     user_id,
                     session_id,
@@ -571,6 +586,13 @@ class IntentionBarrier:
                     if session.get("parent_session_id"):
                         self._alignment_barrier.clear_override(user_id, session_id)
                         await self._alignment_barrier.trigger(user_id, session_id)
+            else:
+                logger.info(
+                    "Intention not updated for user=%s session=%s "
+                    "(generate_intention returned None)",
+                    user_id,
+                    session_id,
+                )
         except asyncio.CancelledError:
             logger.debug(
                 "Intention update cancelled (superseded) for user=%s session=%s",
@@ -596,4 +618,8 @@ class IntentionBarrier:
             # done.  This prevents wait() from doing a spurious arrival
             # wait on subsequent evaluate calls — the intention update
             # has already completed.
-            self._last_user_message_time.pop(key, None)
+            # Only clear if no newer trigger has overwritten our timestamp
+            # (cancel-and-restart: the cancelled task must not delete the
+            # newer trigger's timestamp).
+            if self._last_user_message_time.get(key) == my_trigger_time:
+                self._last_user_message_time.pop(key, None)
