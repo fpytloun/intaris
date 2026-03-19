@@ -83,7 +83,7 @@ function toolSubtitle(tool, args) {
 
   if (['read', 'write', 'edit', 'mcp_read', 'mcp_write', 'mcp_edit'].includes(t))
     return args.filePath || args.file_path || args.path || '';
-  if (['bash', 'mcp_bash'].includes(t))
+  if (['bash', 'mcp_bash', 'exec'].includes(t))
     return (args.command || '').substring(0, 100);
   if (['glob', 'mcp_glob'].includes(t))
     return args.pattern || '';
@@ -108,7 +108,7 @@ function formatArgsDisplay(tool, args) {
   const t = (tool || '').toLowerCase();
 
   // For bash, show just the command
-  if (['bash', 'mcp_bash'].includes(t) && args.command) {
+  if (['bash', 'mcp_bash', 'exec'].includes(t) && args.command) {
     return args.command;
   }
 
@@ -216,8 +216,9 @@ function processOpenCode(events) {
   const evaluationsBySeq = [];
 
   for (const event of events) {
-    if (event.type === 'tool_result' && event.data?.callID) {
-      toolResultsByCallId.set(event.data.callID, event);
+    if (event.type === 'tool_result') {
+      const cid = event.data?.callID || event.data?.call_id || event.data?.toolCallId;
+      if (cid) toolResultsByCallId.set(cid, event);
     }
     if (event.type === 'evaluation') {
       evaluationsBySeq.push(event);
@@ -361,7 +362,7 @@ function processOpenCode(events) {
 
     // ── Tool call → correlate with evaluation + result ──
     if (event.type === 'tool_call') {
-      const callID = data.callID || data.call_id;
+      const callID = data.callID || data.call_id || data.toolCallId;
       const toolName = data.tool || '?';
       const args = data.args || {};
 
