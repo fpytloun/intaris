@@ -203,8 +203,11 @@ class AuditStore:
             conditions.append("record_type = ?")
             params.append(record_type)
         if tool:
-            conditions.append("tool = ?")
-            params.append(tool)
+            if self._db.backend == "postgresql":
+                conditions.append("tool ILIKE ?")
+            else:
+                conditions.append("tool LIKE ? COLLATE NOCASE")
+            params.append(f"%{tool}%")
         if decision:
             conditions.append("decision = ?")
             params.append(decision)

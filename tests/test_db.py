@@ -413,6 +413,104 @@ class TestAuditStore:
             audit_store.resolve_escalation("call_ar", "deny", user_id=TEST_USER)
 
 
+class TestAuditToolFilter:
+    """Test case-insensitive substring matching for tool name filter."""
+
+    def _create_session(self, session_store, session_id="sess_tf", user_id=TEST_USER):
+        try:
+            session_store.create(
+                user_id=user_id, session_id=session_id, intention="Test"
+            )
+        except ValueError:
+            pass
+
+    def test_tool_filter_substring_match(self, audit_store, session_store):
+        """Searching for 'HassBroadcast' finds 'hass:HassBroadcast'."""
+        self._create_session(session_store)
+        audit_store.insert(
+            call_id="call_tf1",
+            user_id=TEST_USER,
+            session_id="sess_tf",
+            agent_id=None,
+            tool="hass:HassBroadcast",
+            args_redacted={"message": "hello"},
+            classification="write",
+            evaluation_path="llm",
+            decision="approve",
+            risk="low",
+            reasoning="test",
+            latency_ms=10,
+        )
+
+        result = audit_store.query(user_id=TEST_USER, tool="HassBroadcast")
+        assert result["total"] == 1
+        assert result["items"][0]["tool"] == "hass:HassBroadcast"
+
+    def test_tool_filter_case_insensitive(self, audit_store, session_store):
+        """Searching for 'hassbroadcast' finds 'hass:HassBroadcast'."""
+        self._create_session(session_store)
+        audit_store.insert(
+            call_id="call_tf2",
+            user_id=TEST_USER,
+            session_id="sess_tf",
+            agent_id=None,
+            tool="hass:HassBroadcast",
+            args_redacted={},
+            classification="write",
+            evaluation_path="llm",
+            decision="approve",
+            risk="low",
+            reasoning="test",
+            latency_ms=10,
+        )
+
+        result = audit_store.query(user_id=TEST_USER, tool="hassbroadcast")
+        assert result["total"] >= 1
+
+    def test_tool_filter_server_prefix(self, audit_store, session_store):
+        """Searching for 'tavily' finds all tavily tools."""
+        self._create_session(session_store)
+        for i, tool in enumerate(["tavily:tavily_search", "tavily:tavily_extract"]):
+            audit_store.insert(
+                call_id=f"call_tf3_{i}",
+                user_id=TEST_USER,
+                session_id="sess_tf",
+                agent_id=None,
+                tool=tool,
+                args_redacted={},
+                classification="write",
+                evaluation_path="llm",
+                decision="approve",
+                risk="low",
+                reasoning="test",
+                latency_ms=10,
+            )
+
+        result = audit_store.query(user_id=TEST_USER, tool="tavily")
+        assert result["total"] == 2
+
+    def test_tool_filter_exact_still_works(self, audit_store, session_store):
+        """Searching for 'hass:HassBroadcast' still works."""
+        self._create_session(session_store)
+        audit_store.insert(
+            call_id="call_tf4",
+            user_id=TEST_USER,
+            session_id="sess_tf",
+            agent_id=None,
+            tool="hass:HassBroadcast",
+            args_redacted={},
+            classification="write",
+            evaluation_path="llm",
+            decision="approve",
+            risk="low",
+            reasoning="test",
+            latency_ms=10,
+        )
+
+        result = audit_store.query(user_id=TEST_USER, tool="hass:HassBroadcast")
+        assert result["total"] >= 1
+
+
 class TestAuditIsolation:
     """Test that audit records are isolated by user_id."""
 
