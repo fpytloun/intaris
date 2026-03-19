@@ -243,6 +243,105 @@ class TestSessionSweep:
         transitioned = session_store.sweep_idle_sessions(cutoff)
         assert len(transitioned) == 0  # Completed sessions not swept
 
+    def test_sweep_skips_parent_with_active_children(self, session_store):
+        """Parent session stays active while it has active child sessions."""
+        from datetime import datetime, timedelta, timezone
+
+        # Create parent and child
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-1",
+            intention="Parent session",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-1",
+            intention="Child session",
+            parent_session_id="parent-1",
+        )
+
+        # Backdate parent (inactive for 1 hour) but keep child recent
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with session_store._db.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_activity_at = ? "
+                "WHERE session_id = 'parent-1'",
+                (old_time,),
+            )
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        transitioned = session_store.sweep_idle_sessions(cutoff)
+
+        # Parent should NOT be swept — it has an active child
+        assert len(transitioned) == 0
+        parent = session_store.get("parent-1", user_id="user-1")
+        assert parent["status"] == "active"
+
+    def test_sweep_parent_after_children_complete(self, session_store):
+        """Parent becomes eligible for sweep once all children are completed."""
+        from datetime import datetime, timedelta, timezone
+
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-2",
+            intention="Parent session",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-2",
+            intention="Child session",
+            parent_session_id="parent-2",
+        )
+
+        # Complete the child and backdate the parent
+        session_store.update_status("child-2", "completed", user_id="user-1")
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with session_store._db.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_activity_at = ? "
+                "WHERE session_id = 'parent-2'",
+                (old_time,),
+            )
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        transitioned = session_store.sweep_idle_sessions(cutoff)
+
+        # Parent should be swept — child is completed
+        assert len(transitioned) == 1
+        assert transitioned[0] == ("user-1", "parent-2")
+
+    def test_sweep_skips_parent_with_idle_children(self, session_store):
+        """Parent stays active even if children are idle (not completed)."""
+        from datetime import datetime, timedelta, timezone
+
+        session_store.create(
+            user_id="user-1",
+            session_id="parent-3",
+            intention="Parent session",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="child-3",
+            intention="Child session",
+            parent_session_id="parent-3",
+        )
+
+        # Set child to idle, backdate parent
+        session_store.update_status("child-3", "idle", user_id="user-1")
+        old_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        with session_store._db.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_activity_at = ? "
+                "WHERE session_id = 'parent-3'",
+                (old_time,),
+            )
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        transitioned = session_store.sweep_idle_sessions(cutoff)
+
+        # Parent should NOT be swept — idle child is still alive
+        assert len(transitioned) == 0
+
 
 class TestSessionActivity:
     """Test session activity tracking."""

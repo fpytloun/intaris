@@ -289,6 +289,10 @@ class SessionStore:
         Uses an atomic conditional UPDATE to prevent TOCTOU races
         between the sweeper and concurrent evaluate calls.
 
+        Sessions that have active or idle child sessions are excluded —
+        a parent should stay active as long as any of its children are
+        still running.
+
         Args:
             cutoff_time: ISO timestamp. Sessions with last_activity_at
                 before this time are transitioned to idle.
@@ -305,6 +309,12 @@ class SessionStore:
                 WHERE status = 'active'
                   AND last_activity_at IS NOT NULL
                   AND last_activity_at < ?
+                  AND NOT EXISTS (
+                    SELECT 1 FROM sessions AS child
+                    WHERE child.parent_session_id = sessions.session_id
+                      AND child.user_id = sessions.user_id
+                      AND child.status IN ('active', 'idle')
+                  )
                 RETURNING user_id, session_id
                 """,
                 (now, cutoff_time),
