@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import time
 from typing import Any
 
 from intaris.audit import AuditStore
@@ -97,7 +98,7 @@ def generate_intention(
         session_id, user_id=user_id, limit=10, record_type="tool_call"
     )
     recent_messages = audit_store.get_recent(
-        session_id, user_id=user_id, limit=5, record_type="reasoning"
+        session_id, user_id=user_id, limit=20, record_type="reasoning"
     )
 
     if not recent_tools and not recent_messages:
@@ -112,7 +113,7 @@ def generate_intention(
         brief = ""
         if isinstance(args, dict):
             if "command" in args:
-                brief = f": {str(args['command'])[:100]}"
+                brief = f": {str(args['command'])}"
             elif "filePath" in args:
                 brief = f": {args['filePath']}"
             elif "path" in args:
@@ -126,7 +127,7 @@ def generate_intention(
         if content:
             if content.startswith("User message: "):
                 content = content[len("User message: ") :]
-            user_messages.append(content[:200])
+            user_messages.append(content)
 
     # Build prompt with user messages as primary signal.
     # All untrusted data is sanitized and wrapped in boundary tags.
@@ -271,6 +272,12 @@ class IntentionBarrier:
         # to set it. This avoids polling — trigger() wakes waiters instantly.
         self._arrival_events: dict[tuple[str, str], asyncio.Event] = {}
 
+        # Tracks when a user message triggered an intention update per
+        # session.  Used by wait() to detect the /evaluate-before-/reasoning
+        # race condition without relying on a client-supplied hint.
+        # Set at the start of trigger(), cleared when _run() completes.
+        self._last_user_message_time: dict[tuple[str, str], float] = {}
+
         # Metrics
         self.wait_count: int = 0
         self.timeout_count: int = 0
@@ -307,6 +314,7 @@ class IntentionBarrier:
             "arrival_wait_count": self.arrival_wait_count,
             "arrival_hit_count": self.arrival_hit_count,
             "arrival_timeout_count": self.arrival_timeout_count,
+            "user_message_tracked": len(self._last_user_message_time),
         }
 
     async def trigger(
@@ -333,6 +341,11 @@ class IntentionBarrier:
                 last response) to help interpret short user replies.
         """
         key = (user_id, session_id)
+
+        # Record that a user message triggered an update for this session.
+        # Used by wait() to detect the /evaluate-before-/reasoning race
+        # without relying on a client-supplied intention_pending hint.
+        self._last_user_message_time[key] = time.monotonic()
 
         # Wake any evaluate endpoint waiting for this trigger to arrive.
         # This handles the race where /evaluate arrives before /reasoning.
@@ -377,9 +390,9 @@ class IntentionBarrier:
         """Wait for a pending intention update to complete.
 
         Called from the evaluate endpoint before running the evaluator.
-        If no update is pending, returns immediately — unless
-        ``intention_pending`` is True, in which case we wait for the
-        /reasoning call to arrive and trigger the barrier first.
+        If no update is pending, returns immediately — unless a user
+        message was recently received (tracked server-side), in which
+        case we wait for the barrier to be triggered first.
 
         The arrival wait uses an asyncio.Event for zero-latency wakeup:
         trigger() sets the event as soon as /reasoning arrives, so there
@@ -388,10 +401,10 @@ class IntentionBarrier:
         Args:
             user_id: Tenant identifier.
             session_id: Session to check.
-            intention_pending: Client hint that a user message was just
-                sent via POST /reasoning and an intention update is
-                expected. When True and no barrier entry exists yet,
-                waits for trigger() to be called.
+            intention_pending: Deprecated — no longer used.  The server
+                now tracks user message arrival times internally via
+                ``_last_user_message_time``.  Kept for backward
+                compatibility with existing clients.
 
         Returns:
             True if an update was awaited (or timed out), False if
@@ -400,11 +413,18 @@ class IntentionBarrier:
         key = (user_id, session_id)
         entry = self._pending.get(key)
 
-        # When the client signals intention_pending but /reasoning hasn't
-        # arrived yet (no barrier entry), wait for trigger() to be called.
-        # Uses asyncio.Event for instant wakeup — no polling loop.
-        if entry is None and intention_pending:
-            entry = await self._wait_for_arrival(key)
+        # When no barrier entry exists, check whether a user message
+        # was received recently enough that /evaluate may have raced
+        # ahead of /reasoning completing.  This replaces the client-
+        # supplied intention_pending hint — the server tracks its own
+        # state so all clients benefit without needing flag management.
+        if entry is None:
+            last_msg = self._last_user_message_time.get(key)
+            if (
+                last_msg is not None
+                and (time.monotonic() - last_msg) < self._poll_timeout
+            ):
+                entry = await self._wait_for_arrival(key)
 
         if entry is None:
             return False
@@ -572,3 +592,8 @@ class IntentionBarrier:
             await asyncio.sleep(0)
             if self._pending.get(key, (None, None))[0] is event:
                 del self._pending[key]
+            # Clear the user message timestamp now that the barrier is
+            # done.  This prevents wait() from doing a spurious arrival
+            # wait on subsequent evaluate calls — the intention update
+            # has already completed.
+            self._last_user_message_time.pop(key, None)

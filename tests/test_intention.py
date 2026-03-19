@@ -509,30 +509,39 @@ class TestIntentionBarrier:
 
 
 class TestIntentionBarrierArrivalWait:
-    """Tests for the arrival-wait mechanism (intention_pending race fix).
+    """Tests for the arrival-wait mechanism (server-side timestamp).
 
     When /evaluate arrives before /reasoning, the barrier uses an
     asyncio.Event to wait for trigger() to be called, avoiding the
     race condition where the evaluator proceeds with a stale intention.
+
+    The arrival wait is now triggered by the server-side
+    ``_last_user_message_time`` timestamp (set by ``trigger()``) rather
+    than a client-supplied ``intention_pending`` hint.
     """
 
     def test_arrival_hit_trigger_arrives_in_time(self, db, session_store, mock_llm):
-        """intention_pending=True + trigger arrives → waits for completion."""
+        """Recent user message timestamp + trigger arrives → waits for completion."""
+        import time
+
         session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
         _insert_tool_call(db, "user-1", "sess-1")
 
         barrier = _make_barrier(db, mock_llm, poll_timeout_ms=2000)
 
         async def _test():
-            # Simulate: /evaluate arrives first with intention_pending=True,
-            # then /reasoning arrives 100ms later and triggers the barrier.
+            # Simulate: a prior trigger set the timestamp (as happens in
+            # the /reasoning endpoint), then another trigger arrives
+            # while wait() is checking the timestamp.
+            barrier._last_user_message_time[("user-1", "sess-1")] = time.monotonic()
+
             async def delayed_trigger():
                 await asyncio.sleep(0.1)
                 await barrier.trigger("user-1", "sess-1")
 
             asyncio.create_task(delayed_trigger())
 
-            result = await barrier.wait("user-1", "sess-1", intention_pending=True)
+            result = await barrier.wait("user-1", "sess-1")
             assert result is True
             assert barrier.arrival_wait_count == 1
             assert barrier.arrival_hit_count == 1
@@ -542,11 +551,16 @@ class TestIntentionBarrierArrivalWait:
         asyncio.run(_test())
 
     def test_arrival_timeout_reasoning_never_arrives(self, db, mock_llm):
-        """intention_pending=True + /reasoning never arrives → timeout."""
+        """Recent timestamp but /reasoning never arrives → timeout."""
+        import time
+
         barrier = _make_barrier(db, mock_llm, poll_timeout_ms=200)
 
         async def _test():
-            result = await barrier.wait("user-1", "sess-1", intention_pending=True)
+            # Set a recent timestamp to simulate the race condition
+            barrier._last_user_message_time[("user-1", "sess-1")] = time.monotonic()
+
+            result = await barrier.wait("user-1", "sess-1")
             # Should return False — no entry was ever created
             assert result is False
             assert barrier.arrival_wait_count == 1
@@ -556,12 +570,31 @@ class TestIntentionBarrierArrivalWait:
 
         asyncio.run(_test())
 
-    def test_no_flag_unchanged_behavior(self, db, mock_llm):
-        """intention_pending=False (default) → existing behavior unchanged."""
+    def test_no_timestamp_unchanged_behavior(self, db, mock_llm):
+        """No recent user message timestamp → existing behavior unchanged."""
         barrier = _make_barrier(db, mock_llm)
 
         async def _test():
-            # No trigger, no flag → returns False immediately
+            # No trigger, no timestamp → returns False immediately
+            result = await barrier.wait("user-1", "sess-1")
+            assert result is False
+            assert barrier.arrival_wait_count == 0
+            assert barrier.wait_count == 0
+
+        asyncio.run(_test())
+
+    def test_stale_timestamp_skips_arrival_wait(self, db, mock_llm):
+        """Old timestamp (beyond poll_timeout) → no arrival wait."""
+        import time
+
+        barrier = _make_barrier(db, mock_llm, poll_timeout_ms=200)
+
+        async def _test():
+            # Set a timestamp far in the past (beyond poll_timeout)
+            barrier._last_user_message_time[("user-1", "sess-1")] = (
+                time.monotonic() - 60.0
+            )
+
             result = await barrier.wait("user-1", "sess-1")
             assert result is False
             assert barrier.arrival_wait_count == 0
@@ -570,13 +603,17 @@ class TestIntentionBarrierArrivalWait:
         asyncio.run(_test())
 
     def test_concurrent_waiters_share_arrival_event(self, db, session_store, mock_llm):
-        """Multiple evaluate calls with intention_pending share one arrival event."""
+        """Multiple evaluate calls with recent timestamp share one arrival event."""
+        import time
+
         session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
         _insert_tool_call(db, "user-1", "sess-1")
 
         barrier = _make_barrier(db, mock_llm, poll_timeout_ms=2000)
 
         async def _test():
+            barrier._last_user_message_time[("user-1", "sess-1")] = time.monotonic()
+
             # Both evaluate calls arrive before /reasoning
             async def delayed_trigger():
                 await asyncio.sleep(0.1)
@@ -588,8 +625,8 @@ class TestIntentionBarrierArrivalWait:
             # (or creates a new one if the first already consumed it).
             # Both should eventually succeed.
             results = await asyncio.gather(
-                barrier.wait("user-1", "sess-1", intention_pending=True),
-                barrier.wait("user-1", "sess-1", intention_pending=True),
+                barrier.wait("user-1", "sess-1"),
+                barrier.wait("user-1", "sess-1"),
             )
             # At least one should have waited and succeeded
             assert any(r is True for r in results)
@@ -599,10 +636,13 @@ class TestIntentionBarrierArrivalWait:
 
     def test_arrival_event_cleanup_on_timeout(self, db, mock_llm):
         """Arrival event is cleaned up after timeout."""
+        import time
+
         barrier = _make_barrier(db, mock_llm, poll_timeout_ms=100)
 
         async def _test():
-            await barrier.wait("user-1", "sess-1", intention_pending=True)
+            barrier._last_user_message_time[("user-1", "sess-1")] = time.monotonic()
+            await barrier.wait("user-1", "sess-1")
             # Arrival event should be cleaned up
             assert ("user-1", "sess-1") not in barrier._arrival_events
 
@@ -610,21 +650,55 @@ class TestIntentionBarrierArrivalWait:
 
     def test_arrival_event_cleanup_on_hit(self, db, session_store, mock_llm):
         """Arrival event is cleaned up after trigger arrives."""
+        import time
+
         session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
         _insert_tool_call(db, "user-1", "sess-1")
 
         barrier = _make_barrier(db, mock_llm, poll_timeout_ms=2000)
 
         async def _test():
+            barrier._last_user_message_time[("user-1", "sess-1")] = time.monotonic()
+
             async def delayed_trigger():
                 await asyncio.sleep(0.05)
                 await barrier.trigger("user-1", "sess-1")
 
             asyncio.create_task(delayed_trigger())
 
-            await barrier.wait("user-1", "sess-1", intention_pending=True)
+            await barrier.wait("user-1", "sess-1")
             # Arrival event should be cleaned up
             assert ("user-1", "sess-1") not in barrier._arrival_events
+
+        asyncio.run(_test())
+
+    def test_timestamp_cleared_after_run_completes(self, db, session_store, mock_llm):
+        """_last_user_message_time is cleared when the barrier task completes."""
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_tool_call(db, "user-1", "sess-1")
+
+        barrier = _make_barrier(db, mock_llm)
+
+        async def _test():
+            await barrier.trigger("user-1", "sess-1")
+            # Wait for the barrier to complete
+            await barrier.wait("user-1", "sess-1")
+            # Give the finally block a tick to clean up
+            await asyncio.sleep(0.05)
+            assert ("user-1", "sess-1") not in barrier._last_user_message_time
+
+        asyncio.run(_test())
+
+    def test_intention_pending_param_ignored(self, db, mock_llm):
+        """Deprecated intention_pending param is accepted but ignored."""
+        barrier = _make_barrier(db, mock_llm)
+
+        async def _test():
+            # intention_pending=True without a recent timestamp should NOT
+            # trigger arrival wait (old behavior would have waited).
+            result = await barrier.wait("user-1", "sess-1", intention_pending=True)
+            assert result is False
+            assert barrier.arrival_wait_count == 0
 
         asyncio.run(_test())
 

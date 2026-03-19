@@ -22,10 +22,9 @@ class EvaluateRequest(BaseModel):
     intention_pending: bool = Field(
         False,
         description=(
-            "Hint from the client that a user message was just sent via "
-            "POST /reasoning and an intention update is in flight. When "
-            "true, the server waits for the intention barrier to be "
-            "triggered before evaluating."
+            "Deprecated — no longer used. The server now tracks user "
+            "message arrival times internally. Kept for backward "
+            "compatibility with existing clients."
         ),
     )
 
