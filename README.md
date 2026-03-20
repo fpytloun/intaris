@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="files/banner.jpg" alt="Intaris">
+</p>
+
 # intaris
 
 Guardrails service for AI agents. Intaris sits between your AI agent and its tools, evaluating every tool call for safety and alignment before allowing execution. Works with [OpenCode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and any MCP-compatible client.
