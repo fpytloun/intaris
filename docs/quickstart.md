@@ -53,6 +53,19 @@ chmod +x ~/.claude/scripts/*.sh
 
 Merge `integrations/claude-code/hooks.json` into your `~/.claude/settings.json`. See the [Claude Code Guide](clients/claude-code.md) for details.
 
+### OpenClaw (Extension)
+
+For [OpenClaw](https://github.com/fpytloun/openclaw/tree/v2026.3.13) (version `v2026.3.13`):
+
+The Intaris extension is built into the OpenClaw repository at `extensions/intaris/`. It is loaded automatically when present. Configure via OpenClaw's settings UI or environment variables:
+
+```bash
+export INTARIS_URL=http://localhost:8060
+export INTARIS_API_KEY=your-api-key
+```
+
+The extension evaluates every tool call, manages session lifecycle, and optionally proxies upstream MCP tools. See the [OpenClaw Guide](clients/openclaw.md) for details.
+
 ### Any MCP Client (Proxy)
 
 For any MCP-compatible client, point it at Intaris's `/mcp` endpoint:

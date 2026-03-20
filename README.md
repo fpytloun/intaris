@@ -4,7 +4,7 @@
 
 # intaris
 
-Guardrails service for AI agents. Intaris sits between your AI agent and its tools, evaluating every tool call for safety and alignment before allowing execution. Works with [OpenCode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and any MCP-compatible client.
+Guardrails service for AI agents. Intaris sits between your AI agent and its tools, evaluating every tool call for safety and alignment before allowing execution. Works with [OpenCode](https://opencode.ai), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenClaw](https://github.com/fpytloun/openclaw/tree/v2026.3.13), and any MCP-compatible client.
 
 **Default-deny.** Every tool call is classified and evaluated. Read-only operations are fast-pathed; everything else goes through LLM safety evaluation. Unknown tools are never auto-approved.
 
@@ -92,6 +92,7 @@ See the [Management UI docs](docs/management-ui.md) for all tabs and features.
 |---|---|---|
 | [OpenCode](https://opencode.ai) | Plugin (`intaris.ts`) | [OpenCode Guide](docs/clients/opencode.md) |
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Hooks (bash scripts) | [Claude Code Guide](docs/clients/claude-code.md) |
+| [OpenClaw](https://github.com/fpytloun/openclaw/tree/v2026.3.13) | Extension (`@openclaw/intaris`) | [OpenClaw Guide](docs/clients/openclaw.md) |
 | Any MCP client | MCP proxy (`/mcp` endpoint) | [MCP Proxy Guide](docs/mcp-proxy.md) |
 
 **Plugin/Hooks** give fine-grained control: custom error messages, fail-open/fail-closed behavior, session lifecycle management, and behavioral analysis. **MCP proxy** is zero-code configuration but with less UX control.
@@ -137,6 +138,7 @@ See the [Benchmarking docs](docs/benchmarking.md) for methodology, scenario deta
 | [Development](docs/development.md) | Contributing, tests, and code conventions |
 | [OpenCode Integration](docs/clients/opencode.md) | OpenCode plugin setup |
 | [Claude Code Integration](docs/clients/claude-code.md) | Claude Code hooks setup |
+| [OpenClaw Integration](docs/clients/openclaw.md) | OpenClaw extension setup |
 | [Benchmarking](docs/benchmarking.md) | Guardrails benchmark system |
 
 ## License

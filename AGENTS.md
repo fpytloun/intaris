@@ -1019,6 +1019,14 @@ Client integrations live in `integrations/` and provide two approaches for each 
 - **Install**: Copy scripts to `~/.claude/scripts/`, merge `hooks.json` into `~/.claude/settings.json`.
 - **Behavioral analysis**: Tracks per-session statistics in JSON state files. Sends periodic checkpoints via `POST /checkpoint`. Signals completion via `PATCH /session/{id}/status` + `POST /session/{id}/agent-summary` on session stop.
 
+### OpenClaw
+
+- **Extension**: `@openclaw/intaris` — built-in extension in the [OpenClaw fork](https://github.com/fpytloun/openclaw/tree/v2026.3.13/extensions/intaris) (version `v2026.3.13`, not yet merged upstream). Uses OpenClaw's `api.on()` hook system with 10 hooks (`session_start`, `before_tool_call`, `after_tool_call`, `before_agent_start`, `llm_output`, `subagent_spawning`, `subagent_ended`, `agent_end`, `before_reset`, `session_end`, `gateway_stop`) plus an optional MCP tool factory.
+- **Env vars**: `INTARIS_URL`, `INTARIS_API_KEY`, `INTARIS_USER_ID`, `INTARIS_FAIL_OPEN` (default: `false`), `INTARIS_ALLOW_PATHS`, `INTARIS_ESCALATION_TIMEOUT` (default: `0`), `INTARIS_CHECKPOINT_INTERVAL` (default: `25`), `INTARIS_SESSION_RECORDING` (default: `false`), `INTARIS_MCP_TOOLS` (default: `true`). Agent ID sourced from OpenClaw's hook context (`ctx.agentId`), not configurable via env var.
+- **Install**: Extension is auto-discovered from `extensions/intaris/` via `package.json` `openclaw.extensions` field. Also configurable via OpenClaw's settings UI.
+- **Behavioral analysis**: Tracks per-session statistics (call count, approve/deny/escalate breakdown, recent tools). Forwards user messages as reasoning context. Sends periodic checkpoints via `POST /checkpoint`. Signals completion via `PATCH /session/{id}/status` + `POST /session/{id}/agent-summary` on session end.
+- **MCP tool proxy**: When `INTARIS_MCP_TOOLS=true`, registers upstream MCP tools as native OpenClaw `AgentTool` objects. Tool calls proxied through `POST /api/v1/mcp/call`. Skips `before_tool_call` evaluation for MCP tools to avoid double evaluation.
+
 ### Tool name conventions
 
 Different clients use different tool naming conventions:
@@ -1027,6 +1035,7 @@ Different clients use different tool naming conventions:
 |---|---|---|
 | **OpenCode** | `read`, `edit`, `write`, `bash` | `server_tool` (single underscore, e.g., `mnemory_add_memory`) |
 | **Claude Code** | `Read`, `Edit`, `Write`, `Bash` (capitalized) | `mcp__server__tool` (double underscore, e.g., `mcp__mnemory__add_memory`) |
+| **OpenClaw** | Native tool names | `server_tool` (single underscore via tool factory, e.g., `mnemory_add_memory`) |
 | **Intaris MCP proxy** | N/A | `server_name:tool_name` (colon, e.g., `mnemory:add_memory`) |
 
 Session policies (fnmatch patterns) must use the naming convention of the integration approach being used.
