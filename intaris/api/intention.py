@@ -239,27 +239,30 @@ async def update_session(
     http_request: Request,
     ctx: SessionContext = Depends(get_session_context),
 ) -> SessionResponse:
-    """Update session intention and/or details."""
+    """Update session details.
+
+    The ``intention`` field in the request body is silently ignored —
+    intention is managed exclusively by the IntentionBarrier (from user
+    messages via ``POST /reasoning``) and the bootstrap mechanism.
+    Client-side PATCHes must not overwrite LLM-generated intentions.
+    """
     from intaris.server import _get_db
     from intaris.session import SessionStore
+
+    if request.intention is not None:
+        logger.debug(
+            "Ignoring client intention update for session %s "
+            "(intention is managed by IntentionBarrier)",
+            session_id,
+        )
 
     try:
         store = SessionStore(_get_db())
         session = store.update_session(
             session_id,
             user_id=ctx.user_id,
-            intention=request.intention,
             details=request.details,
         )
-
-        # Cancel any pending intention barrier task — an explicit PATCH
-        # supersedes async LLM-based intention regeneration.
-        if request.intention:
-            intention_barrier = getattr(
-                http_request.app.state, "intention_barrier", None
-            )
-            if intention_barrier is not None:
-                intention_barrier.cancel(ctx.user_id, session_id)
 
         # Publish session_updated event
         event_bus = getattr(http_request.app.state, "event_bus", None)
@@ -273,17 +276,6 @@ async def update_session(
                     "details": session.get("details"),
                 }
             )
-
-        # Re-check alignment for child sessions when intention changes.
-        # Clear the override flag first so the new intention is re-evaluated
-        # (AGENTS.md: "Intention changes clear the override flag").
-        if request.intention and session.get("parent_session_id"):
-            alignment_barrier = getattr(
-                http_request.app.state, "alignment_barrier", None
-            )
-            if alignment_barrier is not None:
-                alignment_barrier.clear_override(ctx.user_id, session_id)
-                await alignment_barrier.trigger(ctx.user_id, session_id)
 
         return SessionResponse(**session)
     except ValueError as e:
