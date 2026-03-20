@@ -187,6 +187,15 @@ class MCPConfig:
         default_factory=lambda: _env_int("MCP_UPSTREAM_TIMEOUT_MS", 30000)
     )
 
+    # Base directory for MCP server package caches (npx, uvx).
+    # Per-server subdirectories are created automatically to isolate
+    # concurrent installs and prevent cache corruption.
+    cache_dir: str = field(
+        default_factory=lambda: (
+            _env("MCP_CACHE_DIR") or os.path.join(_data_dir(), "mcp-cache")
+        )
+    )
+
 
 @dataclass
 class AnalysisConfig:

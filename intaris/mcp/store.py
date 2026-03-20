@@ -346,6 +346,22 @@ class MCPServerStore:
                 (user_id, server_name, tool_name),
             )
 
+    def list_all_enabled_servers(self) -> list[dict[str, Any]]:
+        """List all enabled servers across all users.
+
+        Returns redacted view (no decrypted secrets). Used by the
+        connection manager for eager startup — secrets are decrypted
+        per-server during the connection loop.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM mcp_servers WHERE enabled = ? ORDER BY user_id, name",
+                (True,),
+            )
+            rows = cur.fetchall()
+
+        return [self._row_to_dict(row) for row in rows]
+
     def list_file_sourced_servers(self) -> list[tuple[str, str]]:
         """List all (user_id, name) pairs with source='file'.
 

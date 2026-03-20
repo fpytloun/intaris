@@ -150,9 +150,7 @@ class MCPProxy:
         if server_cfg is None:
             raise ValueError(f"Server not found: {server_name}")
 
-        mcp_session_id = self._get_or_create_mcp_session_id(user_id, None)
         client = await self._conn_mgr.get_or_connect(
-            mcp_session_id=mcp_session_id,
             server_config=server_cfg,
             user_id=user_id,
         )
@@ -167,9 +165,7 @@ class MCPProxy:
         ]
 
         # Cache the tools and server instructions.
-        instructions = self._conn_mgr.get_server_instructions(
-            mcp_session_id, server_name
-        )
+        instructions = self._conn_mgr.get_server_instructions(user_id, server_name)
         await asyncio.to_thread(
             self._server_store.update_tools_cache,
             user_id=user_id,
@@ -252,11 +248,7 @@ class MCPProxy:
                         name=server_name,
                         decrypt_secrets=True,
                     )
-                    mcp_session_id = self._get_or_create_mcp_session_id(
-                        user_id, agent_id
-                    )
                     client = await self._conn_mgr.get_or_connect(
-                        mcp_session_id=mcp_session_id,
                         server_config=server_with_secrets,
                         user_id=user_id,
                     )
@@ -271,7 +263,7 @@ class MCPProxy:
                     ]
                     # Cache the tools and server instructions.
                     instructions = self._conn_mgr.get_server_instructions(
-                        mcp_session_id, server_name
+                        user_id, server_name
                     )
                     await asyncio.to_thread(
                         self._server_store.update_tools_cache,
@@ -404,11 +396,8 @@ class MCPProxy:
                 )
             ]
 
-        mcp_session_id = self._get_or_create_mcp_session_id(user_id, agent_id)
-
         try:
             client = await self._conn_mgr.get_or_connect(
-                mcp_session_id=mcp_session_id,
                 server_config=server_with_secrets,
                 user_id=user_id,
             )
@@ -424,6 +413,8 @@ class MCPProxy:
 
         except Exception as exc:
             logger.exception("Upstream call to '%s:%s' failed", server_name, tool_name)
+            # Evict dead connection so next call reconnects.
+            await self._conn_mgr.evict(user_id, server_name)
             return [
                 TextContent(
                     type="text",
@@ -678,8 +669,7 @@ class MCPProxy:
                 "latency_ms": round((time.monotonic() - start) * 1000),
             }
 
-        # Acquire session lock to safely create/reuse the MCP session ID
-        # and persist it in the reverse index for connection pooling.
+        # Ensure session mapping exists for this user+agent pair.
         async with self._session_lock:
             mcp_session_id = self._get_or_create_mcp_session_id(user_id, agent_id)
             key = (user_id, agent_id)
@@ -693,7 +683,6 @@ class MCPProxy:
 
         try:
             client = await self._conn_mgr.get_or_connect(
-                mcp_session_id=mcp_session_id,
                 server_config=server_with_secrets,
                 user_id=user_id,
             )
@@ -720,6 +709,8 @@ class MCPProxy:
 
         except Exception as exc:
             logger.exception("Upstream call to '%s:%s' failed", server_name, tool_name)
+            # Evict dead connection so next call reconnects.
+            await self._conn_mgr.evict(user_id, server_name)
             return {
                 "content": [
                     {

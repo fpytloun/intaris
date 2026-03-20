@@ -55,7 +55,7 @@ intaris/
 │   ├── __init__.py        # Package marker
 │   ├── store.py           # MCPServerStore CRUD + tool preferences (encrypted secrets)
 │   ├── config.py          # File-based config loader with orphan reconciliation
-│   ├── client.py          # MCPConnectionManager (upstream connections, idle sweep)
+│   ├── client.py          # MCPConnectionManager (eager startup, cache isolation, idle sweep)
 │   └── proxy.py           # MCP Server with list_tools/call_tool handlers
 ├── api/
 │   ├── __init__.py        # FastAPI sub-app factory
@@ -179,6 +179,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `MCP_CONFIG_FILE` | Path to JSON file defining MCP servers (optional, reconciled on startup) |
 | `MCP_ALLOW_STDIO` | Allow stdio transport for MCP servers (default `false`) |
 | `MCP_UPSTREAM_TIMEOUT_MS` | Timeout for upstream MCP server calls in milliseconds (default `30000`) |
+| `MCP_CACHE_DIR` | Base directory for per-server package caches (npx, uvx). Defaults to `{DATA_DIR}/mcp-cache`. Per-server subdirectories are created automatically to isolate concurrent installs and prevent cache corruption. |
 | `INTENTION_BARRIER_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for a pending intention update (default `1000`) |
 | `INTENTION_BARRIER_POLL_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for `/reasoning` to arrive when `intention_pending=true` (default `2000`) |
 | `ALIGNMENT_BARRIER_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for a pending alignment check (default `15000`) |
@@ -901,7 +902,7 @@ Intaris can act as an MCP proxy, sitting between LLM clients (Claude Code, OpenC
 |---|---|
 | `mcp/store.py` | CRUD for MCP server configs and tool preferences. Secrets encrypted at rest via `crypto.py`. Name validation: `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, max 64 chars. |
 | `mcp/config.py` | Loads server definitions from a JSON file (`MCP_CONFIG_FILE`). Reconciles orphaned `source="file"` entries on restart. |
-| `mcp/client.py` | `MCPConnectionManager` — lazy upstream connections with 30-min idle timeout, max 10 connections per user, background sweep task. Supports stdio, HTTP, and SSE transports. |
+| `mcp/client.py` | `MCPConnectionManager` — eager startup of configured servers, per-user connection sharing `(user_id, server_name)`, per-server cache isolation for npx/uvx, retry with cache cleanup, stale connection eviction, 30-min idle timeout, background sweep. Supports stdio, HTTP, and SSE transports. |
 | `mcp/proxy.py` | `MCPProxy` — MCP server that handles `tools/list` and `tools/call`. Auto-creates sessions, aggregates tools with 5-min cache, routes calls through the evaluator. |
 | `crypto.py` | Fernet encrypt/decrypt for secrets at rest. `ValueError` if `INTARIS_ENCRYPTION_KEY` missing when secrets are present. |
 

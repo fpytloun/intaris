@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
@@ -13,6 +14,7 @@ from intaris.classifier import Classification, classify
 from intaris.config import DBConfig
 from intaris.db import Database
 from intaris.decision import make_fast_decision
+from intaris.mcp.client import MCPConnectionManager
 from intaris.mcp.store import MCPServerStore
 from intaris.session import SessionStore
 
@@ -748,3 +750,219 @@ class TestDBMigration:
                 "WHERE type='index' AND name='idx_audit_escalation_retry'"
             )
             assert cur.fetchone() is not None
+
+
+# ── MCPConnectionManager Tests ───────────────────────────────────────
+
+
+class TestCacheEnvForStdio:
+    """Test per-server cache isolation env var injection."""
+
+    def test_npx_gets_npm_cache(self, tmp_path):
+        """npx command should get NPM_CONFIG_CACHE injected."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env = mgr._cache_env_for_stdio("npx", "user1", "tavily")
+        assert "NPM_CONFIG_CACHE" in env
+        assert "user1" in env["NPM_CONFIG_CACHE"]
+        assert "tavily" in env["NPM_CONFIG_CACHE"]
+        assert "npm" in env["NPM_CONFIG_CACHE"]
+        # Directory should be created.
+        assert os.path.isdir(env["NPM_CONFIG_CACHE"])
+
+    def test_npx_cmd_gets_npm_cache(self, tmp_path):
+        """npx.cmd (Windows) should also get NPM_CONFIG_CACHE."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env = mgr._cache_env_for_stdio("npx.cmd", "user1", "server1")
+        assert "NPM_CONFIG_CACHE" in env
+
+    def test_uvx_gets_uv_cache(self, tmp_path):
+        """uvx command should get UV_CACHE_DIR injected."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env = mgr._cache_env_for_stdio("uvx", "user1", "myserver")
+        assert "UV_CACHE_DIR" in env
+        assert "user1" in env["UV_CACHE_DIR"]
+        assert "myserver" in env["UV_CACHE_DIR"]
+        assert "uv" in env["UV_CACHE_DIR"]
+        assert os.path.isdir(env["UV_CACHE_DIR"])
+
+    def test_other_command_no_cache(self, tmp_path):
+        """Non-npx/uvx commands should get empty env."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env = mgr._cache_env_for_stdio("node", "user1", "server1")
+        assert env == {}
+
+    def test_no_cache_dir_no_env(self):
+        """Without cache_dir, no env vars are injected."""
+        mgr = MCPConnectionManager(cache_dir="")
+        env = mgr._cache_env_for_stdio("npx", "user1", "server1")
+        assert env == {}
+
+    def test_full_path_npx(self, tmp_path):
+        """Full path to npx should still be detected."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env = mgr._cache_env_for_stdio("/usr/bin/npx", "user1", "server1")
+        assert "NPM_CONFIG_CACHE" in env
+
+    def test_path_traversal_user_id(self, tmp_path):
+        """user_id with path traversal should be rejected."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env = mgr._cache_env_for_stdio("npx", "../../etc", "server1")
+        assert env == {}
+
+    def test_path_traversal_dotdot_in_user_id(self, tmp_path):
+        """user_id containing '..' should be rejected."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env = mgr._cache_env_for_stdio("npx", "user/../admin", "server1")
+        assert env == {}
+
+    def test_empty_user_id(self, tmp_path):
+        """Empty user_id should be rejected."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env = mgr._cache_env_for_stdio("npx", "", "server1")
+        assert env == {}
+
+    def test_cache_dirs_isolated_per_server(self, tmp_path):
+        """Different servers should get different cache dirs."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env1 = mgr._cache_env_for_stdio("npx", "user1", "server-a")
+        env2 = mgr._cache_env_for_stdio("npx", "user1", "server-b")
+        assert env1["NPM_CONFIG_CACHE"] != env2["NPM_CONFIG_CACHE"]
+
+    def test_cache_dirs_isolated_per_user(self, tmp_path):
+        """Different users should get different cache dirs."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        env1 = mgr._cache_env_for_stdio("npx", "user1", "server1")
+        env2 = mgr._cache_env_for_stdio("npx", "user2", "server1")
+        assert env1["NPM_CONFIG_CACHE"] != env2["NPM_CONFIG_CACHE"]
+
+    def test_cache_path_never_escapes_base(self, tmp_path):
+        """Cache paths must always be under the base cache_dir."""
+        mgr = MCPConnectionManager(cache_dir=str(tmp_path))
+        # Normal case.
+        env = mgr._cache_env_for_stdio("npx", "user1", "server1")
+        assert env["NPM_CONFIG_CACHE"].startswith(str(tmp_path))
+        # Adversarial user_id — should return empty.
+        env = mgr._cache_env_for_stdio("npx", "../../../tmp", "server1")
+        assert env == {}
+
+
+class TestListAllEnabledServers:
+    """Test cross-user server listing for eager startup."""
+
+    def test_lists_enabled_across_users(self, server_store):
+        """Should list enabled servers from all users."""
+        server_store.upsert_server(
+            user_id="user-a",
+            name="server1",
+            transport="streamable-http",
+            url="https://a.example.com",
+        )
+        server_store.upsert_server(
+            user_id="user-b",
+            name="server2",
+            transport="streamable-http",
+            url="https://b.example.com",
+        )
+        servers = server_store.list_all_enabled_servers()
+        names = [(s["user_id"], s["name"]) for s in servers]
+        assert ("user-a", "server1") in names
+        assert ("user-b", "server2") in names
+
+    def test_excludes_disabled(self, server_store):
+        """Should exclude disabled servers."""
+        server_store.upsert_server(
+            user_id="user-a",
+            name="enabled-server",
+            transport="streamable-http",
+            url="https://a.example.com",
+            enabled=True,
+        )
+        server_store.upsert_server(
+            user_id="user-a",
+            name="disabled-server",
+            transport="streamable-http",
+            url="https://b.example.com",
+            enabled=False,
+        )
+        servers = server_store.list_all_enabled_servers()
+        names = [s["name"] for s in servers]
+        assert "enabled-server" in names
+        assert "disabled-server" not in names
+
+    def test_returns_redacted_view(self, server_store):
+        """Should not include decrypted secrets."""
+        server_store.upsert_server(
+            user_id="user-a",
+            name="secret-server",
+            transport="streamable-http",
+            url="https://a.example.com",
+            headers={"Authorization": "Bearer secret"},
+        )
+        servers = server_store.list_all_enabled_servers()
+        assert len(servers) == 1
+        # Should have has_headers flag, not decrypted headers.
+        assert servers[0].get("has_headers") is True
+        assert "headers" not in servers[0]
+
+
+class TestConnectionManagerEvict:
+    """Test stale connection eviction."""
+
+    def test_evict_removes_connection(self):
+        """evict() should remove a connection from the cache."""
+
+        async def _test():
+            mgr = MCPConnectionManager()
+            from unittest.mock import AsyncMock, MagicMock
+
+            mock_session = MagicMock(spec=["call_tool", "list_tools"])
+            mock_exit_stack = AsyncMock()
+            mock_exit_stack.aclose = AsyncMock()
+
+            from intaris.mcp.client import _Connection
+
+            conn = _Connection(
+                session=mock_session,
+                exit_stack=mock_exit_stack,
+                server_name="test-server",
+                user_id="user1",
+            )
+            mgr._connections[("user1", "test-server")] = conn
+
+            assert mgr.connection_count() == 1
+            await mgr.evict("user1", "test-server")
+            assert mgr.connection_count() == 0
+            mock_exit_stack.aclose.assert_awaited_once()
+
+        asyncio.run(_test())
+
+    def test_evict_nonexistent_is_noop(self):
+        """evict() on a non-existent connection should be a no-op."""
+
+        async def _test():
+            mgr = MCPConnectionManager()
+            await mgr.evict("user1", "nonexistent")
+            assert mgr.connection_count() == 0
+
+        asyncio.run(_test())
+
+
+class TestSafePathComponent:
+    """Test path component sanitization."""
+
+    def test_valid_components(self):
+        assert MCPConnectionManager._is_safe_path_component("user1") is True
+        assert MCPConnectionManager._is_safe_path_component("user-name") is True
+        assert MCPConnectionManager._is_safe_path_component("user.name") is True
+        assert MCPConnectionManager._is_safe_path_component("user@example.com") is True
+        assert MCPConnectionManager._is_safe_path_component("User_Name") is True
+
+    def test_invalid_components(self):
+        assert MCPConnectionManager._is_safe_path_component("") is False
+        assert MCPConnectionManager._is_safe_path_component("..") is False
+        assert MCPConnectionManager._is_safe_path_component("../etc") is False
+        assert MCPConnectionManager._is_safe_path_component("a" * 257) is False
+        assert (
+            MCPConnectionManager._is_safe_path_component("-starts-with-dash") is False
+        )
+        assert MCPConnectionManager._is_safe_path_component("has spaces") is False

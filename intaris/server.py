@@ -621,9 +621,13 @@ def _init_mcp_proxy(cfg):
         except Exception:
             logger.exception("Failed to sync MCP config file")
 
+    server_store = MCPServerStore(db, cfg.mcp.encryption_key)
+
     conn_mgr = MCPConnectionManager(
         upstream_timeout_ms=cfg.mcp.upstream_timeout_ms,
         allow_stdio=cfg.mcp.allow_stdio,
+        cache_dir=cfg.mcp.cache_dir,
+        server_store=server_store,
     )
 
     return MCPProxy(
@@ -631,7 +635,7 @@ def _init_mcp_proxy(cfg):
         evaluator=_get_evaluator(),
         session_store=SessionStore(db),
         audit_store=AuditStore(db),
-        server_store=MCPServerStore(db, cfg.mcp.encryption_key),
+        server_store=server_store,
         upstream_timeout_ms=cfg.mcp.upstream_timeout_ms,
     )
 
