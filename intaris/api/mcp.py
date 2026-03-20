@@ -424,10 +424,25 @@ async def call_tool(
     if mcp_proxy is None:
         raise HTTPException(status_code=503, detail="MCP proxy is not available")
 
+    # Resolve agent_id: prefer X-Agent-Id header, fall back to the
+    # session's stored agent_id.  Every audit record must have an agent.
+    agent_id = ctx.agent_id
+    if not agent_id and body.session_id:
+        try:
+            from intaris.server import _get_db
+            from intaris.session import SessionStore
+
+            session = SessionStore(_get_db()).get(
+                session_id=body.session_id, user_id=ctx.user_id
+            )
+            agent_id = session.get("agent_id")
+        except (ValueError, Exception):
+            pass  # Session not found — evaluator will catch it.
+
     try:
         result = await mcp_proxy.call_tool_rest(
             user_id=ctx.user_id,
-            agent_id=ctx.agent_id,
+            agent_id=agent_id,
             session_id=body.session_id,
             server_name=body.server,
             tool_name=body.tool,
