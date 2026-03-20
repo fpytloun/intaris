@@ -194,8 +194,8 @@ class TestGenerateIntention:
         )
         assert result is None
 
-    def test_truncates_long_intention(self, db, session_store):
-        """generate_intention truncates intention to 500 chars."""
+    def test_preserves_long_intention(self, db, session_store):
+        """generate_intention preserves full LLM output without truncation."""
         llm = MagicMock()
         llm.generate.return_value = "A" * 600
 
@@ -210,7 +210,7 @@ class TestGenerateIntention:
             session_id="sess-1",
         )
         assert result is not None
-        assert len(result) == 500
+        assert len(result) == 600
 
     def test_publishes_event_bus(self, db, session_store, mock_llm):
         """generate_intention publishes session_updated event."""

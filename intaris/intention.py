@@ -189,12 +189,18 @@ def generate_intention(
         {
             "role": "system",
             "content": (
-                "You are a concise summarizer. Given context from a coding "
-                "session (user messages and tool calls), generate a single "
-                "sentence (max 100 words) describing what the user is working "
-                "on. User messages are the most important signal — they "
-                "capture the user's actual intent. Focus on the goal, not "
-                f"the tools.\n\n{ANTI_INJECTION_PREAMBLE}"
+                "You update a session's intention description. "
+                "Sessions are long-lived and cover multiple topics over time.\n\n"
+                "Rules:\n"
+                "- Retain goals from the current intention that are still relevant\n"
+                "- Add new goals introduced in recent user messages\n"
+                "- Remove goals only when clearly completed or abandoned\n"
+                "- When in doubt, keep a topic\n"
+                "- User messages are the primary signal — focus on goals, "
+                "not tools used\n"
+                "- Keep the result to 2-3 sentences\n\n"
+                "Output only the updated intention text, nothing else.\n\n"
+                f"{ANTI_INJECTION_PREAMBLE}"
             ),
         },
         {
@@ -215,8 +221,6 @@ def generate_intention(
             )
             return None
 
-        # Truncate to 500 chars
-        intention = intention[:500]
 
         session_store.update_session(
             session_id,
