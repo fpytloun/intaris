@@ -37,6 +37,11 @@ Hierarchical session management with tree view, filtering, and expandable detail
   <br><em>Sessions -- tree view with parent/child hierarchy, expandable details, and recent evaluations</em>
 </p>
 
+<p align="center">
+  <img src="../files/screenshots/ui-session-suspicious.png" width="800" alt="Suspicious Session">
+  <br><em>Sessions -- suspicious session detail with evaluation reasoning and risk assessment</em>
+</p>
+
 **Features:**
 - Tree view toggle: See parent/child session hierarchy with indented child sessions
 - Status filters: All, Active, Idle, Completed, Suspended, Terminated
@@ -53,6 +58,11 @@ Filterable audit log with expandable record details.
 <p align="center">
   <img src="../files/screenshots/ui-audit.png" width="800" alt="Audit">
   <br><em>Audit -- filterable log with expandable details showing reasoning, intention, and redacted arguments</em>
+</p>
+
+<p align="center">
+  <img src="../files/screenshots/ui-critical-denied.png" width="800" alt="Critical Denied">
+  <br><em>Audit -- critical tool execution denied with detailed reasoning</em>
 </p>
 
 **Features:**
@@ -102,6 +112,16 @@ MCP server management with tool listing and per-tool preference overrides.
 ### Analysis
 
 Behavioral risk profile, analysis history, and trend charts.
+
+<p align="center">
+  <img src="../files/screenshots/ui-analysis-profile.png" width="800" alt="Behavioral Profile">
+  <br><em>Analysis -- behavioral risk profile with per-agent risk indicators and active alerts</em>
+</p>
+
+<p align="center">
+  <img src="../files/screenshots/ui-analysis-trend.png" width="800" alt="Analysis Trend">
+  <br><em>Analysis -- cross-session behavioral trend tracking over time</em>
+</p>
 
 **Features:**
 - Behavioral risk profile card: risk level, context summary, active alerts (severity >= 7)

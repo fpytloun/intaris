@@ -84,6 +84,26 @@ Intaris is also available via [Docker, pip, or production setup](docs/deployment
   <br><em>Approvals -- pending escalations with reasoning, arguments, and one-click approve/deny</em>
 </p>
 
+<p align="center">
+  <img src="files/screenshots/ui-analysis-profile.png" width="800" alt="Behavioral Profile">
+  <br><em>Analysis -- behavioral risk profile with per-agent risk indicators and trends</em>
+</p>
+
+<p align="center">
+  <img src="files/screenshots/ui-analysis-trend.png" width="800" alt="Analysis Trend">
+  <br><em>Analysis -- cross-session behavioral trend tracking over time</em>
+</p>
+
+<p align="center">
+  <img src="files/screenshots/ui-session-suspicious.png" width="800" alt="Suspicious Session">
+  <br><em>Sessions -- suspicious session detail with evaluation reasoning and risk assessment</em>
+</p>
+
+<p align="center">
+  <img src="files/screenshots/ui-critical-denied.png" width="800" alt="Critical Denied">
+  <br><em>Audit -- critical tool execution denied with detailed reasoning</em>
+</p>
+
 See the [Management UI docs](docs/management-ui.md) for all tabs and features.
 
 ## Supported Clients
