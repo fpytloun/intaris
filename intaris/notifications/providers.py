@@ -32,6 +32,25 @@ _http_client: httpx.AsyncClient | None = None
 # Default timeout for provider HTTP calls (seconds)
 _DEFAULT_TIMEOUT = 10.0
 
+# Platform message limits
+_PUSHOVER_MESSAGE_LIMIT = 1024
+_SLACK_TEXT_BLOCK_LIMIT = 3000
+_SLACK_FIELD_TEXT_LIMIT = 2000
+
+
+def _truncate(text: str, max_len: int) -> str:
+    """Truncate text to max_len, adding ellipsis if needed.
+
+    Preserves full text when it fits within the budget. When truncation
+    is necessary, appends ``...`` and logs at debug level.
+    """
+    if max_len < 4:
+        return text[:max_len]
+    if len(text) <= max_len:
+        return text
+    logger.debug("Truncating text from %d to %d chars", len(text), max_len)
+    return text[: max_len - 3] + "..."
+
 
 async def _get_client() -> httpx.AsyncClient:
     """Get or create the shared HTTP client."""
@@ -232,7 +251,8 @@ class PushoverProvider:
         if notification.event_type == "resolution":
             title = "Intaris: Escalation Resolved"
             message = self._format_resolution_message(notification)
-            priority = config.get("priority", 1)
+            # Resolutions are confirmations — use low priority (no sound/vibration)
+            priority = config.get("resolution_priority", -1)
         elif notification.event_type == "session_suspended":
             title = "Intaris: Session Suspended"
             message = self._format_escalation_message(notification)
@@ -258,6 +278,11 @@ class PushoverProvider:
             title = "Intaris: Escalation Required"
             message = self._format_escalation_message(notification)
             priority = config.get("priority", 1)
+
+        # Last-resort safety net: ensure message fits Pushover limit.
+        # Budget-aware formatting above should keep messages within budget,
+        # but this guards against edge cases (e.g. HTML entity expansion).
+        message = _truncate(message, _PUSHOVER_MESSAGE_LIMIT)
 
         data: dict[str, Any] = {
             "token": config["app_token"],
@@ -288,58 +313,110 @@ class PushoverProvider:
 
     @staticmethod
     def _format_escalation_message(n: Notification) -> str:
-        """Format escalation message for Pushover (HTML mode)."""
-        parts = []
+        """Format escalation message for Pushover (HTML mode).
+
+        Uses budget-aware truncation: action links are computed first
+        so they always survive, and reasoning gets the remaining budget.
+        """
+        parts: list[str] = []
         if n.tool:
             parts.append(f"<b>Tool:</b> {html_escape(n.tool)}")
         if n.risk:
             parts.append(f"<b>Risk:</b> {html_escape(n.risk)}")
-        if n.reasoning:
-            # Truncate reasoning for push notification
-            reason = n.reasoning[:200]
-            if len(n.reasoning) > 200:
-                reason += "..."
-            parts.append(f"\n{html_escape(reason)}")
+        if n.session_id:
+            parts.append(f"<b>Session:</b> {html_escape(n.session_id)}")
+
+        # Build action links first to guarantee they survive truncation
+        action_parts: list[str] = []
         if n.approve_url:
-            parts.append(f'\n<a href="{html_escape(n.approve_url)}">Approve</a>')
+            action_parts.append(f'\n<a href="{html_escape(n.approve_url)}">Approve</a>')
         if n.deny_url:
-            parts.append(f' | <a href="{html_escape(n.deny_url)}">Deny</a>')
+            action_parts.append(f' | <a href="{html_escape(n.deny_url)}">Deny</a>')
+
+        # Compute budget for reasoning: total limit minus fixed overhead.
+        # Account for \n separators from join (one per part boundary)
+        # and the leading \n prefix on the reasoning line.
+        n_parts = len(parts) + len(action_parts)  # parts that will be joined
+        join_newlines = n_parts  # one \n per boundary after adding reasoning
+        overhead = (
+            sum(len(p) for p in parts)
+            + sum(len(p) for p in action_parts)
+            + join_newlines
+            + 1  # leading \n on reasoning line
+        )
+        budget = _PUSHOVER_MESSAGE_LIMIT - overhead
+
+        if n.reasoning and budget > 20:
+            reason = _truncate(html_escape(n.reasoning), budget)
+            parts.append(f"\n{reason}")
+
+        parts.extend(action_parts)
         return "\n".join(parts)
 
     @staticmethod
     def _format_denial_message(n: Notification) -> str:
-        """Format denial message for Pushover (HTML mode)."""
-        parts = []
+        """Format denial message for Pushover (HTML mode).
+
+        Uses budget-aware truncation: fixed fields are computed first,
+        reasoning gets the remaining budget.
+        """
+        parts: list[str] = []
         if n.tool:
             parts.append(f"<b>Tool:</b> {html_escape(n.tool)}")
         if n.risk:
             parts.append(f"<b>Risk:</b> {html_escape(n.risk)}")
-        parts.append(f"<b>Session:</b> {html_escape(n.session_id[:20])}")
+        parts.append(f"<b>Session:</b> {html_escape(n.session_id)}")
+
         if n.reasoning:
-            reason = n.reasoning[:200]
-            if len(n.reasoning) > 200:
-                reason += "..."
-            parts.append(f"\n{html_escape(reason)}")
+            # len(parts) accounts for join separators after reasoning is
+            # appended; +1 for the leading \n embedded in f"\n{reason}"
+            overhead = sum(len(p) for p in parts) + len(parts) + 1
+            budget = _PUSHOVER_MESSAGE_LIMIT - overhead
+            if budget > 20:
+                reason = _truncate(html_escape(n.reasoning), budget)
+                parts.append(f"\n{reason}")
         return "\n".join(parts)
 
     @staticmethod
     def _format_resolution_message(n: Notification) -> str:
-        """Format resolution message for Pushover (HTML mode)."""
-        parts = []
-        if n.tool:
-            parts.append(f"<b>Tool:</b> {html_escape(n.tool)}")
+        """Format resolution message for Pushover (HTML mode).
+
+        Includes tool call context (tool, risk, session, reasoning)
+        so the notification is self-contained without opening the UI.
+        Uses budget-aware truncation for reasoning.
+        """
+        parts: list[str] = []
         if n.user_decision:
             decision = html_escape(n.user_decision.upper())
             parts.append(f"<b>Decision:</b> {decision}")
+        if n.tool:
+            parts.append(f"<b>Tool:</b> {html_escape(n.tool)}")
+        if n.risk:
+            parts.append(f"<b>Risk:</b> {html_escape(n.risk)}")
+        if n.session_id:
+            parts.append(f"<b>Session:</b> {html_escape(n.session_id)}")
         if n.user_note:
             parts.append(f"<b>Note:</b> {html_escape(n.user_note)}")
+
+        if n.reasoning:
+            # len(parts) accounts for join separators after reasoning is
+            # appended; +1 for the leading \n embedded in f"\n{reason}"
+            overhead = sum(len(p) for p in parts) + len(parts) + 1
+            budget = _PUSHOVER_MESSAGE_LIMIT - overhead
+            if budget > 20:
+                reason = _truncate(html_escape(n.reasoning), budget)
+                parts.append(f"\n{reason}")
         return "\n".join(parts)
 
     @staticmethod
     def _format_summary_alert_message(n: Notification) -> str:
-        """Format L2 session summary alert for Pushover (HTML mode)."""
-        parts = []
-        parts.append(f"<b>Session:</b> {html_escape(n.session_id[:20])}")
+        """Format L2 session summary alert for Pushover (HTML mode).
+
+        Uses budget-aware truncation: fixed header fields are computed
+        first, then indicator details share the remaining budget.
+        """
+        parts: list[str] = []
+        parts.append(f"<b>Session:</b> {html_escape(n.session_id)}")
         if n.agent_id:
             parts.append(f"<b>Agent:</b> {html_escape(n.agent_id)}")
         if n.intent_alignment:
@@ -352,18 +429,34 @@ class PushoverProvider:
                 if coerce_risk_score(ind.get("severity", 0)) >= 7
             )
             parts.append(f"<b>Risk indicators:</b> {count} ({high_count} elevated+)")
-            # Show top indicators (truncated)
-            for ind in n.risk_indicators[:3]:
+
+            # Compute budget for indicator lines.
+            # Account for \n separators from join between all parts
+            # (header parts + indicator parts).
+            shown = min(len(n.risk_indicators), 5)
+            total_parts = len(parts) + shown
+            join_newlines = total_parts - 1  # \n between each part
+            header_overhead = sum(len(p) for p in parts) + join_newlines
+            indicator_budget = _PUSHOVER_MESSAGE_LIMIT - header_overhead
+            per_indicator = max(indicator_budget // shown, 30) if shown else 0
+
+            for ind in n.risk_indicators[:5]:
                 cat = ind.get("indicator", "unknown")
                 sev = coerce_risk_score(ind.get("severity", 0))
-                detail = ind.get("detail", "")[:80]
-                parts.append(f"  - {html_escape(cat)} ({sev}): {html_escape(detail)}")
+                prefix = f"  - {html_escape(cat)} ({sev}): "
+                detail_budget = max(per_indicator - len(prefix), 10)
+                detail = _truncate(html_escape(ind.get("detail", "")), detail_budget)
+                parts.append(f"{prefix}{detail}")
         return "\n".join(parts)
 
     @staticmethod
     def _format_analysis_alert_message(n: Notification) -> str:
-        """Format L3 cross-session analysis alert for Pushover (HTML mode)."""
-        parts = []
+        """Format L3 cross-session analysis alert for Pushover (HTML mode).
+
+        Uses budget-aware truncation: fixed fields are computed first,
+        context summary gets the remaining budget.
+        """
+        parts: list[str] = []
         if n.risk_level:
             band = risk_band(n.risk_level).upper()
             parts.append(
@@ -375,11 +468,15 @@ class PushoverProvider:
             parts.append(f"<b>Sessions analyzed:</b> {n.sessions_analyzed}")
         if n.findings_count is not None:
             parts.append(f"<b>Findings:</b> {n.findings_count}")
+
         if n.context_summary:
-            summary = n.context_summary[:200]
-            if len(n.context_summary) > 200:
-                summary += "..."
-            parts.append(f"\n{html_escape(summary)}")
+            # len(parts) accounts for join separators after summary is
+            # appended; +1 for the leading \n embedded in f"\n{summary}"
+            overhead = sum(len(p) for p in parts) + len(parts) + 1
+            budget = _PUSHOVER_MESSAGE_LIMIT - overhead
+            if budget > 20:
+                summary = _truncate(html_escape(n.context_summary), budget)
+                parts.append(f"\n{summary}")
         return "\n".join(parts)
 
 
@@ -391,6 +488,32 @@ def _slack_escape(text: str) -> str:
     ``@here``/``@channel`` mentions from free-text fields.
     """
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _enforce_slack_limits(blocks: list[dict[str, Any]]) -> None:
+    """Enforce Slack Block Kit size limits in-place.
+
+    Walks the block list and truncates:
+    - Section ``text`` content to ``_SLACK_TEXT_BLOCK_LIMIT`` (3000 chars).
+    - Section ``fields`` items to ``_SLACK_FIELD_TEXT_LIMIT`` (2000 chars).
+
+    Mutates *blocks* in place so callers can build blocks without
+    worrying about platform limits.
+    """
+    for block in blocks:
+        if block.get("type") != "section":
+            continue
+        # Truncate section text
+        text_obj = block.get("text")
+        if isinstance(text_obj, dict):
+            text = text_obj.get("text", "")
+            if len(text) > _SLACK_TEXT_BLOCK_LIMIT:
+                text_obj["text"] = _truncate(text, _SLACK_TEXT_BLOCK_LIMIT)
+        # Truncate field text items
+        for field in block.get("fields", []):
+            text = field.get("text", "")
+            if len(text) > _SLACK_FIELD_TEXT_LIMIT:
+                field["text"] = _truncate(text, _SLACK_FIELD_TEXT_LIMIT)
 
 
 class SlackProvider:
@@ -431,6 +554,7 @@ class SlackProvider:
         else:
             blocks = self._build_escalation_blocks(notification)
 
+        _enforce_slack_limits(blocks)
         payload = {"blocks": blocks}
 
         response = await client.post(
@@ -471,21 +595,18 @@ class SlackProvider:
             fields.append(
                 {
                     "type": "mrkdwn",
-                    "text": f"*Session:* `{_slack_escape(n.session_id[:12])}...`",
+                    "text": f"*Session:* `{_slack_escape(n.session_id)}`",
                 }
             )
         if fields:
             blocks.append({"type": "section", "fields": fields})
 
-        # Reasoning
+        # Reasoning — full text, platform limits enforced by _enforce_slack_limits()
         if n.reasoning:
-            reason = n.reasoning[:300]
-            if len(n.reasoning) > 300:
-                reason += "..."
             blocks.append(
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": _slack_escape(reason)},
+                    "text": {"type": "mrkdwn", "text": _slack_escape(n.reasoning)},
                 }
             )
 
@@ -548,20 +669,17 @@ class SlackProvider:
             fields.append(
                 {
                     "type": "mrkdwn",
-                    "text": f"*Session:* `{_slack_escape(n.session_id[:12])}...`",
+                    "text": f"*Session:* `{_slack_escape(n.session_id)}`",
                 }
             )
         if fields:
             blocks.append({"type": "section", "fields": fields})
 
         if n.reasoning:
-            reason = n.reasoning[:300]
-            if len(n.reasoning) > 300:
-                reason += "..."
             blocks.append(
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": _slack_escape(reason)},
+                    "text": {"type": "mrkdwn", "text": _slack_escape(n.reasoning)},
                 }
             )
 
@@ -611,20 +729,17 @@ class SlackProvider:
             fields.append(
                 {
                     "type": "mrkdwn",
-                    "text": f"*Session:* `{_slack_escape(n.session_id[:12])}...`",
+                    "text": f"*Session:* `{_slack_escape(n.session_id)}`",
                 }
             )
         if fields:
             blocks.append({"type": "section", "fields": fields})
 
         if n.reasoning:
-            reason = n.reasoning[:300]
-            if len(n.reasoning) > 300:
-                reason += "..."
             blocks.append(
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": _slack_escape(reason)},
+                    "text": {"type": "mrkdwn", "text": _slack_escape(n.reasoning)},
                 }
             )
 
@@ -649,25 +764,44 @@ class SlackProvider:
 
     @staticmethod
     def _build_resolution_blocks(n: Notification) -> list[dict[str, Any]]:
-        """Build Slack Block Kit blocks for resolution."""
-        decision = _slack_escape((n.user_decision or "unknown").upper())
+        """Build Slack Block Kit blocks for resolution.
+
+        Includes full tool call context (tool, risk, session, reasoning)
+        so the notification is self-contained.
+        """
+        raw_decision = (n.user_decision or "unknown").lower()
+        label = {"approve": "APPROVED", "deny": "DENIED"}.get(
+            raw_decision, raw_decision.upper()
+        )
+        decision = _slack_escape(raw_decision.upper())
         blocks: list[dict[str, Any]] = [
             {
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": f"Intaris: Escalation {decision}D",
+                    "text": f"Intaris: Escalation {label}",
                 },
             },
         ]
 
         fields = []
+        if n.user_decision:
+            fields.append({"type": "mrkdwn", "text": f"*Decision:* {decision}"})
         if n.tool:
             fields.append(
                 {"type": "mrkdwn", "text": f"*Tool:* `{_slack_escape(n.tool)}`"}
             )
-        if n.user_decision:
-            fields.append({"type": "mrkdwn", "text": f"*Decision:* {decision}"})
+        if n.risk:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Risk:* {_slack_escape(n.risk)}"}
+            )
+        if n.session_id:
+            fields.append(
+                {
+                    "type": "mrkdwn",
+                    "text": f"*Session:* `{_slack_escape(n.session_id)}`",
+                }
+            )
         if fields:
             blocks.append({"type": "section", "fields": fields})
 
@@ -678,6 +812,17 @@ class SlackProvider:
                     "text": {
                         "type": "mrkdwn",
                         "text": f"*Note:* {_slack_escape(n.user_note)}",
+                    },
+                }
+            )
+
+        if n.reasoning:
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": _slack_escape(n.reasoning),
                     },
                 }
             )
@@ -702,7 +847,7 @@ class SlackProvider:
             fields.append(
                 {
                     "type": "mrkdwn",
-                    "text": f"*Session:* `{_slack_escape(n.session_id[:20])}`",
+                    "text": f"*Session:* `{_slack_escape(n.session_id)}`",
                 }
             )
         if n.agent_id:
@@ -734,13 +879,14 @@ class SlackProvider:
         if fields:
             blocks.append({"type": "section", "fields": fields})
 
-        # Show top risk indicators as a list
+        # Show top risk indicators as a list — full detail text,
+        # platform limits enforced by _enforce_slack_limits()
         if n.risk_indicators:
             lines = []
-            for ind in n.risk_indicators[:5]:
+            for ind in n.risk_indicators[:10]:
                 cat = _slack_escape(ind.get("indicator", "unknown"))
                 sev = str(coerce_risk_score(ind.get("severity", 0)))
-                detail = _slack_escape(ind.get("detail", "")[:100])
+                detail = _slack_escape(ind.get("detail", ""))
                 lines.append(f"- *{cat}* ({sev}): {detail}")
             if lines:
                 blocks.append(
@@ -810,13 +956,13 @@ class SlackProvider:
             blocks.append({"type": "section", "fields": fields})
 
         if n.context_summary:
-            summary = n.context_summary[:300]
-            if len(n.context_summary) > 300:
-                summary += "..."
             blocks.append(
                 {
                     "type": "section",
-                    "text": {"type": "mrkdwn", "text": _slack_escape(summary)},
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": _slack_escape(n.context_summary),
+                    },
                 }
             )
 

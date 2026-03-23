@@ -429,7 +429,7 @@ def _send_resolution_notification(
                 tool=record.get("tool"),
                 args_redacted=None,
                 risk=record.get("risk"),
-                reasoning=None,
+                reasoning=record.get("reasoning"),
                 ui_url=ui_url,
                 approve_url=None,
                 deny_url=None,

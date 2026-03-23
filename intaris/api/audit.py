@@ -177,7 +177,7 @@ async def resolve_decision(
                 tool=record.get("tool"),
                 args_redacted=None,
                 risk=record.get("risk"),
-                reasoning=None,
+                reasoning=record.get("reasoning"),
                 ui_url=None,
                 approve_url=None,
                 deny_url=None,

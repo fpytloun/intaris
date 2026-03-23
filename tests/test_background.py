@@ -901,3 +901,357 @@ class TestProviderFormatting:
         assert n.findings_count == 3
         assert n.context_summary is not None
         assert n.sessions_analyzed == 5
+
+
+class TestNotificationTruncation:
+    """Tests for notification message truncation behaviour.
+
+    Verifies that:
+    - Full text is preserved when under platform limits.
+    - Platform-level truncation kicks in only when messages exceed limits.
+    - Action links survive truncation in Pushover escalation messages.
+    - Full session IDs are shown (no arbitrary truncation).
+    """
+
+    # ── helpers ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _make_notification(**overrides):
+        from intaris.notifications.providers import Notification
+
+        defaults = dict(
+            event_type="escalation",
+            call_id="call-1",
+            session_id="ses_30eb5beb6ffeL3KPjUyF0Zkei1",
+            user_id="user-1",
+            agent_id="test-agent",
+            tool="mcp_bash",
+            args_redacted=None,
+            risk="high",
+            reasoning="This is a test reasoning.",
+            ui_url="https://intaris.example.com/ui/#approvals",
+            approve_url="https://intaris.example.com/api/v1/action/approve-token",
+            deny_url="https://intaris.example.com/api/v1/action/deny-token",
+            timestamp="2026-01-01T00:00:00",
+        )
+        defaults.update(overrides)
+        return Notification(**defaults)
+
+    # ── Pushover: escalation with long reasoning ──────────────────
+
+    def test_pushover_escalation_long_reasoning_preserves_action_links(self):
+        """Escalation with 1000-char reasoning: message <= 1024 AND
+        contains both Approve and Deny action links."""
+        from intaris.notifications.providers import (
+            _PUSHOVER_MESSAGE_LIMIT,
+            PushoverProvider,
+        )
+
+        long_reasoning = "A" * 1000
+        n = self._make_notification(reasoning=long_reasoning)
+        msg = PushoverProvider._format_escalation_message(n)
+
+        assert len(msg) <= _PUSHOVER_MESSAGE_LIMIT
+        assert "<a" in msg, "Action links must survive truncation"
+        assert "Approve" in msg
+        assert "Deny" in msg
+
+    def test_pushover_escalation_short_reasoning_full_text(self):
+        """Short reasoning appears in full without truncation."""
+        from intaris.notifications.providers import PushoverProvider
+
+        short_reasoning = "Tool call is misaligned with session intention."
+        n = self._make_notification(reasoning=short_reasoning)
+        msg = PushoverProvider._format_escalation_message(n)
+
+        assert short_reasoning in msg
+        assert "..." not in msg
+
+    # ── Pushover: denial with long reasoning ──────────────────────
+
+    def test_pushover_denial_long_reasoning_budget_aware(self):
+        """Denial with 1000-char reasoning: message <= 1024."""
+        from intaris.notifications.providers import (
+            _PUSHOVER_MESSAGE_LIMIT,
+            PushoverProvider,
+        )
+
+        long_reasoning = "B" * 1000
+        n = self._make_notification(
+            event_type="denial",
+            reasoning=long_reasoning,
+            approve_url=None,
+            deny_url=None,
+        )
+        msg = PushoverProvider._format_denial_message(n)
+
+        assert len(msg) <= _PUSHOVER_MESSAGE_LIMIT
+
+    # ── Pushover: full session_id ─────────────────────────────────
+
+    def test_pushover_full_session_id_in_denial(self):
+        """Full session_id is shown in denial messages."""
+        from intaris.notifications.providers import PushoverProvider
+
+        session_id = "ses_30eb5beb6ffeL3KPjUyF0Zkei1"
+        n = self._make_notification(
+            event_type="denial",
+            session_id=session_id,
+            approve_url=None,
+            deny_url=None,
+        )
+        msg = PushoverProvider._format_denial_message(n)
+
+        assert session_id in msg
+
+    def test_pushover_full_session_id_in_summary(self):
+        """Full session_id is shown in summary alert messages."""
+        from intaris.notifications.providers import Notification, PushoverProvider
+
+        session_id = "ses_30eb5beb6ffeL3KPjUyF0Zkei1"
+        n = Notification(
+            event_type="summary_alert",
+            call_id="",
+            session_id=session_id,
+            user_id="user-1",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted=None,
+            risk=None,
+            reasoning=None,
+            ui_url=None,
+            approve_url=None,
+            deny_url=None,
+            timestamp="2026-01-01T00:00:00",
+            intent_alignment="misaligned",
+            risk_indicators=[
+                {"indicator": "intent_drift", "severity": 7, "detail": "Drifted"},
+            ],
+        )
+        msg = PushoverProvider._format_summary_alert_message(n)
+
+        assert session_id in msg
+
+    # ── Pushover: summary with many long indicators ───────────────
+
+    def test_pushover_summary_many_long_indicators_within_limit(self):
+        """Summary with 5 indicators x 300-char detail stays <= 1024
+        and all indicator category names are visible."""
+        from intaris.notifications.providers import (
+            _PUSHOVER_MESSAGE_LIMIT,
+            Notification,
+            PushoverProvider,
+        )
+
+        indicators = [
+            {
+                "indicator": f"indicator_{i}",
+                "severity": 8,
+                "detail": f"Detail for indicator {i}: " + "X" * 300,
+            }
+            for i in range(5)
+        ]
+        n = Notification(
+            event_type="summary_alert",
+            call_id="",
+            session_id="ses_30eb5beb6ffeL3KPjUyF0Zkei1",
+            user_id="user-1",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted=None,
+            risk=None,
+            reasoning=None,
+            ui_url=None,
+            approve_url=None,
+            deny_url=None,
+            timestamp="2026-01-01T00:00:00",
+            intent_alignment="misaligned",
+            risk_indicators=indicators,
+        )
+        msg = PushoverProvider._format_summary_alert_message(n)
+
+        assert len(msg) <= _PUSHOVER_MESSAGE_LIMIT
+        # All 5 indicator category names must be visible
+        for i in range(5):
+            assert f"indicator_{i}" in msg
+
+    # ── Pushover: analysis with long context_summary ──────────────
+
+    def test_pushover_analysis_long_summary_budget_aware(self):
+        """Analysis with 1000-char context_summary: message <= 1024."""
+        from intaris.notifications.providers import (
+            _PUSHOVER_MESSAGE_LIMIT,
+            PushoverProvider,
+        )
+
+        long_summary = "C" * 1000
+        n = self._make_notification(
+            event_type="analysis_alert",
+            risk_level=10,
+            findings_count=3,
+            context_summary=long_summary,
+            analysis_id="analysis-1",
+            sessions_analyzed=5,
+            tool=None,
+            risk=None,
+            reasoning=None,
+            approve_url=None,
+            deny_url=None,
+        )
+        msg = PushoverProvider._format_analysis_alert_message(n)
+
+        assert len(msg) <= _PUSHOVER_MESSAGE_LIMIT
+
+    # ── Pushover: resolution with long reasoning ────────────────────
+
+    def test_pushover_resolution_long_reasoning_within_limit(self):
+        """Resolution with 1000-char reasoning: message <= 1024."""
+        from intaris.notifications.providers import (
+            _PUSHOVER_MESSAGE_LIMIT,
+            PushoverProvider,
+        )
+
+        long_reasoning = "R" * 1000
+        n = self._make_notification(
+            event_type="resolution",
+            reasoning=long_reasoning,
+            user_decision="approve",
+            approve_url=None,
+            deny_url=None,
+        )
+        msg = PushoverProvider._format_resolution_message(n)
+
+        assert len(msg) <= _PUSHOVER_MESSAGE_LIMIT
+        assert "APPROVE" in msg
+
+    # ── Slack: full session_id ────────────────────────────────────
+
+    def test_slack_full_session_id_in_escalation(self):
+        """Full session_id is shown in Slack escalation blocks."""
+        from intaris.notifications.providers import SlackProvider
+
+        session_id = "ses_30eb5beb6ffeL3KPjUyF0Zkei1"
+        n = self._make_notification(session_id=session_id)
+        blocks = SlackProvider._build_escalation_blocks(n)
+
+        # Find the session field
+        for block in blocks:
+            if block.get("type") == "section" and "fields" in block:
+                for field in block["fields"]:
+                    if "Session" in field.get("text", ""):
+                        assert session_id in field["text"]
+                        assert "..." not in field["text"]
+                        return
+        raise AssertionError("Session field not found in blocks")
+
+    def test_slack_full_session_id_in_denial(self):
+        """Full session_id is shown in Slack denial blocks."""
+        from intaris.notifications.providers import SlackProvider
+
+        session_id = "ses_30eb5beb6ffeL3KPjUyF0Zkei1"
+        n = self._make_notification(
+            event_type="denial",
+            session_id=session_id,
+            approve_url=None,
+            deny_url=None,
+        )
+        blocks = SlackProvider._build_denial_blocks(n)
+
+        for block in blocks:
+            if block.get("type") == "section" and "fields" in block:
+                for field in block["fields"]:
+                    if "Session" in field.get("text", ""):
+                        assert session_id in field["text"]
+                        assert "..." not in field["text"]
+                        return
+        raise AssertionError("Session field not found in blocks")
+
+    # ── Slack: long reasoning truncated by _enforce_slack_limits ──
+
+    def test_slack_long_reasoning_truncated_by_enforce(self):
+        """Reasoning of 4000 chars is truncated to <= 3000 by
+        _enforce_slack_limits()."""
+        from intaris.notifications.providers import (
+            _SLACK_TEXT_BLOCK_LIMIT,
+            SlackProvider,
+            _enforce_slack_limits,
+        )
+
+        long_reasoning = "D" * 4000
+        n = self._make_notification(reasoning=long_reasoning)
+        blocks = SlackProvider._build_escalation_blocks(n)
+        _enforce_slack_limits(blocks)
+
+        for block in blocks:
+            if block.get("type") == "section" and "text" in block:
+                text = block["text"].get("text", "")
+                assert len(text) <= _SLACK_TEXT_BLOCK_LIMIT
+
+    def test_slack_short_reasoning_not_truncated(self):
+        """Short reasoning appears in full without truncation."""
+        from intaris.notifications.providers import (
+            SlackProvider,
+            _enforce_slack_limits,
+        )
+
+        short_reasoning = "This call is misaligned with session intention."
+        n = self._make_notification(reasoning=short_reasoning)
+        blocks = SlackProvider._build_escalation_blocks(n)
+        _enforce_slack_limits(blocks)
+
+        # Find the reasoning block (section with text but no fields)
+        for block in blocks:
+            if (
+                block.get("type") == "section"
+                and "text" in block
+                and isinstance(block["text"], dict)
+                and "fields" not in block
+            ):
+                assert short_reasoning in block["text"]["text"]
+                assert "..." not in block["text"]["text"]
+                return
+        raise AssertionError("Reasoning block not found")
+
+    # ── Slack: field text limit enforcement ────────────────────────
+
+    def test_slack_enforce_field_text_limit(self):
+        """Fields exceeding 2000 chars are truncated by
+        _enforce_slack_limits()."""
+        from intaris.notifications.providers import (
+            _SLACK_FIELD_TEXT_LIMIT,
+            _enforce_slack_limits,
+        )
+
+        blocks = [
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": "E" * 2500},
+                ],
+            }
+        ]
+        _enforce_slack_limits(blocks)
+
+        assert len(blocks[0]["fields"][0]["text"]) <= _SLACK_FIELD_TEXT_LIMIT
+
+    # ── _truncate helper ──────────────────────────────────────────
+
+    def test_truncate_no_op_when_under_limit(self):
+        """Text under the limit is returned unchanged."""
+        from intaris.notifications.providers import _truncate
+
+        assert _truncate("hello", 10) == "hello"
+
+    def test_truncate_adds_ellipsis(self):
+        """Text over the limit is truncated with ellipsis."""
+        from intaris.notifications.providers import _truncate
+
+        result = _truncate("hello world", 8)
+        assert result == "hello..."
+        assert len(result) == 8
+
+    def test_truncate_small_max_len(self):
+        """Edge case: max_len < 4 returns raw slice without ellipsis."""
+        from intaris.notifications.providers import _truncate
+
+        assert _truncate("hello", 2) == "he"
