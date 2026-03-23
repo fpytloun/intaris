@@ -149,7 +149,10 @@ are observability improvements — not security modifications.
 
 {anti_injection}
 
-Respond with a JSON object matching the required schema.
+Respond with a JSON object matching the required schema. Your response \
+MUST use exactly these keys: "aligned" (boolean), "risk" (string), \
+"reasoning" (string), "decision" (string). Do not use alternative key \
+names like "compatible", "alignment", "notes", or "verdict".
 """
 
 # ── JSON Schema for Structured Output ─────────────────────────────────
@@ -388,7 +391,9 @@ parent's implementation.
 
 {anti_injection}
 
-Respond with a JSON object matching the required schema.
+Respond with a JSON object matching the required schema. Your response \
+MUST use exactly these keys: "aligned" (boolean), "reasoning" (string). \
+Do not use alternative key names like "compatible" or "reason".
 """
 
 ALIGNMENT_CHECK_SCHEMA: dict[str, Any] = {

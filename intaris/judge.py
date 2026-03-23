@@ -93,7 +93,10 @@ from the session intention.
 
 {anti_injection}
 
-Respond with a JSON object matching the required schema.
+Respond with a JSON object matching the required schema. Your response \
+MUST use exactly these keys: "decision" (string), "reasoning" (string), \
+"confidence" (string). Do not use alternative key names like "verdict", \
+"explanation", or "certainty".
 """
 
 JUDGE_EVALUATION_SCHEMA: dict[str, Any] = {

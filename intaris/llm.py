@@ -344,23 +344,97 @@ def parse_json_response(
     raise ValueError(f"Could not parse JSON from LLM response: {text[:200]}")
 
 
+# Common LLM key hallucinations when structured output is not enforced.
+# Maps hallucinated key → list of possible expected key targets.
+# Disambiguation is context-aware: only remap when the target is missing.
+_KEY_ALIASES: dict[str, list[str]] = {
+    # Safety evaluation / alignment check
+    "compatible": ["aligned"],
+    "alignment": ["aligned", "intent_alignment"],
+    "reason": ["reasoning"],
+    "notes": ["reasoning"],
+    # Session summary / compaction
+    "narrative": ["summary"],
+    "overall_alignment": ["intent_alignment"],
+    "trajectory": ["intent_alignment"],
+    "delegated_work_alignment": ["intent_alignment"],
+    "tools": ["tools_used"],
+    "indicators": ["risk_indicators"],
+    # Judge evaluation
+    "verdict": ["decision"],
+    "explanation": ["reasoning"],
+    "certainty": ["confidence"],
+    # Behavioral analysis
+    "risk": ["risk_level"],
+    "risk_score": ["risk_level"],
+    "summary": ["context_summary"],
+}
+
+
 def _validate_keys(
     result: dict[str, Any],
     expected_keys: set[str] | None,
 ) -> dict[str, Any]:
-    """Strip unexpected keys from parsed JSON response.
+    """Validate, remap, and strip keys from parsed JSON response.
 
-    Defense-in-depth: when the LLM is in JSON mode fallback (no schema
-    enforcement), prompt injection could cause extra keys to appear.
+    Defense-in-depth for JSON mode fallback (no schema enforcement):
+
+    1. **Alias remapping**: When the LLM returns a hallucinated key name
+       (e.g., ``narrative`` instead of ``summary``), attempt to remap it
+       to the expected key — but only when the expected key is missing.
+       This recovers the LLM's actual output instead of discarding it.
+
+    2. **Extra key stripping**: Remove any keys not in ``expected_keys``
+       (defense against prompt injection adding unexpected fields).
+
+    3. **Missing key detection**: After remapping and stripping, raise
+       ``ValueError`` if any expected keys are still missing. This lets
+       the caller (typically a task queue) retry the LLM call.
     """
     if expected_keys is None:
         return result
 
+    # Phase 1: Alias remapping for missing keys
+    present = set(result.keys())
+    missing = expected_keys - present
+    extra = present - expected_keys
+
+    if missing and extra:
+        remapped: dict[str, str] = {}  # hallucinated_key → expected_key
+        for key in list(extra):
+            targets = _KEY_ALIASES.get(key)
+            if not targets:
+                continue
+            for target in targets:
+                if target in missing:
+                    remapped[key] = target
+                    missing.discard(target)
+                    extra.discard(key)
+                    break
+
+        if remapped:
+            logger.info(
+                "Remapped hallucinated LLM keys: %s",
+                {k: v for k, v in remapped.items()},
+            )
+            for old_key, new_key in remapped.items():
+                result[new_key] = result.pop(old_key)
+
+    # Phase 2: Strip remaining extra keys
     extra = set(result.keys()) - expected_keys
     if extra:
         logger.warning(
             "Stripped unexpected keys from LLM JSON response: %s",
             extra,
         )
-        return {k: v for k, v in result.items() if k in expected_keys}
+        result = {k: v for k, v in result.items() if k in expected_keys}
+
+    # Phase 3: Check for missing required keys
+    still_missing = expected_keys - set(result.keys())
+    if still_missing:
+        raise ValueError(
+            f"LLM JSON response missing required keys after alias "
+            f"remapping: {still_missing}"
+        )
+
     return result

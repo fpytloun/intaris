@@ -1172,6 +1172,13 @@ def _store_summary(
     """
     _VALID_TRIGGERS = {"inactivity", "volume", "close", "manual", "compaction"}
 
+    summary_text = result.get("summary", "")
+    if not summary_text or not summary_text.strip():
+        raise ValueError(
+            f"Empty summary for session {session_id} — "
+            "LLM returned no usable summary text"
+        )
+
     summary_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
     tools_used = result.get("tools_used", [])
@@ -1203,7 +1210,7 @@ def _store_summary(
                 window_end,
                 trigger,
                 summary_type,
-                result.get("summary", ""),
+                summary_text,
                 json.dumps(tools_used),
                 alignment,
                 json.dumps(risk_indicators),
