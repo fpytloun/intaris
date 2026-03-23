@@ -323,6 +323,8 @@ class PushoverProvider:
             parts.append(f"<b>Tool:</b> {html_escape(n.tool)}")
         if n.risk:
             parts.append(f"<b>Risk:</b> {html_escape(n.risk)}")
+        if n.agent_id:
+            parts.append(f"<b>Agent:</b> {html_escape(n.agent_id)}")
         if n.session_id:
             parts.append(f"<b>Session:</b> {html_escape(n.session_id)}")
 
@@ -365,6 +367,8 @@ class PushoverProvider:
             parts.append(f"<b>Tool:</b> {html_escape(n.tool)}")
         if n.risk:
             parts.append(f"<b>Risk:</b> {html_escape(n.risk)}")
+        if n.agent_id:
+            parts.append(f"<b>Agent:</b> {html_escape(n.agent_id)}")
         parts.append(f"<b>Session:</b> {html_escape(n.session_id)}")
 
         if n.reasoning:
@@ -393,6 +397,8 @@ class PushoverProvider:
             parts.append(f"<b>Tool:</b> {html_escape(n.tool)}")
         if n.risk:
             parts.append(f"<b>Risk:</b> {html_escape(n.risk)}")
+        if n.agent_id:
+            parts.append(f"<b>Agent:</b> {html_escape(n.agent_id)}")
         if n.session_id:
             parts.append(f"<b>Session:</b> {html_escape(n.session_id)}")
         if n.user_note:
@@ -591,6 +597,10 @@ class SlackProvider:
             fields.append(
                 {"type": "mrkdwn", "text": f"*Risk:* {_slack_escape(n.risk)}"}
             )
+        if n.agent_id:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Agent:* {_slack_escape(n.agent_id)}"}
+            )
         if n.session_id:
             fields.append(
                 {
@@ -665,6 +675,10 @@ class SlackProvider:
             fields.append(
                 {"type": "mrkdwn", "text": f"*Risk:* {_slack_escape(n.risk)}"}
             )
+        if n.agent_id:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Agent:* {_slack_escape(n.agent_id)}"}
+            )
         if n.session_id:
             fields.append(
                 {
@@ -724,6 +738,10 @@ class SlackProvider:
         if n.risk:
             fields.append(
                 {"type": "mrkdwn", "text": f"*Risk:* {_slack_escape(n.risk)}"}
+            )
+        if n.agent_id:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Agent:* {_slack_escape(n.agent_id)}"}
             )
         if n.session_id:
             fields.append(
@@ -794,6 +812,10 @@ class SlackProvider:
         if n.risk:
             fields.append(
                 {"type": "mrkdwn", "text": f"*Risk:* {_slack_escape(n.risk)}"}
+            )
+        if n.agent_id:
+            fields.append(
+                {"type": "mrkdwn", "text": f"*Agent:* {_slack_escape(n.agent_id)}"}
             )
         if n.session_id:
             fields.append(
