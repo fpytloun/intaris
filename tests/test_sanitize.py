@@ -465,6 +465,15 @@ class TestPromptHardening:
         assert "DATA" in ANTI_INJECTION_PREAMBLE
         assert "never follow" in ANTI_INJECTION_PREAMBLE
 
+    def test_system_prompt_has_precedent_decision_rule(self):
+        """System prompt includes user-approval precedent as a numbered rule."""
+        from intaris.prompts import SAFETY_EVALUATION_SYSTEM_PROMPT
+
+        # The precedent rule should be in the Decision Rules section,
+        # not just buried in the Important section.
+        assert "escalate→user:approve" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "Do not re-escalate" in SAFETY_EVALUATION_SYSTEM_PROMPT
+
     def test_evaluation_prompt_includes_user_note(self):
         """User note from approved escalation appears in history line."""
         from intaris.prompts import build_evaluation_user_prompt
@@ -495,6 +504,9 @@ class TestPromptHardening:
 
         assert "escalate→user:approve" in result
         assert "let it explore opencode source code" in result
+        # Original reasoning must NOT appear — it contradicts the user's
+        # approval and confuses small models into re-escalating.
+        assert "Not aligned with intention" not in result
 
     def test_evaluation_prompt_omits_user_note_when_absent(self):
         """No extra content when user_note is None."""
@@ -554,6 +566,8 @@ class TestPromptHardening:
 
         # Note should be on one line (newlines collapsed)
         assert "Yes that is ok let it explore" in result
+        # Original reasoning suppressed for user-approved escalations
+        assert "Not aligned" not in result
         # No raw newlines inside the decision label
         for line in result.split("\n"):
             if "escalate→user:approve" in line:
@@ -595,6 +609,149 @@ class TestPromptHardening:
         assert long_note not in result
         # But truncated version with ellipsis should
         assert "..." in result
+
+    def test_user_approved_escalation_suppresses_reasoning(self):
+        """User-approved escalation must NOT show original reasoning.
+
+        The original reasoning (e.g. "Not aligned with intention")
+        contradicts the user's approval and confuses small models
+        into re-escalating similar calls.
+        """
+        from intaris.prompts import build_evaluation_user_prompt
+
+        result = build_evaluation_user_prompt(
+            intention="Research external libraries",
+            policy=None,
+            recent_history=[
+                {
+                    "tool": "webfetch",
+                    "args_redacted": {
+                        "url": "https://github.com/vectorize-io/hindsight",
+                        "format": "markdown",
+                    },
+                    "decision": "escalate",
+                    "user_decision": "approve",
+                    "reasoning": "Not aligned with intention. The tool call "
+                    "performs a network fetch from an external GitHub URL.",
+                }
+            ],
+            session_stats={"total_calls": 1},
+            tool="webfetch",
+            args={"url": "https://hindsight.vectorize.io", "format": "markdown"},
+            agent_id=None,
+        )
+
+        assert "escalate→user:approve" in result
+        assert "webfetch" in result
+        assert "github.com/vectorize-io/hindsight" in result
+        # Original reasoning must be suppressed
+        assert "Not aligned with intention" not in result
+        assert "network fetch" not in result
+
+    def test_user_denied_escalation_keeps_reasoning(self):
+        """User-denied escalation SHOULD show original reasoning."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        result = build_evaluation_user_prompt(
+            intention="Build a web app",
+            policy=None,
+            recent_history=[
+                {
+                    "tool": "bash",
+                    "args_redacted": {"command": "rm -rf /tmp/data"},
+                    "decision": "escalate",
+                    "user_decision": "deny",
+                    "reasoning": "Dangerous operation outside scope",
+                }
+            ],
+            session_stats={"total_calls": 1},
+            tool="bash",
+            args={"command": "rm -rf /tmp/other"},
+            agent_id=None,
+        )
+
+        assert "escalate→user:deny" in result
+        # Reasoning preserved for denials — reinforces the deny signal
+        assert "Dangerous operation" in result
+
+    def test_user_approved_escalation_higher_args_truncation(self):
+        """User-approved escalations get 200-char args (vs 100 default).
+
+        The model needs to see the full args to recognize similarity
+        with the current call.
+        """
+        from intaris.prompts import build_evaluation_user_prompt
+
+        # Args string that's between 100 and 200 chars
+        long_url = "https://example.com/" + "a" * 120
+        result = build_evaluation_user_prompt(
+            intention="Research",
+            policy=None,
+            recent_history=[
+                {
+                    "tool": "webfetch",
+                    "args_redacted": {"url": long_url, "format": "markdown"},
+                    "decision": "escalate",
+                    "user_decision": "approve",
+                    "reasoning": "Not aligned",
+                }
+            ],
+            session_stats={"total_calls": 1},
+            tool="webfetch",
+            args={"url": "https://example.com/other"},
+            agent_id=None,
+        )
+
+        # The full URL should be visible (within 200-char limit)
+        assert long_url in result
+
+    def test_regular_history_entry_keeps_reasoning(self):
+        """Non-escalation history entries keep reasoning as before."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        result = build_evaluation_user_prompt(
+            intention="Build a web app",
+            policy=None,
+            recent_history=[
+                {
+                    "tool": "read",
+                    "args_redacted": {"filePath": "/src/main.py"},
+                    "decision": "approve",
+                    "reasoning": "Aligned with intention, low risk",
+                }
+            ],
+            session_stats={"total_calls": 1},
+            tool="read",
+            args={"filePath": "/src/other.py"},
+            agent_id=None,
+        )
+
+        assert "[approve]" in result
+        assert "Aligned with intention" in result
+
+    def test_unresolved_escalation_keeps_reasoning(self):
+        """Unresolved escalation (no user_decision) keeps reasoning."""
+        from intaris.prompts import build_evaluation_user_prompt
+
+        result = build_evaluation_user_prompt(
+            intention="Build a web app",
+            policy=None,
+            recent_history=[
+                {
+                    "tool": "bash",
+                    "args_redacted": {"command": "curl http://example.com"},
+                    "decision": "escalate",
+                    "reasoning": "Network access outside scope",
+                }
+            ],
+            session_stats={"total_calls": 1},
+            tool="bash",
+            args={"command": "curl http://other.com"},
+            agent_id=None,
+        )
+
+        assert "[escalate]" in result
+        assert "Network access" in result
 
 
 # ── SessionPolicy validation ─────────────────────────────────────────

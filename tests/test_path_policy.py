@@ -440,7 +440,7 @@ class TestHistoryUserDecisions:
     """Test that user decisions on escalations are rendered in LLM history."""
 
     def test_escalation_with_user_approve(self):
-        """Resolved escalation shows [escalate→user:approve]."""
+        """Resolved escalation shows [escalate→user:approve] without reasoning."""
         from intaris.prompts import build_evaluation_user_prompt
 
         history = [
@@ -462,9 +462,11 @@ class TestHistoryUserDecisions:
             agent_id=None,
         )
         assert "[escalate\u2192user:approve]" in prompt
+        # Original reasoning suppressed for user-approved escalations
+        assert "Out of project scope" not in prompt
 
     def test_escalation_with_user_deny(self):
-        """Resolved escalation shows [escalate→user:deny]."""
+        """Resolved escalation shows [escalate→user:deny] with reasoning."""
         from intaris.prompts import build_evaluation_user_prompt
 
         history = [
@@ -486,6 +488,8 @@ class TestHistoryUserDecisions:
             agent_id=None,
         )
         assert "[escalate\u2192user:deny]" in prompt
+        # Reasoning preserved for denials — reinforces the deny signal
+        assert "Dangerous operation" in prompt
 
     def test_unresolved_escalation_shows_plain(self):
         """Unresolved escalation shows plain [escalate]."""
