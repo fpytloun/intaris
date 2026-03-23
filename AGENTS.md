@@ -41,6 +41,7 @@ intaris/
 ├── prompts_analysis.py    # L2/L3 analysis prompt templates + JSON schemas
 ├── intention.py           # IntentionBarrier (user-driven intention updates) + generate_intention()
 ├── evaluator.py           # Evaluation pipeline orchestrator (ESCALATE branch, retry, behavioral context)
+├── judge.py               # Judge auto-resolution (JudgeReviewer, shared resolve_with_side_effects)
 ├── alignment.py           # AlignmentBarrier (parent/child intention enforcement via LLM)
 ├── analyzer.py            # Stub: L2 summary generation + L3 behavioral analysis (Phase 2)
 ├── background.py          # TaskQueue (SQLite), BackgroundWorker (idle sweep, scheduler), Metrics
@@ -103,6 +104,7 @@ intaris/
 | **Info** | `api/info.py` | Identity (/whoami), stats (/stats), config (/config) for management UI |
 | **Intention** | `intention.py` | IntentionBarrier (user-driven intention updates) + generate_intention() |
 | **Orchestration** | `evaluator.py` | Full evaluation pipeline (classify → LLM → decide → audit), behavioral context injection |
+| **Judge** | `judge.py` | Judge auto-resolution (JudgeReviewer), shared resolution handler (resolve_with_side_effects) |
 | **Alignment** | `alignment.py` | AlignmentBarrier (parent/child intention enforcement via LLM) |
 | **Classification** | `classifier.py` | Read-only allowlist, critical patterns, session policy |
 | **Decision** | `decision.py` | Priority-ordered decision matrix |
@@ -141,6 +143,8 @@ intaris/
 8. **Multi-tenancy**: `user_id` is the tenant separator — scopes all sessions and audit records. `agent_id` is metadata only (not a visibility boundary). See [Multi-tenancy](#multi-tenancy) below.
 
 9. **User-driven intention model**: Session intention is immutable except by user action. Agent tool calls never redefine intention. The `IntentionBarrier` pattern ensures the evaluator sees the freshest user-stated intention by coordinating between `/reasoning` (trigger) and `/evaluate` (wait). See [Intention Model](#intention-model) below.
+
+10. **Judge auto-resolution**: Escalated tool calls can be automatically reviewed by a more capable LLM (judge). Fail-open design — judge LLM failure leaves escalation for human review. Deny-if-uncertain in auto mode. Shared `resolve_with_side_effects()` handler ensures human and judge resolution paths have identical side effects. See [Judge Auto-Resolution](#judge-auto-resolution) below.
 
 ## Multi-tenancy
 
@@ -202,6 +206,13 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `ANALYSIS_L3_LLM_REASONING_EFFORT` | Reasoning effort for L3 analysis LLM (falls back to `ANALYSIS_LLM_REASONING_EFFORT`) |
 | `ANALYSIS_L3_LLM_TIMEOUT_MS` | Timeout for L3 analysis LLM calls (falls back to `ANALYSIS_LLM_TIMEOUT_MS`, default `30000`) |
 | `NOTIFICATION_ACTION_TTL_MINUTES` | TTL for notification action tokens in minutes (default `60`) |
+| `JUDGE_MODE` | Judge auto-resolution mode: `disabled` (default), `auto`, `advisory` |
+| `JUDGE_NOTIFY_MODE` | Judge notification mode: `deny_only` (default), `always`, `never` |
+| `JUDGE_LLM_MODEL` | Judge LLM model (default `gpt-5.4`) |
+| `JUDGE_LLM_BASE_URL` | Judge LLM base URL (falls back to `LLM_BASE_URL`) |
+| `JUDGE_LLM_API_KEY` | Judge LLM API key (falls back to `LLM_API_KEY`) |
+| `JUDGE_LLM_REASONING_EFFORT` | Reasoning effort for judge LLM (default `low`) |
+| `JUDGE_LLM_TIMEOUT_MS` | Timeout for judge LLM calls in milliseconds (default `15000`) |
 
 ## Build / Run / Test
 
@@ -287,7 +298,7 @@ The `audit_log` table supports multiple record types via the `record_type` colum
 | `checkpoint` | Periodic agent state checkpoint | `content` |
 | `summary` | Session summary record | `content` |
 
-For `tool_call` records, `tool`, `args_redacted`, and `classification` are populated. For `reasoning`, `checkpoint`, and `summary` records, `content` holds the text and tool-specific fields are null. All record types share `decision`, `risk`, `reasoning`, `evaluation_path`, and `latency_ms`. The `profile_version` column records the behavioral profile version at time of evaluation.
+For `tool_call` records, `tool`, `args_redacted`, and `classification` are populated. For `reasoning`, `checkpoint`, and `summary` records, `content` holds the text and tool-specific fields are null. All record types share `decision`, `risk`, `reasoning`, `evaluation_path`, and `latency_ms`. The `profile_version` column records the behavioral profile version at time of evaluation. The `resolved_by` column indicates who resolved an escalation (`"user"` for human, `"judge"` for judge LLM, NULL if unresolved). The `judge_reasoning` column stores the judge's reasoning when the judge reviews an escalation (regardless of outcome).
 
 ### Evaluation paths
 
@@ -652,6 +663,45 @@ All path logic is gated on `working_directory is not None`. Sessions without `wo
 Per-session sliding window rate limiter (`ratelimit.py`). Tracks call timestamps per `(user_id, session_id)` pair using a deque. Thread-safe via `threading.Lock`. Configured via `RATE_LIMIT` env var (default 60 calls/minute, 0 = disabled). Periodic sweep removes abandoned session entries every 5 minutes.
 
 The rate limit check runs **before** classification/LLM in the evaluate endpoint. Returns HTTP 429 when exceeded.
+
+## Judge Auto-Resolution
+
+When a tool call is escalated, the judge — a more capable LLM (default gpt-5.4) with richer session context (30 recent tool calls + reasoning records) — automatically reviews and resolves the escalation. The judge runs as a fire-and-forget async task after the evaluate endpoint returns `decision=escalate` to the client.
+
+### Modes (`JUDGE_MODE`)
+
+| Mode | Behavior |
+|---|---|
+| `disabled` (default) | No judge. Escalations require human resolution. |
+| `auto` | Judge auto-resolves: approve or deny. Deny if uncertain (low confidence or defer). |
+| `advisory` | Judge reviews: approve, deny, or defer to human. Deferred escalations remain unresolved with judge reasoning visible in the UI. |
+
+### Notification modes (`JUDGE_NOTIFY_MODE`)
+
+| Mode | Behavior |
+|---|---|
+| `deny_only` (default) | Only notify when judge denies. |
+| `always` | Notify on escalation (before judge) AND on judge resolution. |
+| `never` | Fully silent — no notifications in judge mode. |
+
+### Architecture
+
+- **`judge.py`**: `JudgeReviewer` class + `resolve_with_side_effects()` shared resolution handler.
+- **Shared resolution handler**: Both human (`POST /decision`) and judge resolution paths call `resolve_with_side_effects()` to ensure identical side effects (audit update, alignment barrier, path learning, EventBus, notifications).
+- **Prompt security**: Judge prompt uses the same anti-injection framework as the evaluator (`ANTI_INJECTION_PREAMBLE`, `wrap_with_boundary()`, `sanitize_for_prompt()`).
+- **Behavioral context**: Judge includes the behavioral profile (risk level, active alerts) in its evaluation context.
+- **MCP proxy coverage**: Both REST API and MCP proxy escalation paths trigger the judge.
+- **Race condition handling**: If a human resolves before the judge, the atomic `WHERE user_decision IS NULL` guard prevents double-resolution. The judge catches the `ValueError` and exits gracefully.
+- **Fail-open**: If the judge LLM fails, the escalation remains unresolved for human review. A notification is sent if `notify_mode` allows.
+
+### Database columns
+
+- `audit_log.resolved_by TEXT` — NULL (not resolved), "user" (human), "judge" (judge LLM)
+- `audit_log.judge_reasoning TEXT` — Judge's reasoning (stored when judge reviews, regardless of outcome)
+
+### Observability
+
+Metrics exposed via `/stats`: `judge_reviews_total`, `judge_approvals_total`, `judge_denials_total`, `judge_deferrals_total`, `judge_errors_total`.
 
 ## Webhook Callbacks
 

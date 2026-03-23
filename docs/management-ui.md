@@ -88,6 +88,9 @@ Pending escalations with approve/deny actions and resolved history.
 - Approve/Deny buttons with optional note
 - Resolved Approvals section with pagination
 - Expandable details: reasoning, arguments, resolution timestamp, intention, call ID, classification, agent, evaluation path
+- **Judge badge** (purple) on resolved items when `resolved_by` is "judge" — indicates the escalation was auto-resolved by the judge LLM
+- **Judge reasoning** displayed alongside the original evaluator reasoning in expanded detail view
+- **Judge recommendation** shown on pending items when the judge deferred to human (advisory mode) — helps the human make an informed decision
 - Badge showing pending count in the navigation menu
 - Clickable session links for context
 

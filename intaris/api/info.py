@@ -368,6 +368,12 @@ def _get_analysis_stats(
         bg_worker = getattr(bg_worker, "background_worker", None)
         if bg_worker is not None:
             stats["pending_tasks"] = bg_worker.metrics.task_queue_depth
+            # Judge metrics
+            stats["judge_reviews_total"] = bg_worker.metrics.judge_reviews_total
+            stats["judge_approvals_total"] = bg_worker.metrics.judge_approvals_total
+            stats["judge_denials_total"] = bg_worker.metrics.judge_denials_total
+            stats["judge_deferrals_total"] = bg_worker.metrics.judge_deferrals_total
+            stats["judge_errors_total"] = bg_worker.metrics.judge_errors_total
     except Exception:
         logger.debug("Failed to compute analysis stats", exc_info=True)
 
@@ -419,6 +425,15 @@ async def config(
                 "model": cfg.llm_l3_analysis.model,
                 "reasoning_effort": cfg.llm_l3_analysis.reasoning_effort,
                 "timeout_ms": cfg.llm_l3_analysis.timeout_ms,
+            },
+            "llm_judge": {
+                "model": cfg.llm_judge.model,
+                "reasoning_effort": cfg.llm_judge.reasoning_effort,
+                "timeout_ms": cfg.llm_judge.timeout_ms,
+            },
+            "judge": {
+                "mode": cfg.judge.mode,
+                "notify_mode": cfg.judge.notify_mode,
             },
             "analysis": {
                 "enabled": cfg.analysis.enabled,

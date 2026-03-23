@@ -404,6 +404,15 @@ class Database:
         # Migration: convert risk_level from TEXT enum to INTEGER 1-10
         self._migrate_risk_level_numeric_sqlite(conn)
 
+        # Migration: add judge columns to audit_log
+        if not self._sqlite_column_exists(conn, "audit_log", "resolved_by"):
+            conn.execute("ALTER TABLE audit_log ADD COLUMN resolved_by TEXT")
+            logger.info("Migration: added resolved_by column to audit_log")
+
+        if not self._sqlite_column_exists(conn, "audit_log", "judge_reasoning"):
+            conn.execute("ALTER TABLE audit_log ADD COLUMN judge_reasoning TEXT")
+            logger.info("Migration: added judge_reasoning column to audit_log")
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
             "ON sessions(status, last_activity_at)"
@@ -741,6 +750,8 @@ class Database:
                 ("behavioral_analyses", "agent_id", "TEXT"),
                 ("behavioral_profiles", "agent_id", "TEXT NOT NULL DEFAULT ''"),
                 ("session_summaries", "summary_type", "TEXT NOT NULL DEFAULT 'window'"),
+                ("audit_log", "resolved_by", "TEXT"),
+                ("audit_log", "judge_reasoning", "TEXT"),
             ]
             for table, column, col_type in migrations:
                 cur.execute(

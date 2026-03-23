@@ -180,18 +180,39 @@ When a tool call is escalated:
 
 1. **Audit record** created with `decision=escalate`
 2. **Webhook** fires (if configured) to notify external systems
-3. **Notification** sent to user's configured channels (Pushover, Slack, webhook)
-4. **Client** blocks the tool call and directs the user to the Intaris UI
-5. **User** reviews the escalation in the Approvals tab and approves or denies
-6. **Resolution** recorded via `POST /api/v1/decision`
+3. **Judge review** (if `JUDGE_MODE` is `auto` or `advisory`): a more capable LLM automatically reviews the escalation with richer session context (30 recent tool calls + reasoning records). The judge can approve, deny, or defer to a human. See [Judge Auto-Resolution](#judge-auto-resolution) below.
+4. **Notification** sent to user's configured channels — behavior depends on `JUDGE_NOTIFY_MODE` when judge is enabled (`deny_only` by default: only notify on judge deny)
+5. **Client** blocks the tool call and polls `GET /audit/{call_id}` for resolution
+6. **Resolution** recorded via judge auto-resolution or human `POST /api/v1/decision`
+
+### Judge Auto-Resolution
+
+When `JUDGE_MODE` is enabled (`auto` or `advisory`), escalated tool calls are automatically reviewed by a judge LLM (default gpt-5.4) as a fire-and-forget async task. The judge does not block the evaluate response — the client still receives `decision=escalate` immediately and polls for resolution.
+
+| Mode | Behavior |
+|---|---|
+| `disabled` (default) | No judge. Escalations require human resolution. |
+| `auto` | Judge auto-resolves: approve or deny. Denies if uncertain (low confidence or defer). |
+| `advisory` | Judge reviews: approve, deny, or defer to human. Deferred escalations remain unresolved with judge reasoning visible in the UI. |
+
+**Notification modes** (`JUDGE_NOTIFY_MODE`):
+- `deny_only` (default): Only notify when judge denies.
+- `always`: Notify on escalation (before judge) AND on judge resolution.
+- `never`: Fully silent — no notifications in judge mode.
+
+**Fail-open**: If the judge LLM fails, the escalation remains unresolved for human review.
+
+**Race condition**: If a human resolves before the judge, the atomic `WHERE user_decision IS NULL` guard prevents double-resolution. The judge exits gracefully.
+
+Judge decisions are visible in the Approvals tab with a "judge" badge and the judge's reasoning alongside the original evaluator reasoning.
 
 ### Escalation Retry
 
-When a tool call is escalated and later approved, subsequent identical calls (same tool + same args) reuse the approval for 10 minutes. Identity is based on SHA-256 of the normalized arguments JSON.
+When a tool call is escalated and later approved (by human or judge), subsequent identical calls (same tool + same args) reuse the approval for 10 minutes. Identity is based on SHA-256 of the normalized arguments JSON.
 
 ### Standalone Mode
 
-Without a webhook configured, escalations are denied by default with a message directing the user to the Intaris UI. With the management UI, users can still approve escalations manually.
+Without a webhook configured, escalations are denied by default with a message directing the user to the Intaris UI. With the management UI, users can still approve escalations manually. With the judge enabled, escalations can be auto-resolved without any human interaction.
 
 ## Rate Limiting
 

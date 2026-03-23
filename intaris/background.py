@@ -59,6 +59,12 @@ class Metrics:
         self.summary_event_store_fallback_total: int = 0
         # Safety valve activations (content truncation)
         self.safety_valve_hits_total: int = 0
+        # Judge auto-resolution metrics
+        self.judge_reviews_total: int = 0
+        self.judge_approvals_total: int = 0
+        self.judge_denials_total: int = 0
+        self.judge_deferrals_total: int = 0
+        self.judge_errors_total: int = 0
         # Gauges
         self.sessions_needing_summaries: int = 0
         # Liveness timestamps (ISO 8601)
@@ -84,6 +90,11 @@ class Metrics:
             "summary_partitions_total": self.summary_partitions_total,
             "summary_event_store_fallback_total": self.summary_event_store_fallback_total,
             "safety_valve_hits_total": self.safety_valve_hits_total,
+            "judge_reviews_total": self.judge_reviews_total,
+            "judge_approvals_total": self.judge_approvals_total,
+            "judge_denials_total": self.judge_denials_total,
+            "judge_deferrals_total": self.judge_deferrals_total,
+            "judge_errors_total": self.judge_errors_total,
             "sessions_needing_summaries": self.sessions_needing_summaries,
             "last_worker_poll": self.last_worker_poll,
             "last_idle_sweep": self.last_idle_sweep,

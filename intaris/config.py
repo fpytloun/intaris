@@ -261,6 +261,34 @@ class NotificationConfig:
 
 
 @dataclass
+class JudgeConfig:
+    """Judge auto-resolution configuration.
+
+    Controls the judge feature: a more capable LLM that automatically
+    reviews escalated tool calls and resolves them without requiring
+    human intervention.
+
+    Modes:
+    - ``disabled``: No judge. Escalations require human resolution.
+    - ``auto``: Judge auto-resolves: approve or deny. Deny if uncertain.
+    - ``advisory``: Judge reviews: approve, deny, or defer to human.
+
+    Notification modes (when judge is enabled):
+    - ``deny_only``: Only notify when judge denies (default).
+    - ``always``: Notify on escalation (before judge) AND on resolution.
+    - ``never``: Fully silent — no notifications in judge mode.
+    """
+
+    # Judge mode: disabled, auto, advisory.
+    mode: str = field(default_factory=lambda: _env("JUDGE_MODE", "disabled"))
+
+    # Notification mode when judge is enabled: deny_only, always, never.
+    notify_mode: str = field(
+        default_factory=lambda: _env("JUDGE_NOTIFY_MODE", "deny_only")
+    )
+
+
+@dataclass
 class EventStoreConfig:
     """Session event store configuration.
 
@@ -363,6 +391,27 @@ def _build_l3_analysis_llm_config() -> LLMConfig:
     )
 
 
+def _build_judge_llm_config() -> LLMConfig:
+    """Build LLM config for judge auto-resolution.
+
+    The judge uses a more capable model (default gpt-5.4) with longer
+    timeout than the evaluate model. It reviews escalated tool calls
+    with richer session context and makes approve/deny decisions.
+
+    Reads JUDGE_LLM_* env vars with fallback to the evaluate LLM
+    values for base_url and api_key (same provider/key is the common
+    case).
+    """
+    return LLMConfig(
+        model=_env("JUDGE_LLM_MODEL", "gpt-5.4"),
+        base_url=_env("JUDGE_LLM_BASE_URL") or _llm_base_url(),
+        api_key=_env("JUDGE_LLM_API_KEY") or _llm_api_key(),
+        temperature=0.1,
+        reasoning_effort=_env("JUDGE_LLM_REASONING_EFFORT", "low") or None,
+        timeout_ms=_env_int("JUDGE_LLM_TIMEOUT_MS", 15000),
+    )
+
+
 @dataclass
 class Config:
     """Root configuration container."""
@@ -370,7 +419,9 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     llm_analysis: LLMConfig = field(default_factory=_build_analysis_llm_config)
     llm_l3_analysis: LLMConfig = field(default_factory=_build_l3_analysis_llm_config)
+    llm_judge: LLMConfig = field(default_factory=_build_judge_llm_config)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
+    judge: JudgeConfig = field(default_factory=JudgeConfig)
     db: DBConfig = field(default_factory=DBConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     webhook: WebhookConfig = field(default_factory=WebhookConfig)
@@ -447,6 +498,25 @@ class Config:
                 "configuration (typically a more capable model with longer "
                 "timeout than the evaluate model). Set ANALYSIS_ENABLED=false "
                 "to disable behavioral analysis."
+            )
+
+        # Judge configuration validation.
+        if self.judge.mode not in ("disabled", "auto", "advisory"):
+            raise ValueError(
+                f"JUDGE_MODE={self.judge.mode} is not supported. "
+                "Use 'disabled', 'auto', or 'advisory'."
+            )
+        if self.judge.notify_mode not in ("deny_only", "always", "never"):
+            raise ValueError(
+                f"JUDGE_NOTIFY_MODE={self.judge.notify_mode} is not supported. "
+                "Use 'deny_only', 'always', or 'never'."
+            )
+        if self.judge.mode != "disabled" and not self.llm_judge.api_key:
+            logger.warning(
+                "JUDGE_MODE=%s but no judge LLM API key configured. "
+                "Judge will fail on first review. Set JUDGE_LLM_API_KEY "
+                "or LLM_API_KEY.",
+                self.judge.mode,
             )
 
         # Event store backend validation.

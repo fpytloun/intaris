@@ -260,7 +260,7 @@ class Evaluator:
         # Lookup behavioral profile for context injection
         profile_version: int | None = None
         if self._analysis_enabled and self._db is not None:
-            profile = self._get_behavioral_context(user_id, agent_id)
+            profile = self.get_behavioral_context(user_id, agent_id)
             if profile:
                 profile_version = profile.get("profile_version")
                 # Inject context for high+ risk profiles (score >= 9)
@@ -560,7 +560,7 @@ class Evaluator:
             "injection_detected": _injection_detected,
         }
 
-    def _get_behavioral_context(
+    def get_behavioral_context(
         self, user_id: str, agent_id: str | None = None
     ) -> dict[str, Any] | None:
         """Fast DB lookup of pre-computed behavioral profile.

@@ -763,9 +763,17 @@
                               <div class="text-xs text-muted mb-1">Resolution</div>
                               <div class="flex items-center gap-2">
                                 <span :class="decisionBadgeClass(expandedAuditRecord.user_decision)" x-text="expandedAuditRecord.user_decision"></span>
+                                <span x-show="expandedAuditRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
                                 <span class="text-sm" x-text="expandedAuditRecord.user_note" x-show="expandedAuditRecord.user_note"></span>
                                 <span class="text-xs text-muted" x-text="formatTime(expandedAuditRecord.resolved_at)"></span>
                               </div>
+                            </div>
+                          </template>
+                          <!-- Judge Reasoning -->
+                          <template x-if="expandedAuditRecord?.judge_reasoning">
+                            <div class="mb-2">
+                              <div class="text-xs text-muted mb-1">Judge Reasoning</div>
+                              <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="expandedAuditRecord.judge_reasoning"></div>
                             </div>
                           </template>
 
@@ -925,9 +933,17 @@
                     <div class="text-xs text-muted mb-1">Resolution</div>
                     <div class="flex items-center gap-2">
                       <span :class="decisionBadgeClass(expandedRecord.user_decision)" x-text="expandedRecord.user_decision"></span>
+                      <span x-show="expandedRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
                       <span class="text-sm" x-text="expandedRecord.user_note" x-show="expandedRecord.user_note"></span>
                       <span class="text-xs text-muted" x-text="formatTime(expandedRecord.resolved_at)"></span>
                     </div>
+                  </div>
+                </template>
+                <!-- Judge Reasoning -->
+                <template x-if="expandedRecord?.judge_reasoning">
+                  <div class="mb-3">
+                    <div class="text-xs text-muted mb-1">Judge Reasoning</div>
+                    <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="expandedRecord.judge_reasoning"></div>
                   </div>
                 </template>
 
@@ -990,6 +1006,14 @@
               <!-- Reasoning -->
               <div class="text-sm bg-brand-elevated rounded p-3 mb-3" x-text="item.reasoning" x-show="item.reasoning"></div>
 
+              <!-- Judge Reasoning (advisory mode deferred) -->
+              <template x-if="item.judge_reasoning">
+                <div class="mb-3">
+                  <div class="text-xs text-muted mb-1">Judge Recommendation</div>
+                  <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="item.judge_reasoning"></div>
+                </div>
+              </template>
+
               <!-- Args (expandable) -->
               <div x-show="item.args_redacted" class="mb-3">
                 <div class="flex items-center gap-2 mb-1">
@@ -1045,6 +1069,7 @@
                   <div class="flex items-center gap-3">
                     <span class="badge badge-escalate">escalate</span>
                     <span :class="decisionBadgeClass(item.user_decision)" x-text="item.user_decision"></span>
+                    <span x-show="item.resolved_by === 'judge'" class="badge badge-judge">judge</span>
                     <span class="font-mono text-sm" x-text="item.tool"></span>
                     <span :class="riskBadgeClass(item.risk)" x-text="item.risk" x-show="item.risk"></span>
                   </div>
@@ -1094,9 +1119,18 @@
                       <div class="text-xs text-muted mb-1">Resolution</div>
                       <div class="flex items-center gap-2">
                         <span :class="decisionBadgeClass(expandedResolvedRecord.user_decision)" x-text="expandedResolvedRecord.user_decision"></span>
+                        <span x-show="expandedResolvedRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
                         <span class="text-sm" x-text="expandedResolvedRecord.user_note" x-show="expandedResolvedRecord.user_note"></span>
                         <span class="text-xs text-muted" x-text="formatTime(expandedResolvedRecord.resolved_at)"></span>
                       </div>
+                    </div>
+                  </template>
+
+                  <!-- Judge Reasoning -->
+                  <template x-if="expandedResolvedRecord?.judge_reasoning">
+                    <div class="mb-3">
+                      <div class="text-xs text-muted mb-1">Judge Reasoning</div>
+                      <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="expandedResolvedRecord.judge_reasoning"></div>
                     </div>
                   </template>
 
@@ -2331,6 +2365,7 @@
                       <span :class="'badge badge-' + (r.decision || 'low')" x-text="r.decision"></span>
                       <span x-show="r.decision === 'escalate' && r.user_decision"
                             :class="'badge badge-' + (r.user_decision || 'low')" x-text="r.user_decision"></span>
+                      <span x-show="r.resolved_by === 'judge'" class="badge badge-judge text-xs">judge</span>
                       <span class="font-mono text-xs" x-text="r.tool || r.record_type"></span>
                       <span :class="'badge badge-' + (r.risk || 'low')" x-text="r.risk" x-show="r.risk" class="text-xs"></span>
                     </div>
@@ -2367,9 +2402,16 @@
                         <div class="text-xs text-muted mb-1">Resolution</div>
                         <div class="flex items-center gap-2">
                           <span :class="'badge badge-' + ($store.nav.sessionModalAuditRecord.user_decision || 'low')" x-text="$store.nav.sessionModalAuditRecord.user_decision"></span>
+                          <span x-show="$store.nav.sessionModalAuditRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
                           <span class="text-sm" x-text="$store.nav.sessionModalAuditRecord.user_note" x-show="$store.nav.sessionModalAuditRecord.user_note"></span>
                           <span class="text-xs text-muted" x-text="new Date($store.nav.sessionModalAuditRecord.resolved_at).toLocaleString()"></span>
                         </div>
+                      </div>
+                    </template>
+                    <template x-if="$store.nav.sessionModalAuditRecord?.judge_reasoning">
+                      <div class="mb-2">
+                        <div class="text-xs text-muted mb-1">Judge Reasoning</div>
+                        <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="$store.nav.sessionModalAuditRecord.judge_reasoning"></div>
                       </div>
                     </template>
                     <!-- Approve/Deny actions (if escalated and NOT yet resolved) -->

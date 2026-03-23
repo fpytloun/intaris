@@ -189,6 +189,7 @@ intaris/
 ├── server.py              # HTTP server, auth middleware, lifespan, MCP mount
 ├── config.py              # Environment variable configuration
 ├── evaluator.py           # Evaluation pipeline orchestrator
+├── judge.py               # Judge auto-resolution + shared resolution handler
 ├── classifier.py          # Tool call classification
 ├── decision.py            # Decision matrix
 ├── llm.py                 # OpenAI-compatible LLM client

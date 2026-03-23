@@ -215,7 +215,12 @@ Query audit records with filtering and pagination.
       "latency_ms": 0,
       "record_type": "tool_call",
       "intention": "Implement user authentication feature",
-      "timestamp": "2026-03-12T10:00:00Z"
+      "timestamp": "2026-03-12T10:00:00Z",
+      "user_decision": null,
+      "user_note": null,
+      "resolved_at": null,
+      "resolved_by": null,
+      "judge_reasoning": null
     }
   ],
   "total": 100,
@@ -224,13 +229,15 @@ Query audit records with filtering and pagination.
 }
 ```
 
+For escalated records that have been resolved, `user_decision` is `"approve"` or `"deny"`, `resolved_by` is `"user"` (human) or `"judge"` (judge LLM), and `judge_reasoning` contains the judge's reasoning when the judge reviewed the escalation.
+
 ### GET /audit/{call_id}
 
 Get a single audit record by call ID.
 
 ### POST /decision
 
-Resolve an escalated tool call (approve or deny).
+Resolve an escalated tool call (approve or deny). When the judge is enabled (`JUDGE_MODE`), escalations may also be auto-resolved by the judge — this endpoint is for human resolution.
 
 **Request:**
 

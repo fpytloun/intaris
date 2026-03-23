@@ -86,6 +86,10 @@ class MCPProxy:
         self._user_session_index: dict[tuple[str, str | None], str] = {}
         self._session_lock = asyncio.Lock()
 
+        # Optional judge reviewer for auto-resolving escalations.
+        # Set via set_judge_reviewer() after initialization.
+        self._judge_reviewer: Any | None = None
+
         # Create the MCP server and register handlers.
         self._server = Server("intaris-proxy")
         self._register_handlers()
@@ -106,6 +110,13 @@ class MCPProxy:
     def server(self) -> Server:
         """The underlying MCP server instance."""
         return self._server
+
+    def set_judge_reviewer(self, reviewer: Any) -> None:
+        """Set the judge reviewer for auto-resolving escalations.
+
+        Called from the lifespan after the judge reviewer is initialized.
+        """
+        self._judge_reviewer = reviewer
 
     @property
     def active_sessions(self) -> int:
@@ -367,11 +378,23 @@ class MCPProxy:
             ]
 
         if decision == "escalate":
+            # Launch judge review if enabled (fire-and-forget)
+            if self._judge_reviewer is not None and self._judge_reviewer.is_enabled:
+                asyncio.create_task(
+                    self._judge_reviewer.review_and_resolve(
+                        call_id=call_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                    )
+                )
+
+            reviewer_label = "review" if self._judge_reviewer else "human approval"
             return [
                 TextContent(
                     type="text",
                     text=(
-                        f"This tool call has been escalated for human approval "
+                        f"This tool call has been escalated for {reviewer_label} "
                         f"(call_id: {call_id}).\n"
                         f"Please wait for the approval to be resolved in the "
                         f"Intaris UI, then retry this exact tool call. "
@@ -603,13 +626,25 @@ class MCPProxy:
             }
 
         if decision == "escalate":
+            # Launch judge review if enabled (fire-and-forget)
+            if self._judge_reviewer is not None and self._judge_reviewer.is_enabled:
+                asyncio.create_task(
+                    self._judge_reviewer.review_and_resolve(
+                        call_id=call_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                    )
+                )
+
+            reviewer_label = "review" if self._judge_reviewer else "human approval"
             return {
                 "content": [
                     {
                         "type": "text",
                         "text": (
-                            f"This tool call has been escalated for human "
-                            f"approval (call_id: {call_id}).\n"
+                            f"This tool call has been escalated for "
+                            f"{reviewer_label} (call_id: {call_id}).\n"
                             f"Please wait for the approval to be resolved in "
                             f"the Intaris UI, then retry this exact tool call. "
                             f"Do not attempt alternative approaches until "

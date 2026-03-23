@@ -479,6 +479,34 @@ async def lifespan(app):
     background_worker.set_notification_dispatcher(notification_dispatcher)
     logger.info("Notification dispatcher initialized")
 
+    # Initialize judge reviewer for auto-resolution of escalations
+    if cfg.judge.mode != "disabled":
+        from intaris.audit import AuditStore as _AuditStore
+        from intaris.judge import JudgeReviewer
+        from intaris.llm import LLMClient as _LLMClient
+        from intaris.session import SessionStore as _SessionStore
+
+        judge_reviewer = JudgeReviewer(
+            llm=_LLMClient(cfg.llm_judge),
+            config=cfg.judge,
+            audit_store=_AuditStore(_get_db()),
+            session_store=_SessionStore(_get_db()),
+            evaluator=_get_evaluator(),
+            alignment_barrier=app.state.alignment_barrier,
+            event_bus=app.state.event_bus,
+            notification_dispatcher=notification_dispatcher,
+            metrics=background_worker.metrics,
+        )
+        app.state.judge_reviewer = judge_reviewer
+        logger.info(
+            "Judge reviewer initialized (mode=%s, notify=%s)",
+            cfg.judge.mode,
+            cfg.judge.notify_mode,
+        )
+    else:
+        app.state.judge_reviewer = None
+        logger.info("Judge reviewer disabled")
+
     # Warn if notification channels exist without encryption key
     if not cfg.mcp.encryption_key:
         try:
@@ -505,6 +533,10 @@ async def lifespan(app):
     app.state.mcp_proxy = mcp_proxy
     _mcp_proxy_ref = mcp_proxy
 
+    # Set judge reviewer on MCP proxy for escalation auto-resolution
+    if mcp_proxy is not None and app.state.judge_reviewer is not None:
+        mcp_proxy.set_judge_reviewer(app.state.judge_reviewer)
+
     # Propagate state to FastAPI sub-app so endpoints can access it
     # via request.app.state (request.app is the sub-app, not parent)
     api_app = getattr(app.state, "_api_app", None)
@@ -518,6 +550,7 @@ async def lifespan(app):
         api_app.state.alignment_barrier = app.state.alignment_barrier
         api_app.state.notification_dispatcher = notification_dispatcher
         api_app.state.event_store = app.state.event_store
+        api_app.state.judge_reviewer = app.state.judge_reviewer
 
     try:
         if mcp_proxy is not None:

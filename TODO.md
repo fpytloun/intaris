@@ -93,7 +93,7 @@ Only later when task was done, there was reasoning update to `Fixing a bug in th
 - Prometheus metrics, we want to know more about performance, like having histogram for evaluations, etc.
 - Grafana dashboard
 
-- Add Judge, model which will auto-resume suspended or auto-approve escalated actions by looking more thoroughly at the session. Further behavior could be configured in 3 modes: no judge, judge that can review deny/escalate/suspend session actions and perform final action - approve or deny so no human involved, judge that just review and can still do escalate action
+- ~~Add Judge, model which will auto-resume suspended or auto-approve escalated actions by looking more thoroughly at the session. Further behavior could be configured in 3 modes: no judge, judge that can review deny/escalate/suspend session actions and perform final action - approve or deny so no human involved, judge that just review and can still do escalate action~~ **Done** — Judge auto-resolution implemented with 3 modes (disabled/auto/advisory), configurable notifications, shared resolution handler, MCP proxy coverage, and full observability.
 
 - AI chat to examine session
 - Review async analytics of cross-sessions

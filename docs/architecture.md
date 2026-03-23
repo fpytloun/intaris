@@ -71,6 +71,7 @@ Intaris is a guardrails service that sits between AI agents and their tools. Eve
 | **Info** | `api/info.py` | Identity (/whoami), stats (/stats), config (/config) for management UI |
 | **Intention** | `intention.py` | IntentionBarrier (user-driven intention updates) + generate_intention() |
 | **Orchestration** | `evaluator.py` | Full evaluation pipeline (classify -> LLM -> decide -> audit), behavioral context |
+| **Judge** | `judge.py` | Judge auto-resolution (JudgeReviewer), shared resolution handler (resolve_with_side_effects) |
 | **Alignment** | `alignment.py` | AlignmentBarrier (parent/child intention enforcement via LLM) |
 | **Classification** | `classifier.py` | Read-only allowlist, critical patterns, session policy, path policy |
 | **Decision** | `decision.py` | Priority-ordered decision matrix |

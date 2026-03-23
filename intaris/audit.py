@@ -355,14 +355,18 @@ class AuditStore:
         user_note: str | None = None,
         *,
         user_id: str,
+        resolved_by: str = "user",
+        judge_reasoning: str | None = None,
     ) -> dict[str, Any]:
-        """Record a user's decision on an escalated tool call.
+        """Record a decision on an escalated tool call.
 
         Args:
             call_id: The escalated call to resolve.
             user_decision: "approve" or "deny".
-            user_note: Optional note from the user.
+            user_note: Optional note from the resolver.
             user_id: Tenant identifier.
+            resolved_by: Who resolved: "user" (human) or "judge" (LLM judge).
+            judge_reasoning: Judge's reasoning (stored when judge resolves).
 
         Returns:
             Updated audit record.
@@ -374,6 +378,10 @@ class AuditStore:
             raise ValueError(
                 f"Invalid user_decision '{user_decision}'. Must be 'approve' or 'deny'."
             )
+        if resolved_by not in ("user", "judge"):
+            raise ValueError(
+                f"Invalid resolved_by '{resolved_by}'. Must be 'user' or 'judge'."
+            )
 
         now = datetime.now(timezone.utc).isoformat()
 
@@ -383,12 +391,21 @@ class AuditStore:
             cur.execute(
                 """
                 UPDATE audit_log
-                SET user_decision = ?, user_note = ?, resolved_at = ?
+                SET user_decision = ?, user_note = ?, resolved_at = ?,
+                    resolved_by = ?, judge_reasoning = ?
                 WHERE call_id = ? AND user_id = ?
                   AND decision = 'escalate'
                   AND user_decision IS NULL
                 """,
-                (user_decision, user_note, now, call_id, user_id),
+                (
+                    user_decision,
+                    user_note,
+                    now,
+                    resolved_by,
+                    judge_reasoning,
+                    call_id,
+                    user_id,
+                ),
             )
             if cur.rowcount == 0:
                 # Determine why the update failed for a clear error message
@@ -407,6 +424,41 @@ class AuditStore:
                 raise ValueError(f"Failed to resolve escalation for {call_id}")
 
         return self.get_by_call_id(call_id, user_id=user_id)
+
+    def set_judge_reasoning(
+        self,
+        call_id: str,
+        judge_reasoning: str,
+        *,
+        user_id: str,
+    ) -> None:
+        """Store judge reasoning on an unresolved escalation.
+
+        Used in advisory mode when the judge defers to a human. The
+        reasoning is stored so the human can see the judge's analysis
+        when reviewing the escalation.
+
+        Idempotent: multiple calls overwrite the previous reasoning.
+        Only writes to unresolved escalations — if the escalation was
+        resolved between the judge's check and this write, the WHERE
+        clause prevents stale writes (rowcount=0, silently ignored).
+
+        Args:
+            call_id: The escalated call.
+            judge_reasoning: Judge's reasoning text.
+            user_id: Tenant identifier.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE audit_log
+                SET judge_reasoning = ?
+                WHERE call_id = ? AND user_id = ?
+                  AND decision = 'escalate'
+                  AND user_decision IS NULL
+                """,
+                (judge_reasoning, call_id, user_id),
+            )
 
     def get_window(
         self,

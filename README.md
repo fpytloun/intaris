@@ -28,6 +28,7 @@ Part of the [Cognara](https://github.com/fpytloun) platform (Cognis controller, 
 - **Session recording** -- Full-fidelity event logs with live tailing, playback, and chunked ndjson storage (filesystem or S3).
 - **Behavioral analysis** -- Three-layer system: per-call data collection, session summaries, and cross-session behavioral profiling.
 - **Management UI** -- Built-in web dashboard with session tree view, audit log, approval queue, MCP server management, and real-time charts.
+- **Judge auto-resolution** -- Escalated tool calls can be automatically reviewed by a more capable LLM (gpt-5.4), reducing human intervention while maintaining safety. Three modes: disabled, auto, advisory.
 - **Webhook callbacks** -- HMAC-signed escalation notifications for external approval systems.
 - **Notification channels** -- Per-user push notifications (Pushover, Slack, webhook) with one-click approve/deny action links.
 - **Rate limiting** -- Per-session sliding window rate limiter to prevent runaway agents.

@@ -118,6 +118,7 @@
   .badge-approve { @apply bg-emerald-500/15 text-emerald-400; }
   .badge-deny { @apply bg-red-500/15 text-red-400; }
   .badge-escalate { @apply bg-amber-500/15 text-amber-400; }
+  .badge-judge { @apply bg-purple-500/15 text-purple-400; }
 
   /* Risk badges */
   .badge-low { @apply bg-slate-500/15 text-slate-400; }

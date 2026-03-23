@@ -114,32 +114,73 @@ async def evaluate(
                 )
             )
 
-        # Fire-and-forget per-user notifications on escalation
+        # Judge auto-resolution and notification handling for escalations
+        judge_reviewer = getattr(http_request.app.state, "judge_reviewer", None)
         dispatcher = getattr(http_request.app.state, "notification_dispatcher", None)
-        if dispatcher is not None and result.get("decision") == "escalate":
-            from intaris.notifications.providers import Notification
 
-            notification = Notification(
-                event_type="escalation",
-                call_id=result["call_id"],
-                session_id=request.session_id,
-                user_id=ctx.user_id,
-                agent_id=agent_id,
-                tool=request.tool,
-                args_redacted=result.get("args_redacted"),
-                risk=result.get("risk"),
-                reasoning=result.get("reasoning"),
-                ui_url=None,  # Set by dispatcher
-                approve_url=None,  # Set by dispatcher
-                deny_url=None,  # Set by dispatcher
-                timestamp=datetime.now(tz.utc).isoformat(),
-            )
-            asyncio.create_task(
-                dispatcher.notify(
-                    user_id=ctx.user_id,
-                    notification=notification,
+        if result.get("decision") == "escalate":
+            if judge_reviewer is not None and judge_reviewer.is_enabled:
+                # Judge is enabled — notification behavior depends on notify_mode
+                if judge_reviewer.notify_mode == "always" and dispatcher is not None:
+                    # Send escalation notification before judge reviews
+                    from intaris.notifications.providers import Notification
+
+                    notification = Notification(
+                        event_type="escalation",
+                        call_id=result["call_id"],
+                        session_id=request.session_id,
+                        user_id=ctx.user_id,
+                        agent_id=agent_id,
+                        tool=request.tool,
+                        args_redacted=result.get("args_redacted"),
+                        risk=result.get("risk"),
+                        reasoning=result.get("reasoning"),
+                        ui_url=None,
+                        approve_url=None,
+                        deny_url=None,
+                        timestamp=datetime.now(tz.utc).isoformat(),
+                    )
+                    asyncio.create_task(
+                        dispatcher.notify(
+                            user_id=ctx.user_id,
+                            notification=notification,
+                        )
+                    )
+
+                # Launch judge review as fire-and-forget
+                asyncio.create_task(
+                    judge_reviewer.review_and_resolve(
+                        call_id=result["call_id"],
+                        user_id=ctx.user_id,
+                        session_id=request.session_id,
+                        agent_id=agent_id,
+                    )
                 )
-            )
+            elif dispatcher is not None:
+                # No judge — send escalation notification (current behavior)
+                from intaris.notifications.providers import Notification
+
+                notification = Notification(
+                    event_type="escalation",
+                    call_id=result["call_id"],
+                    session_id=request.session_id,
+                    user_id=ctx.user_id,
+                    agent_id=agent_id,
+                    tool=request.tool,
+                    args_redacted=result.get("args_redacted"),
+                    risk=result.get("risk"),
+                    reasoning=result.get("reasoning"),
+                    ui_url=None,
+                    approve_url=None,
+                    deny_url=None,
+                    timestamp=datetime.now(tz.utc).isoformat(),
+                )
+                asyncio.create_task(
+                    dispatcher.notify(
+                        user_id=ctx.user_id,
+                        notification=notification,
+                    )
+                )
 
         # Fire-and-forget notification on session suspension
         if dispatcher is not None and result.get("session_status") == "suspended":

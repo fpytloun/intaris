@@ -141,6 +141,25 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 
 Notification channels (Pushover, Slack, webhook) are configured per-user via the REST API, not environment variables.
 
+## Judge Auto-Resolution
+
+| Variable | Default | Description |
+|---|---|---|
+| `JUDGE_MODE` | `disabled` | Judge mode: `disabled` (no judge), `auto` (approve/deny, deny if uncertain), `advisory` (approve/deny/defer to human) |
+| `JUDGE_NOTIFY_MODE` | `deny_only` | When to notify in judge mode: `deny_only` (only on judge deny), `always` (on escalation + resolution), `never` (fully silent) |
+
+### LLM (Judge)
+
+The judge uses a more capable model (default gpt-5.4) with longer timeout than the evaluate model. Falls back to the evaluate LLM for base URL and API key.
+
+| Variable | Default | Description |
+|---|---|---|
+| `JUDGE_LLM_MODEL` | `gpt-5.4` | LLM model for judge reviews |
+| `JUDGE_LLM_BASE_URL` | (falls back to `LLM_BASE_URL`) | LLM base URL for judge |
+| `JUDGE_LLM_API_KEY` | (falls back to `LLM_API_KEY`) | LLM API key for judge |
+| `JUDGE_LLM_REASONING_EFFORT` | `low` | Reasoning effort for judge LLM |
+| `JUDGE_LLM_TIMEOUT_MS` | `15000` | Timeout for judge LLM calls in milliseconds |
+
 ## Client-Side Variables
 
 These are set on the client machine, not the Intaris server:
