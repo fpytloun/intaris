@@ -214,13 +214,11 @@ def generate_intention(
         intention = raw.strip().strip('"').strip("'")
         if not intention or len(intention) < 5:
             logger.info(
-                "LLM returned too-short intention (%d chars) for session=%s: %r",
+                "LLM returned too-short intention (%d chars) for session=%s",
                 len(intention or ""),
                 session_id,
-                intention,
             )
             return None
-
 
         session_store.update_session(
             session_id,
@@ -574,10 +572,10 @@ class IntentionBarrier:
             if result is not None:
                 self.update_count += 1
                 logger.info(
-                    "Intention updated for user=%s session=%s: %s",
+                    "Intention updated for user=%s session=%s (%d chars)",
                     user_id,
                     session_id,
-                    result[:80],
+                    len(result),
                 )
 
                 # Chain alignment re-check for child sessions.

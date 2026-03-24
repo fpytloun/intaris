@@ -244,14 +244,11 @@ def log_injection_warning(
         text: The original text (truncated in log output).
         findings: List of (category, matched_text) from detect_injection_patterns.
     """
-    # Truncate and escape for safe logging
-    preview = text[:200].replace("\n", "\\n")
-    categories = ", ".join(f"{cat}:{match}" for cat, match in findings)
+    categories = ", ".join(cat for cat, _ in findings)
     logger.warning(
-        "Injection pattern detected in %s: [%s] — preview: %s",
+        "Injection pattern detected in %s: [%s]",
         source,
         categories,
-        preview,
     )
 
 

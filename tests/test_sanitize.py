@@ -249,7 +249,8 @@ class TestLogInjectionWarning:
             )
         assert "Injection pattern detected in tool_args" in caplog.text
 
-    def test_truncates_long_text(self, caplog):
+    def test_no_content_in_log(self, caplog):
+        """Verify that text content is NOT logged (only categories)."""
         import logging
 
         long_text = "x" * 500
@@ -259,20 +260,26 @@ class TestLogInjectionWarning:
                 long_text,
                 [("test", "match")],
             )
-        # Preview should be truncated to 200 chars
-        assert "x" * 200 in caplog.text
-        assert "x" * 201 not in caplog.text
+        # Content should NOT appear in logs
+        assert "xxxxx" not in caplog.text
+        # But category and source should
+        assert "intention" in caplog.text
+        assert "test" in caplog.text
 
-    def test_escapes_newlines(self, caplog):
+    def test_categories_without_matched_text(self, caplog):
+        """Verify that matched text is NOT included in log categories."""
         import logging
 
         with caplog.at_level(logging.WARNING, logger="intaris.sanitize"):
             log_injection_warning(
                 "context",
                 "line1\nline2\nline3",
-                [("test", "match")],
+                [("chat_template", "<|im_start|>")],
             )
-        assert "\\n" in caplog.text
+        # Category name should appear
+        assert "chat_template" in caplog.text
+        # But matched text should NOT appear
+        assert "<|im_start|>" not in caplog.text
 
 
 # ── validate_agent_id ────────────────────────────────────────────────

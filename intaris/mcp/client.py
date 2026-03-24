@@ -715,7 +715,9 @@ class _StderrLogger(io.RawIOBase):
                 for line in f:
                     stripped = line.rstrip()
                     if stripped:
-                        logger.warning("[%s stderr] %s", self._server_name, stripped)
+                        logger.warning(
+                            "[%s stderr] %s", self._server_name, stripped[:200]
+                        )
         except Exception:
             pass  # Pipe closed — subprocess exited.
 

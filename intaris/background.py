@@ -268,7 +268,7 @@ class TaskQueue:
                     "Task %s failed permanently after %d retries: %s",
                     task_id,
                     retry_count,
-                    error,
+                    error[:200],
                 )
             else:
                 # Schedule retry with exponential backoff
@@ -298,7 +298,7 @@ class TaskQueue:
                     retry_count,
                     max_retries,
                     backoff_seconds,
-                    error,
+                    error[:200],
                 )
 
     def reset_stale_running(self, max_age_minutes: int = 0) -> int:
@@ -753,7 +753,9 @@ class BackgroundWorker:
                     # "Session not found" is permanent — don't retry
                     if "not found" in error_msg.lower():
                         logger.warning(
-                            "Task %s: permanent error: %s", task_id, error_msg
+                            "Task %s: permanent error: %s",
+                            task_id,
+                            error_msg[:200],
                         )
                     else:
                         raise RuntimeError(f"Task returned error: {error_msg}")

@@ -44,8 +44,13 @@ def _parse_api_keys() -> dict[str, str]:
         if not isinstance(keys, dict):
             raise ValueError("INTARIS_API_KEYS must be a JSON object")
         return {str(k): str(v) for k, v in keys.items()}
-    except (json.JSONDecodeError, ValueError) as e:
-        logger.error("Failed to parse INTARIS_API_KEYS: %s", e)
+    except json.JSONDecodeError as e:
+        logger.error(
+            "Failed to parse INTARIS_API_KEYS: %s at position %d", e.msg, e.pos or 0
+        )
+        return {}
+    except ValueError as e:
+        logger.error("Failed to parse INTARIS_API_KEYS: invalid value")
         return {}
 
 

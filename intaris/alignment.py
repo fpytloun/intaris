@@ -483,10 +483,9 @@ class AlignmentBarrier:
                     f"Parent intention: {parent_intention}"
                 )
                 logger.warning(
-                    "Alignment check FAILED for session %s (parent=%s): %s",
+                    "Alignment check FAILED for session %s (parent=%s)",
                     session_id,
                     parent_session_id,
-                    reasoning,
                 )
 
                 # Store misalignment and decide whether to publish in a
@@ -517,10 +516,9 @@ class AlignmentBarrier:
                     )
             else:
                 logger.debug(
-                    "Alignment check PASSED for session %s (parent=%s): %s",
+                    "Alignment check PASSED for session %s (parent=%s)",
                     session_id,
                     parent_session_id,
-                    reasoning,
                 )
                 # Clear any prior misalignment (intention may have changed)
                 with self._lock:

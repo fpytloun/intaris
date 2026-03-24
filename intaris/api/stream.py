@@ -133,7 +133,10 @@ class EventBus:
         event_session_id = event.get("session_id")
 
         if not event_user_id:
-            logger.warning("EventBus: event missing user_id, dropping: %s", event)
+            logger.warning(
+                "EventBus: event missing user_id, dropping (type=%s)",
+                event.get("type", "unknown"),
+            )
             return
 
         with self._lock:

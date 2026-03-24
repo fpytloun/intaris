@@ -182,10 +182,10 @@ class LLMClient:
                 )
             else:
                 logger.warning(
-                    "LLM returned empty content (finish_reason=%s, refusal=%s), "
+                    "LLM returned empty content (finish_reason=%s, refusal_present=%s), "
                     "retrying (%d/%d)",
                     choice.finish_reason,
-                    refusal,
+                    bool(refusal),
                     retry + 1,
                     content_retries,
                 )
@@ -198,10 +198,10 @@ class LLMClient:
                 refusal = getattr(choice.message, "refusal", None)
                 logger.warning(
                     "LLM returned empty content after %d retries "
-                    "(finish_reason=%s, refusal=%s)",
+                    "(finish_reason=%s, refusal_present=%s)",
                     content_retries,
                     choice.finish_reason,
-                    refusal,
+                    bool(refusal),
                 )
 
         return _clean_response(content)

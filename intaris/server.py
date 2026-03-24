@@ -31,6 +31,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     stream=sys.stderr,
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("intaris")
 
 # ── Session Identity Context ──────────────────────────────────────────
@@ -345,7 +346,13 @@ async def lifespan(app):
 
     app.state.webhook = WebhookClient(cfg.webhook)
     if app.state.webhook.is_configured():
-        logger.info("Webhook client initialized (url=%s)", cfg.webhook.url)
+        from urllib.parse import urlparse
+
+        _parsed = urlparse(cfg.webhook.url)
+        _masked = f"{_parsed.scheme}://{_parsed.hostname}"
+        if _parsed.port:
+            _masked += f":{_parsed.port}"
+        logger.info("Webhook client initialized (url=%s)", _masked)
     else:
         logger.info("Webhook not configured (standalone mode)")
 
