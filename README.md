@@ -113,7 +113,7 @@ See the [Management UI docs](docs/management-ui.md) for all tabs and features.
 |---|---|---|
 | [OpenCode](https://opencode.ai) | Plugin (`intaris.ts`) | [OpenCode Guide](docs/clients/opencode.md) |
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | Hooks (bash scripts) | [Claude Code Guide](docs/clients/claude-code.md) |
-| [OpenClaw](https://github.com/fpytloun/openclaw/tree/v2026.3.13) | Extension (`@openclaw/intaris`) | [OpenClaw Guide](docs/clients/openclaw.md) |
+| [OpenClaw](https://openclaw.ai) | Plugin ([`@fpytloun/openclaw-intaris`](https://www.npmjs.com/package/@fpytloun/openclaw-intaris)) | [OpenClaw Guide](docs/clients/openclaw.md) |
 | Any MCP client | MCP proxy (`/mcp` endpoint) | [MCP Proxy Guide](docs/mcp-proxy.md) |
 
 **Plugin/Hooks** give fine-grained control: custom error messages, fail-open/fail-closed behavior, session lifecycle management, and behavioral analysis. **MCP proxy** is zero-code configuration but with less UX control.

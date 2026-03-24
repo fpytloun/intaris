@@ -1,27 +1,40 @@
-# OpenClaw Integration
+# OpenClaw
 
-A plugin for [OpenClaw](https://github.com/fpytloun/openclaw/tree/v2026.3.13) that evaluates every tool call through Intaris's safety pipeline before allowing execution.
+[OpenClaw](https://openclaw.ai) has a plugin system that enables tool call safety evaluation via lifecycle hooks. The Intaris plugin intercepts every tool call and evaluates it through Intaris's safety pipeline before allowing execution.
 
-> **Note:** The Intaris extension is not yet merged upstream. It is available in our fork at [`extensions/intaris/`](https://github.com/fpytloun/openclaw/tree/v2026.3.13/extensions/intaris) for version `v2026.3.13`.
+## Install
 
-## Features
+```bash
+openclaw plugins install @fpytloun/openclaw-intaris
+```
 
-The intaris extension hooks into OpenClaw's plugin system, intercepting every tool call via `before_tool_call` and evaluating it through Intaris's REST API. This gives you:
+## Configure
 
-- Fine-grained control over error messages
-- Configurable fail-open/fail-closed behavior
-- Session lifecycle management (including hierarchical sub-agent sessions)
-- Behavioral analysis: periodic checkpoints, session completion signals, agent summaries
-- Escalation polling with exponential backoff
-- Intention tracking with reasoning context forwarding
-- MCP tool proxy (upstream MCP tools registered as native OpenClaw agent tools)
-- Session recording with buffered batch sends
+Add to your `openclaw.json`:
 
-## Setup
+```jsonc
+{
+  "plugins": {
+    "entries": {
+      "intaris": {
+        "enabled": true,
+        "config": {
+          "url": "http://localhost:8060",
+          "apiKey": "${INTARIS_API_KEY}",
+          "allowPaths": "~/",
+          "recording": true
+        }
+      }
+    }
+  }
+}
+```
 
-### 1. Configuration
+Config values support `${ENV_VAR}` syntax for environment variable resolution.
 
-The plugin can be configured via OpenClaw's settings UI (the manifest provides a config schema with UI hints) or via environment variables. Plugin config takes priority over environment variables.
+### Configuration Options
+
+The plugin can be configured via OpenClaw's settings UI (the manifest provides a config schema with UI hints) or via environment variables. Plugin config takes priority.
 
 | Plugin Config | Env Var | Default | Description |
 |---|---|---|---|
@@ -41,49 +54,9 @@ The plugin can be configured via OpenClaw's settings UI (the manifest provides a
 
 **Note:** `agentId` is not configurable -- it is sourced from OpenClaw's hook context (`ctx.agentId`).
 
-### 2. Recommended Configuration
+## Verify
 
-Add the Intaris extension to your OpenClaw config. The `tools.alsoAllow` entry ensures Intaris's tool calls are permitted by OpenClaw's built-in permission system:
-
-```jsonc
-{
-  "tools": {
-    "alsoAllow": ["intaris"]
-  },
-  "plugins": {
-    "load": {
-      "paths": [
-        "/path/to/openclaw/extensions/intaris"
-      ]
-    },
-    "entries": {
-      "intaris": {
-        "enabled": true,
-        "config": {
-          "url": "http://localhost:8060",
-          "apiKey": "int-your-api-key",
-          "userId": "user@example.com",
-          "failOpen": false,
-          "allowPaths": "~/",
-          "escalationTimeout": 0,
-          "checkpointInterval": 25,
-          "recording": true,
-          "recordingFlushSize": 50,
-          "recordingFlushMs": 10000
-        }
-      }
-    }
-  }
-}
-```
-
-### 3. Installation
-
-The extension lives in the `extensions/intaris/` directory of the OpenClaw repository. Until this is merged into Openclaw upstream, you have to install Openclaw from our fork or port extensions/intaris directory into your installation.
-
-### 4. Verify
-
-After starting OpenClaw, open the Intaris management UI at `http://localhost:8060/ui`. You should see a new session appear in the Sessions tab when OpenClaw starts and agent receives first message.
+After starting OpenClaw, open the Intaris management UI at `http://localhost:8060/ui`. You should see a new session appear in the Sessions tab when OpenClaw starts and the agent receives its first message.
 
 ## How It Works
 

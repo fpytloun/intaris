@@ -33,6 +33,7 @@
 | Document | Description |
 |---|---|
 | [OpenCode](clients/opencode.md) | Plugin-based integration for OpenCode |
+| [OpenClaw](clients/openclaw.md) | Plugin-based integration for OpenClaw ([npm](https://www.npmjs.com/package/@fpytloun/openclaw-intaris)) |
 | [Claude Code](clients/claude-code.md) | Hooks-based integration for Claude Code |
 
 ## Development

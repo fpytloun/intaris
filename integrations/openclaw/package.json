@@ -1,0 +1,48 @@
+{
+  "name": "@fpytloun/openclaw-intaris",
+  "version": "0.1.0",
+  "description": "OpenClaw plugin for Intaris — tool call safety guardrails with session management and MCP proxy",
+  "type": "module",
+  "license": "MIT",
+  "author": "Filip Pytloun <filip@pytloun.cz>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fpytloun/intaris.git",
+    "directory": "integrations/openclaw"
+  },
+  "homepage": "https://github.com/fpytloun/intaris/tree/main/integrations/openclaw",
+  "bugs": {
+    "url": "https://github.com/fpytloun/intaris/issues"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.3.11"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "*.ts",
+    "!*.test.ts",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "plugin",
+    "guardrails",
+    "intaris",
+    "safety",
+    "tool-evaluation"
+  ]
+}

@@ -1,0 +1,35 @@
+name: Publish OpenClaw Plugin to npm
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # Required for OIDC trusted publishing
+
+jobs:
+  npm-publish:
+    runs-on: ubuntu-latest
+    # Only publish when the release tag starts with "openclaw-v"
+    if: startsWith(github.event.release.tag_name, 'openclaw-v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted publishing requires npm >= 11.5.1
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        working-directory: integrations/openclaw
+        run: npm install --omit=dev
+
+      - name: Publish to npm
+        working-directory: integrations/openclaw
+        run: npm publish --access public --provenance
+        # No NODE_AUTH_TOKEN needed — OIDC handles auth

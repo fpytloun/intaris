@@ -1,0 +1,96 @@
+{
+  "id": "intaris",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "Intaris server URL (default: http://localhost:8060)"
+      },
+      "apiKey": {
+        "type": "string",
+        "description": "API key for authentication"
+      },
+      "userId": {
+        "type": "string",
+        "description": "User identifier (optional if API key maps to user)"
+      },
+      "failOpen": {
+        "type": "boolean",
+        "description": "Allow tool calls when Intaris is unreachable (default: false)"
+      },
+      "allowPaths": {
+        "type": "string",
+        "description": "Comma-separated parent directories for policy allow_paths (e.g., ~/src)"
+      },
+      "escalationTimeout": {
+        "type": "number",
+        "description": "Max seconds to wait for escalation approval (0 = no timeout)",
+        "minimum": 0
+      },
+      "checkpointInterval": {
+        "type": "number",
+        "description": "Evaluate calls between checkpoints (0 = disabled, default: 25)",
+        "minimum": 0
+      },
+      "recording": {
+        "type": "boolean",
+        "description": "Enable session recording (default: false)"
+      },
+      "recordingFlushSize": {
+        "type": "number",
+        "description": "Events per recording batch flush (default: 50)",
+        "minimum": 1
+      },
+      "recordingFlushMs": {
+        "type": "number",
+        "description": "Recording flush interval in milliseconds (default: 10000)",
+        "minimum": 1000
+      }
+    }
+  },
+  "uiHints": {
+    "url": {
+      "label": "Intaris URL",
+      "placeholder": "http://localhost:8060"
+    },
+    "apiKey": {
+      "label": "API Key",
+      "sensitive": true,
+      "placeholder": "your-api-key"
+    },
+    "userId": {
+      "label": "User ID",
+      "placeholder": "optional",
+      "advanced": true
+    },
+    "failOpen": {
+      "label": "Fail Open",
+      "help": "If true, tool calls proceed when Intaris is unreachable"
+    },
+    "allowPaths": {
+      "label": "Allow Paths",
+      "placeholder": "~/src,~/projects",
+      "help": "Comma-separated parent directories to allow reads from",
+      "advanced": true
+    },
+    "escalationTimeout": {
+      "label": "Escalation Timeout",
+      "placeholder": "0",
+      "help": "Max seconds to wait for escalation approval (0 = no timeout)",
+      "advanced": true
+    },
+    "checkpointInterval": {
+      "label": "Checkpoint Interval",
+      "placeholder": "25",
+      "help": "Evaluate calls between checkpoints (0 = disabled)",
+      "advanced": true
+    },
+    "recording": {
+      "label": "Session Recording",
+      "help": "Enable session recording for audit trail",
+      "advanced": true
+    }
+  }
+}
