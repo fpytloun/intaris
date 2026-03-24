@@ -383,6 +383,9 @@ class ScenarioRunner:
 
         results: list[AgentResult] = []
         session_ids: list[str] = []
+        # Track scenario_name → session_id for parent_ref resolution
+        # (hierarchical scenarios reference their parent by name)
+        session_map: dict[str, str] = {}
         item_num = 0
 
         # Run individual scenarios
@@ -400,7 +403,12 @@ class ScenarioRunner:
                 scenario.name,
                 intensity,
             )
-            result = self.run_scenario(scenario)
+            # Resolve parent_ref to parent_session_id for child sessions
+            parent_session_id = None
+            if scenario.parent_ref and scenario.parent_ref in session_map:
+                parent_session_id = session_map[scenario.parent_ref]
+            result = self.run_scenario(scenario, parent_session_id=parent_session_id)
+            session_map[scenario.name] = result.session_id
             results.append(result)
             session_ids.append(result.session_id)
             logger.info("  Duration: %.1fs", result.duration_s)
@@ -516,6 +524,8 @@ class ScenarioRunner:
 
         results: list[AgentResult] = []
         session_ids: list[str] = []
+        # Track scenario_name → session_id for parent_ref resolution
+        session_map: dict[str, str] = {}
         item_num = 0
 
         for scenario in scenarios:
@@ -532,7 +542,12 @@ class ScenarioRunner:
                 scenario.name,
                 intensity,
             )
-            result = self.run_scenario(scenario)
+            # Resolve parent_ref to parent_session_id for child sessions
+            parent_session_id = None
+            if scenario.parent_ref and scenario.parent_ref in session_map:
+                parent_session_id = session_map[scenario.parent_ref]
+            result = self.run_scenario(scenario, parent_session_id=parent_session_id)
+            session_map[scenario.name] = result.session_id
             results.append(result)
             session_ids.append(result.session_id)
             logger.info("  Duration: %.1fs", result.duration_s)
