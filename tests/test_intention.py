@@ -250,7 +250,7 @@ class TestGenerateIntention:
         messages = call_args[0][0]
         user_prompt = messages[1]["content"]
         assert "Fix the login bug" in user_prompt
-        assert "most important signal" in messages[0]["content"]
+        assert "primary signal" in messages[0]["content"]
 
     def test_includes_parent_intention_for_sub_sessions(
         self, db, session_store, mock_llm
