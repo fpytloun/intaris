@@ -396,6 +396,12 @@ async def resolve_with_side_effects(
     if notification_dispatcher is not None and record is not None:
         from intaris.notifications.providers import Notification
 
+        # Use judge reasoning when the judge resolved, otherwise the
+        # original evaluator reasoning.
+        notification_reasoning = (
+            judge_reasoning if judge_reasoning else record.get("reasoning")
+        )
+
         notification = Notification(
             event_type="resolution",
             call_id=call_id,
@@ -405,7 +411,7 @@ async def resolve_with_side_effects(
             tool=record.get("tool"),
             args_redacted=None,
             risk=record.get("risk"),
-            reasoning=record.get("reasoning"),
+            reasoning=notification_reasoning,
             ui_url=None,
             approve_url=None,
             deny_url=None,
