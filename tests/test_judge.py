@@ -761,6 +761,357 @@ class TestJudgePrompt:
         formatted = JUDGE_SYSTEM_PROMPT.format(anti_injection=ANTI_INJECTION_PREAMBLE)
         assert "boundary tags" in formatted.lower() or "BOUNDARY" in formatted
 
+    def test_reasoning_not_truncated_at_200(self):
+        """Reasoning records longer than 200 chars appear in full (up to safety valve)."""
+        from intaris.judge import _build_judge_prompt
+
+        long_message = (
+            "User message: Ok perfect. Pushed both packages. "
+            "Now update docs for both projects to describe support "
+            "for openclaw in client docs and how to set it up and use it. "
+            "When done, commit everything, create tag and push."
+        )
+        assert len(long_message) > 200  # Would have been truncated before
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[
+                {
+                    "record_type": "reasoning",
+                    "content": long_message,
+                    "decision": "approve",
+                }
+            ],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+        )
+
+        # Full message should appear — not truncated at 200 chars
+        assert "create tag and push" in prompt
+        assert long_message in prompt
+
+    def test_reasoning_safety_valve(self):
+        """Reasoning records exceeding safety valve limit are truncated."""
+        from intaris.judge import _REASONING_CONTENT_LIMIT, _build_judge_prompt
+
+        huge_message = "x" * (_REASONING_CONTENT_LIMIT + 1000)
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[
+                {
+                    "record_type": "reasoning",
+                    "content": huge_message,
+                    "decision": "approve",
+                }
+            ],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+        )
+
+        # Should be truncated with ellipsis, not the full string
+        assert huge_message not in prompt
+        assert "..." in prompt
+
+    def test_reasoning_with_string_context(self):
+        """Reasoning records with string context render the context."""
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[
+                {
+                    "record_type": "reasoning",
+                    "content": "User message: ok, do it",
+                    "decision": "approve",
+                    "args_redacted": {
+                        "context": "I propose to refactor the auth module."
+                    },
+                }
+            ],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+        )
+
+        assert "ok, do it" in prompt
+        assert "[context]" in prompt
+        assert "refactor the auth module" in prompt
+
+    def test_reasoning_with_dict_context(self):
+        """Non-string context (dict) is rendered as JSON."""
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[
+                {
+                    "record_type": "reasoning",
+                    "content": "User message: proceed",
+                    "decision": "approve",
+                    "args_redacted": {"context": {"model": "gpt-4", "turn": 5}},
+                }
+            ],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+        )
+
+        assert "[context]" in prompt
+        assert "gpt-4" in prompt
+
+    def test_checkpoint_and_summary_skipped(self):
+        """Checkpoint and summary records are omitted from judge history."""
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[
+                {
+                    "record_type": "checkpoint",
+                    "content": "Agent checkpoint data",
+                    "decision": "approve",
+                    "tool": None,
+                    "args_redacted": None,
+                },
+                {
+                    "record_type": "summary",
+                    "content": "Session summary text",
+                    "decision": "approve",
+                    "tool": None,
+                    "args_redacted": None,
+                },
+                {
+                    "record_type": "tool_call",
+                    "tool": "bash",
+                    "args_redacted": {"command": "ls"},
+                    "decision": "approve",
+                    "reasoning": "Safe",
+                },
+            ],
+            session_stats={
+                "total_calls": 1,
+                "approved_count": 1,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+        )
+
+        # The checkpoint/summary content should NOT appear
+        assert "Agent checkpoint data" not in prompt
+        assert "Session summary text" not in prompt
+        # But the tool_call should appear
+        assert "[approve]" in prompt
+
+    def test_parent_recent_messages_in_subsession(self):
+        """Parent session reasoning records appear in sub-session judge prompt."""
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Child: examine auth code",
+            policy=None,
+            recent_history=[],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+            parent_intention="Implement auth system",
+            parent_recent_messages=[
+                {
+                    "record_type": "reasoning",
+                    "content": "User message: implement the auth system with OAuth2",
+                    "decision": "approve",
+                    "args_redacted": {
+                        "context": "I can help with that. Let me spawn sub-sessions."
+                    },
+                },
+                {
+                    "record_type": "reasoning",
+                    "content": "User message: yes, go ahead",
+                    "decision": "approve",
+                    "args_redacted": None,
+                },
+            ],
+        )
+
+        assert "Parent Session Context" in prompt
+        assert "⟨parent_context⟩" in prompt
+        assert "implement the auth system with OAuth2" in prompt
+        assert "yes, go ahead" in prompt
+        assert "[context]" in prompt
+        assert "spawn sub-sessions" in prompt
+
+    def test_system_prompt_has_subsession_trust_model(self):
+        """System prompt includes sub-session trust model guidance."""
+        from intaris.judge import JUDGE_SYSTEM_PROMPT
+        from intaris.sanitize import ANTI_INJECTION_PREAMBLE
+
+        formatted = JUDGE_SYSTEM_PROMPT.format(anti_injection=ANTI_INJECTION_PREAMBLE)
+        assert "Sub-Session Trust Model" in formatted
+        assert "parent agent" in formatted
+        assert "human user" in formatted
+
+
+# ── Audit get_recent Tests ────────────────────────────────────────────
+
+
+class TestAuditGetRecentBefore:
+    """Test audit.get_recent() with the before parameter."""
+
+    def test_get_recent_with_before(self, audit_store, session_store):
+        """Records after the before timestamp are excluded."""
+        _create_session(session_store)
+
+        # Insert 3 reasoning records
+        for i in range(3):
+            audit_store.insert(
+                call_id=f"call-{i}",
+                user_id="test-user",
+                session_id="test-session",
+                agent_id="test-agent",
+                tool=None,
+                args_redacted=None,
+                classification=None,
+                evaluation_path="reasoning",
+                decision="approve",
+                risk=None,
+                reasoning=None,
+                latency_ms=0,
+                record_type="reasoning",
+                content=f"Message {i}",
+            )
+
+        # Without before — should get all 3
+        all_records = audit_store.get_recent(
+            "test-session",
+            user_id="test-user",
+            record_type="reasoning",
+        )
+        assert len(all_records) == 3
+
+        # Use a stored timestamp as the cutoff to exercise the actual filter
+        mid_ts = all_records[1]["timestamp"]
+        bounded = audit_store.get_recent(
+            "test-session",
+            user_id="test-user",
+            record_type="reasoning",
+            before=mid_ts,
+        )
+        # Inclusive: records at or before mid_ts should be returned
+        assert 1 <= len(bounded) <= 3
+
+        # Before a very early timestamp — should get none
+        records = audit_store.get_recent(
+            "test-session",
+            user_id="test-user",
+            record_type="reasoning",
+            before="2000-01-01T00:00:00+00:00",
+        )
+        assert len(records) == 0
+
+    def test_get_recent_before_with_record_type(self, audit_store, session_store):
+        """Before parameter works together with record_type filter."""
+        _create_session(session_store)
+
+        # Insert a tool_call and a reasoning record
+        audit_store.insert(
+            call_id="tool-1",
+            user_id="test-user",
+            session_id="test-session",
+            agent_id="test-agent",
+            tool="bash",
+            args_redacted={"command": "ls"},
+            classification="read",
+            evaluation_path="fast",
+            decision="approve",
+            risk="low",
+            reasoning="Read-only",
+            latency_ms=1,
+        )
+        audit_store.insert(
+            call_id="reason-1",
+            user_id="test-user",
+            session_id="test-session",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted=None,
+            classification=None,
+            evaluation_path="reasoning",
+            decision="approve",
+            risk=None,
+            reasoning=None,
+            latency_ms=0,
+            record_type="reasoning",
+            content="User message: test",
+        )
+
+        # Filter by reasoning + future before — should get only reasoning
+        records = audit_store.get_recent(
+            "test-session",
+            user_id="test-user",
+            record_type="reasoning",
+            before="2099-01-01T00:00:00+00:00",
+        )
+        assert len(records) == 1
+        assert records[0]["record_type"] == "reasoning"
+
 
 # ── DB Migration Tests ────────────────────────────────────────────────
 

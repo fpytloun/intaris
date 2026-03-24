@@ -12,6 +12,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
@@ -121,13 +122,22 @@ async def submit_reasoning(
         sanitized = _sanitize_agent_text(request.content)
         call_id = str(uuid.uuid4())
 
+        # Store associated context (if provided) in args_redacted.
+        # Context is opaque supplementary data (e.g., assistant's last
+        # response, structured metadata) — sanitized before storage.
+        context_data: dict[str, Any] | None = None
+        if request.context:
+            sanitized_ctx = _sanitize_agent_text(request.context)
+            if sanitized_ctx:
+                context_data = {"context": sanitized_ctx}
+
         audit_store.insert(
             call_id=call_id,
             user_id=ctx.user_id,
             session_id=request.session_id,
             agent_id=ctx.agent_id,
             tool=None,
-            args_redacted=None,
+            args_redacted=context_data,
             classification=None,
             evaluation_path="reasoning",
             decision="approve",

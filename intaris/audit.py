@@ -60,7 +60,8 @@ class AuditStore:
             session_id: Session this call belongs to.
             agent_id: Agent that made the call (optional).
             tool: Tool name (e.g., "bash", "edit"). Null for reasoning checkpoints.
-            args_redacted: Tool arguments with secrets redacted. Null for reasoning.
+            args_redacted: Tool arguments with secrets redacted. For reasoning
+                records, may store associated context metadata.
             classification: "read" or "write". Null for reasoning checkpoints.
             evaluation_path: "fast", "critical", "llm", or "reasoning".
             decision: "approve", "deny", or "escalate".
@@ -265,6 +266,7 @@ class AuditStore:
         user_id: str,
         limit: int = 10,
         record_type: str | None = None,
+        before: str | None = None,
     ) -> list[dict[str, Any]]:
         """Get recent audit records for a session.
 
@@ -275,34 +277,41 @@ class AuditStore:
             user_id: Tenant identifier.
             limit: Max records to return.
             record_type: Filter by record type (e.g., "tool_call", "reasoning").
+            before: ISO timestamp upper bound (inclusive). When set, only
+                records with ``timestamp <= before`` are returned. Used
+                for time-bounding parent session queries to a child
+                session's creation time.
 
         Returns:
             List of audit record dicts, most recent first.
         """
+        if record_type and record_type not in self.VALID_RECORD_TYPES:
+            raise ValueError(
+                f"Invalid record_type '{record_type}'. "
+                f"Must be one of: {self.VALID_RECORD_TYPES}"
+            )
+
+        conditions = ["session_id = ?", "user_id = ?"]
+        params: list[Any] = [session_id, user_id]
+
         if record_type:
-            if record_type not in self.VALID_RECORD_TYPES:
-                raise ValueError(
-                    f"Invalid record_type '{record_type}'. "
-                    f"Must be one of: {self.VALID_RECORD_TYPES}"
-                )
-            sql = """
-                SELECT * FROM audit_log
-                WHERE session_id = ? AND user_id = ? AND record_type = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            """
-            params: tuple[Any, ...] = (session_id, user_id, record_type, limit)
-        else:
-            sql = """
-                SELECT * FROM audit_log
-                WHERE session_id = ? AND user_id = ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            """
-            params = (session_id, user_id, limit)
+            conditions.append("record_type = ?")
+            params.append(record_type)
+
+        if before:
+            conditions.append("timestamp <= ?")
+            params.append(before)
+
+        params.append(limit)
+        sql = (
+            "SELECT * FROM audit_log"
+            f" WHERE {' AND '.join(conditions)}"
+            " ORDER BY timestamp DESC"
+            " LIMIT ?"
+        )
 
         with self._db.cursor() as cur:
-            cur.execute(sql, params)
+            cur.execute(sql, tuple(params))
             rows = cur.fetchall()
 
         return [_row_to_dict(row) for row in rows]

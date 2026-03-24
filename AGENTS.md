@@ -294,11 +294,11 @@ The `audit_log` table supports multiple record types via the `record_type` colum
 | Type | Description | Key fields |
 |---|---|---|
 | `tool_call` | Standard tool call evaluation (default) | `tool`, `args_redacted`, `classification` |
-| `reasoning` | Agent reasoning text | `content` |
+| `reasoning` | Agent reasoning text | `content`, `args_redacted` (context) |
 | `checkpoint` | Periodic agent state checkpoint | `content` |
 | `summary` | Session summary record | `content` |
 
-For `tool_call` records, `tool`, `args_redacted`, and `classification` are populated. For `reasoning`, `checkpoint`, and `summary` records, `content` holds the text and tool-specific fields are null. All record types share `decision`, `risk`, `reasoning`, `evaluation_path`, and `latency_ms`. The `profile_version` column records the behavioral profile version at time of evaluation. The `resolved_by` column indicates who resolved an escalation (`"user"` for human, `"judge"` for judge LLM, NULL if unresolved). The `judge_reasoning` column stores the judge's reasoning when the judge reviews an escalation (regardless of outcome).
+For `tool_call` records, `tool`, `args_redacted`, and `classification` are populated. For `reasoning` records, `content` holds the text and `args_redacted` may store associated context metadata as `{"context": "..."}` (opaque supplementary data provided by the client, e.g., assistant's last response). For `checkpoint` and `summary` records, `content` holds the text and tool-specific fields are null. All record types share `decision`, `risk`, `reasoning`, `evaluation_path`, and `latency_ms`. The `profile_version` column records the behavioral profile version at time of evaluation. The `resolved_by` column indicates who resolved an escalation (`"user"` for human, `"judge"` for judge LLM, NULL if unresolved). The `judge_reasoning` column stores the judge's reasoning when the judge reviews an escalation (regardless of outcome).
 
 ### Evaluation paths
 
@@ -666,7 +666,7 @@ The rate limit check runs **before** classification/LLM in the evaluate endpoint
 
 ## Judge Auto-Resolution
 
-When a tool call is escalated, the judge — a more capable LLM (default gpt-5.4) with richer session context (30 recent tool calls + reasoning records) — automatically reviews and resolves the escalation. The judge runs as a fire-and-forget async task after the evaluate endpoint returns `decision=escalate` to the client.
+When a tool call is escalated, the judge — a more capable LLM (default gpt-5.4) with richer session context (30 recent records including reasoning with full context) — automatically reviews and resolves the escalation. The judge runs as a fire-and-forget async task after the evaluate endpoint returns `decision=escalate` to the client.
 
 ### Modes (`JUDGE_MODE`)
 
@@ -690,6 +690,8 @@ When a tool call is escalated, the judge — a more capable LLM (default gpt-5.4
 - **Shared resolution handler**: Both human (`POST /decision`) and judge resolution paths call `resolve_with_side_effects()` to ensure identical side effects (audit update, alignment barrier, path learning, EventBus, notifications).
 - **Prompt security**: Judge prompt uses the same anti-injection framework as the evaluator (`ANTI_INJECTION_PREAMBLE`, `wrap_with_boundary()`, `sanitize_for_prompt()`).
 - **Behavioral context**: Judge includes the behavioral profile (risk level, active alerts) in its evaluation context.
+- **Reasoning context**: Reasoning records are included without truncation (up to 8000-char safety valve). Associated context metadata (stored in `args_redacted.context`) is rendered alongside reasoning records. Checkpoint and summary records are omitted from judge history.
+- **Sub-session parent context**: For sub-sessions, the judge fetches the parent session's recent reasoning records (up to 10), time-bounded to the child session's `created_at` timestamp. This gives the judge visibility into the human user's messages that led to the sub-session being spawned. The system prompt includes a sub-session trust model explaining that sub-session "user messages" are actually parent-agent-generated instructions, not human user input.
 - **MCP proxy coverage**: Both REST API and MCP proxy escalation paths trigger the judge.
 - **Race condition handling**: If a human resolves before the judge, the atomic `WHERE user_decision IS NULL` guard prevents double-resolution. The judge catches the `ValueError` and exits gracefully.
 - **Fail-open**: If the judge LLM fails, the escalation remains unresolved for human review. A notification is sent if `notify_mode` allows.

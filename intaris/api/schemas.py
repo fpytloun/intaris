@@ -293,7 +293,8 @@ class ReasoningRequest(BaseModel):
         description=(
             "Optional conversational context (e.g., assistant's last response) "
             "to help interpret short user replies like 'ok, do it'. "
-            "Used for intention generation only — not stored in audit log."
+            "Used for intention generation and stored in the audit log "
+            "for judge evaluation context."
         ),
     )
 
