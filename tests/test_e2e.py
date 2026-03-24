@@ -2382,12 +2382,13 @@ class TestUserConfirmsIntentionUpdate:
     """User confirms expanded scope, intention updates, DB change passes.
 
     Real-world scenario: agent suggests a DB change, user says "yes,
-    go ahead." The intention is updated via PATCH to reflect the
-    expanded scope, and the DB change passes evaluation.
+    go ahead." The user message triggers the IntentionBarrier which
+    regenerates the intention to cover the expanded scope, and the DB
+    change passes evaluation.
     """
 
     def test_intention_update_allows_previously_blocked(self, client):
-        """After intention update, previously misaligned call is approved."""
+        """After intention update via user message, previously misaligned call is approved."""
         _create_session(
             client,
             "sess-intent-update",
@@ -2409,15 +2410,16 @@ class TestUserConfirmsIntentionUpdate:
             },
         )
 
-        # User confirms expanded scope — update intention
-        resp = client.patch(
-            "/api/v1/session/sess-intent-update",
-            json={
-                "intention": "Fix CSS styling on the login page and add display_name column to users table",
-            },
-            headers=_HEADERS,
+        # User confirms expanded scope — send user message to trigger
+        # intention update via IntentionBarrier (PATCH ignores the
+        # intention field by design; intention is user-driven via
+        # POST /reasoning only)
+        _submit_reasoning(
+            client,
+            "sess-intent-update",
+            "User message: Yes, go ahead and also add a display_name "
+            "column to the users table in PostgreSQL",
         )
-        assert resp.status_code == 200
 
         # Now the DB change should be aligned with the updated intention
         result = _evaluate(

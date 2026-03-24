@@ -30,13 +30,13 @@ Clients authenticate via `Authorization: Bearer <key>` header or `X-API-Key: <ke
 |---|---|---|
 | `LLM_API_KEY` | (required) | API key for the LLM provider. Falls back to `OPENAI_API_KEY`. |
 | `LLM_BASE_URL` | `https://api.openai.com/v1` | LLM API base URL. Falls back to `OPENAI_API_BASE`. |
-| `LLM_MODEL` | `gpt-5-nano` | Model for safety evaluation. Should be fast and cheap. |
+| `LLM_MODEL` | `gpt-5.4-nano` | Model for safety evaluation. Should be fast and cheap. |
 | `LLM_REASONING_EFFORT` | `low` | Reasoning effort hint (provider-specific). |
 | `LLM_TIMEOUT_MS` | `4000` | Timeout for LLM calls in milliseconds. Must be under the 5-second circuit breaker. Minimum: 500ms. |
 
 ### Model Selection
 
-The evaluation model should be fast and inexpensive -- it's called on every non-read-only tool call. `gpt-5-nano` or similar small models work well. The model must support structured output (JSON mode).
+The evaluation model should be fast and inexpensive -- it's called on every non-read-only tool call. `gpt-5.4-nano` or similar small models work well. The model must support structured output (JSON mode).
 
 ## LLM (L2 Behavioral Analysis)
 
@@ -46,7 +46,7 @@ Separate LLM configuration for L2 analysis tasks (session summaries). Typically 
 |---|---|---|
 | `ANALYSIS_LLM_API_KEY` | (falls back to `LLM_API_KEY`) | API key for analysis LLM |
 | `ANALYSIS_LLM_BASE_URL` | (falls back to `LLM_BASE_URL`) | Base URL for analysis LLM |
-| `ANALYSIS_LLM_MODEL` | `gpt-5-mini` | Model for L2 analysis tasks |
+| `ANALYSIS_LLM_MODEL` | `gpt-5.4-mini` | Model for L2 analysis tasks |
 | `ANALYSIS_LLM_REASONING_EFFORT` | `low` | Reasoning effort for analysis |
 | `ANALYSIS_LLM_TIMEOUT_MS` | `30000` | Timeout for analysis LLM calls (30s) |
 

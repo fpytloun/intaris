@@ -89,7 +89,7 @@ def _llm_base_url() -> str:
 class LLMConfig:
     """LLM configuration for safety evaluation."""
 
-    model: str = field(default_factory=lambda: _env("LLM_MODEL", "gpt-5-nano"))
+    model: str = field(default_factory=lambda: _env("LLM_MODEL", "gpt-5.4-nano"))
     base_url: str = field(default_factory=_llm_base_url)
     api_key: str = field(default_factory=_llm_api_key)
     temperature: float = 0.1
@@ -358,7 +358,7 @@ def _build_analysis_llm_config() -> LLMConfig:
     or use analysis-specific defaults.
     """
     return LLMConfig(
-        model=_env("ANALYSIS_LLM_MODEL", "gpt-5-mini"),
+        model=_env("ANALYSIS_LLM_MODEL", "gpt-5.4-mini"),
         base_url=_env("ANALYSIS_LLM_BASE_URL") or _llm_base_url(),
         api_key=_env("ANALYSIS_LLM_API_KEY") or _llm_api_key(),
         temperature=0.1,
@@ -399,7 +399,7 @@ def _build_l3_analysis_llm_config() -> LLMConfig:
 def _build_judge_llm_config() -> LLMConfig:
     """Build LLM config for judge auto-resolution.
 
-    The judge uses a more capable model (default gpt-5.4) with longer
+    The judge uses a more capable model (default gpt-5.4) with a longer
     timeout than the evaluate model. It reviews escalated tool calls
     with richer session context and makes approve/deny decisions.
 

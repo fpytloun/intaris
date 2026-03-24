@@ -63,14 +63,14 @@ services:
     environment:
       # LLM
       - LLM_API_KEY=sk-your-key
-      - LLM_MODEL=gpt-5-nano
+      - LLM_MODEL=gpt-5.4-nano
       - LLM_TIMEOUT_MS=4000
 
       # Authentication
       - INTARIS_API_KEYS={"key-alice": "alice@example.com", "key-bob": "bob@example.com"}
 
       # Analysis LLM (optional, more capable model)
-      - ANALYSIS_LLM_MODEL=gpt-5-mini
+      - ANALYSIS_LLM_MODEL=gpt-5.4-mini
       - ANALYSIS_LLM_TIMEOUT_MS=30000
 
       # Webhook (optional, for Cognis integration)

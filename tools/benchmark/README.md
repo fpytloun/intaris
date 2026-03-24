@@ -57,7 +57,7 @@ Key flags:
 - `--url` -- Intaris URL (default: `$INTARIS_URL` or `http://localhost:8060`)
 - `--api-key` -- Intaris API key (default: `$INTARIS_API_KEY`)
 - `--llm-api-key` -- Agent LLM API key (default: `$LLM_API_KEY`)
-- `--llm-model` -- Agent LLM model (default: `gpt-5-nano`)
+- `--llm-model` -- Agent LLM model (default: `gpt-5.4-nano`)
 - `--user` -- User ID (default: auto-generated per run for L3 isolation)
 - `--agent` -- Agent ID (default: `opencode`)
 - `--intensity` -- Override scenario intensity (0.0-1.0)

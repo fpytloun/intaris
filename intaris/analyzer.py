@@ -115,7 +115,7 @@ _PARENT_RECHECK_DELAY_S = 30
 
 # ── L3 progressive summarization ─────────────────────────────────────
 # Budget for L3 cross-session analysis prompts.  L3 typically uses
-# more capable models (gpt-5.4) with larger context windows.
+# more capable models (e.g. gpt-5.4) with larger context windows.
 # Override with ANALYSIS_L3_WINDOW_CHARS env var.
 _L3_MAX_WINDOW_CHARS = int(os.environ.get("ANALYSIS_L3_WINDOW_CHARS", "200000"))
 # Sessions within this many days get full summary narrative;

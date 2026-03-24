@@ -247,8 +247,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--llm-model",
-        default="gpt-5-nano",
-        help="LLM model for the agent (default: gpt-5-nano)",
+        default="gpt-5.4-nano",
+        help="LLM model for the agent (default: gpt-5.4-nano)",
     )
     run_parser.add_argument(
         "--intensity",

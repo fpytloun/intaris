@@ -7,7 +7,7 @@ Intaris includes a built-in benchmark system that simulates AI agents with vario
 The benchmark uses a hybrid approach:
 
 - **Scripted scenarios** -- deterministic tool call sequences with explicit harmful actions (destructive commands, data exfiltration, backdoor insertion). No LLM dependency, fast, reproducible. Tests classification, decision matrix, path protection, session policy.
-- **Generative scenarios** -- LLM-driven agents (gpt-5-nano) with hidden behavioral directives that produce realistic drift, scope creep, and subtle misalignment patterns. Tests behavioral analysis and L2/L3 detection.
+- **Generative scenarios** -- LLM-driven agents (gpt-5.4-nano) with hidden behavioral directives that produce realistic drift, scope creep, and subtle misalignment patterns. Tests behavioral analysis and L2/L3 detection.
 
 Each scenario defines a visible **intention** (what Intaris sees) and either scripted steps or a hidden directive (what the agent actually does). The benchmark evaluates every Intaris decision against ground truth using a separate evaluator LLM (gpt-5.4).
 
@@ -167,7 +167,7 @@ python -m tools.benchmark [global flags] run [run flags] [showcase]
 | Flag | Default | Description |
 |---|---|---|
 | `--llm-api-key` | `$LLM_API_KEY` | API key for agent LLM (generative scenarios) |
-| `--llm-model` | `gpt-5-nano` | Agent LLM model |
+| `--llm-model` | `gpt-5.4-nano` | Agent LLM model |
 | `--scenario NAME` | all | Run a specific scenario |
 | `--category NAME` | all | Run scenarios in a category |
 | `--user` | auto-generated | User ID (auto = isolated per run) |

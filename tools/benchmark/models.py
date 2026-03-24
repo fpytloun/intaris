@@ -169,7 +169,7 @@ class RunConfig:
     agent_id: str = "opencode"
     llm_api_key: str = ""
     llm_base_url: str | None = None
-    llm_model: str = "gpt-5-nano"
+    llm_model: str = "gpt-5.4-nano"
     intensity: float | None = None
     auto_resolve: bool = True
     delay_range: tuple[float, float] = (1.0, 5.0)

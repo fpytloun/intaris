@@ -533,13 +533,13 @@ class TestAnalysisConfigDefaults:
         assert config.api_key == "shared-key"
 
     def test_analysis_llm_model_default(self, monkeypatch):
-        """Analysis LLM defaults to gpt-5-mini (more capable than evaluate model)."""
+        """Analysis LLM defaults to gpt-5.4-mini (more capable than evaluate model)."""
         monkeypatch.delenv("ANALYSIS_LLM_MODEL", raising=False)
 
         from intaris.config import _build_analysis_llm_config
 
         config = _build_analysis_llm_config()
-        assert config.model == "gpt-5-mini"
+        assert config.model == "gpt-5.4-mini"
 
     def test_analysis_llm_timeout_default(self, monkeypatch):
         """Analysis LLM timeout defaults to 30s (longer than evaluate timeout)."""

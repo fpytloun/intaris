@@ -192,7 +192,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `SUMMARY_VOLUME_THRESHOLD` | Evaluate calls per session before triggering a summary (default `50`) |
 | `ANALYSIS_INTERVAL_MINUTES` | Minutes between periodic cross-session analysis runs (default `60`) |
 | `ANALYSIS_LOOKBACK_DAYS` | Days of history to include in cross-session analysis (default `7`) |
-| `ANALYSIS_LLM_MODEL` | LLM model for analysis tasks (default `gpt-5-mini`) |
+| `ANALYSIS_LLM_MODEL` | LLM model for analysis tasks (default `gpt-5.4-mini`) |
 | `ANALYSIS_LLM_BASE_URL` | LLM base URL for analysis (falls back to `LLM_BASE_URL`) |
 | `ANALYSIS_LLM_API_KEY` | LLM API key for analysis (falls back to `LLM_API_KEY`) |
 | `ANALYSIS_LLM_REASONING_EFFORT` | Reasoning effort for analysis LLM (default `low`) |
@@ -352,7 +352,7 @@ The `AlignmentBarrier` (`alignment.py`) enforces parent/child session intention 
 **Flow:**
 
 1. **Trigger at creation**: `POST /intention` with `parent_session_id` → validates parent exists → creates session (status=active) → triggers `alignment_barrier.trigger()` async.
-2. **Trigger on intention update**: When `IntentionBarrier` completes an intention update for a child session, or when `PATCH /session/{id}` updates a child session's intention, a re-check is triggered via `alignment_barrier.trigger()`. The `alignment_overridden` flag is cleared before re-triggering so the new intention is re-evaluated.
+2. **Trigger on intention update**: When `IntentionBarrier` completes an intention update for a child session (from a user message via `POST /reasoning`), a re-check is triggered via `alignment_barrier.trigger()`. The `alignment_overridden` flag is cleared before re-triggering so the new intention is re-evaluated. Note: `PATCH /session/{id}` does NOT update intentions — intention is managed exclusively by the IntentionBarrier.
 3. **Wait at evaluate**: `POST /evaluate` calls `await alignment_barrier.wait()` after the intention barrier wait. If a check is pending, it blocks up to `ALIGNMENT_BARRIER_TIMEOUT_MS` (default 15s).
 4. **Escalate on misalignment**: If the LLM determines the child intention contradicts the parent, the barrier stores the misalignment in memory. The evaluator returns `decision=escalate` with `evaluation_path=alignment` for subsequent tool calls. The client handles this like any other escalation (poll for user approval via `POST /decision`).
 5. **User acknowledgment**: When the user approves the alignment escalation via `POST /decision`, the `alignment_overridden` flag is set on the session (persisted to DB). Subsequent tool calls proceed through normal LLM evaluation with `parent_intention` injected as defense-in-depth.
@@ -848,7 +848,7 @@ pytest -m '' -v                     # all tests (unit + e2e)
 
 ### Default LLM config
 
-- Model: `gpt-5-nano` (fast, cheap, sufficient for safety evaluation)
+- Model: `gpt-5.4-nano` (fast, cheap, sufficient for safety evaluation)
 - Reasoning effort: `low`
 - Temperature: `0.1`
 - Timeout: `4000ms`
