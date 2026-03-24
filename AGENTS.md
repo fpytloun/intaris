@@ -496,7 +496,11 @@ Key indexes: `idx_sessions_parent ON sessions(user_id, parent_session_id)` for e
 
 | Constant | Value | Description |
 |---|---|---|
-| `_MAX_CHILD_SESSIONS` | 20 | Max children included in parent summary (breadth limit) |
+| `_MAX_CHILD_SESSIONS` | 100 | Safety valve for DB query (not a budget — actual display is controlled by `_MAX_CHILD_CHARS`) |
+| `_MAX_CHILD_CHARS` | 40,000 | Budget for child section in prompts (~28% of window budget). When exceeded, lower-risk children are compressed. |
+| `_CHILD_FULL_EST` | 3,500 | Estimated chars per full child entry (summary + header + stats + indicators) |
+| `_CHILD_COMPRESSED_EST` | 1,100 | Estimated chars per compressed child entry (shorter summary + stats + indicator names) |
+| `_CHILD_COMPRESSED_SUMMARY_CHARS` | 800 | Summary text limit for compressed children (vs `_MAX_SUMMARY_CHARS` for full) |
 | `_MAX_COMPACTION_WINDOWS` | 50 | Max window summaries in compaction prompt (token budget) |
 | `_MAX_SUMMARY_CHARS` | 3000 | Max chars per child/prior summary narrative |
 | `_MAX_PARENT_RECHECK` | 5 | Max re-enqueue attempts for parent waiting on children |
@@ -566,6 +570,8 @@ Tool call arguments are summarized differently based on classification:
 | `summary_child_triggers_total` | Total child summary tasks enqueued by parent orchestration |
 | `summary_max_children_per_task` | High-water mark of children per parent task |
 | `summary_parent_recheck_count` | Total parent re-enqueue cycles |
+| `summary_child_compressed_count` | Total children rendered in compressed format across all tasks |
+| `summary_child_overflow_total` | Total summary tasks where child budget was exceeded (compression applied) |
 | `compaction_total` | Total compacted summaries generated |
 | `safety_valve_hits_total` | Total safety valve activations (content truncated with metadata) |
 

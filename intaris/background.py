@@ -50,6 +50,8 @@ class Metrics:
         self.summary_child_triggers_total: int = 0
         self.summary_max_children_per_task: int = 0
         self.summary_parent_recheck_count: int = 0
+        self.summary_child_compressed_count: int = 0
+        self.summary_child_overflow_total: int = 0
         self.compaction_total: int = 0
         self.compaction_supersede_total: int = 0
         # Event-aware analysis metrics (m3 fix)
@@ -83,6 +85,8 @@ class Metrics:
             "summary_child_triggers_total": self.summary_child_triggers_total,
             "summary_max_children_per_task": self.summary_max_children_per_task,
             "summary_parent_recheck_count": self.summary_parent_recheck_count,
+            "summary_child_compressed_count": self.summary_child_compressed_count,
+            "summary_child_overflow_total": self.summary_child_overflow_total,
             "compaction_total": self.compaction_total,
             "compaction_supersede_total": self.compaction_supersede_total,
             "summary_event_enriched_total": self.summary_event_enriched_total,
@@ -706,6 +710,10 @@ class BackgroundWorker:
                     children_count = len(result.get("child_sessions", []))
                     if children_count > self.metrics.summary_max_children_per_task:
                         self.metrics.summary_max_children_per_task = children_count
+                    compressed = result.get("children_compressed", 0)
+                    if compressed:
+                        self.metrics.summary_child_overflow_total += 1
+                        self.metrics.summary_child_compressed_count += compressed
                     # Event-aware metrics
                     if result.get("event_enriched"):
                         self.metrics.summary_event_enriched_total += 1

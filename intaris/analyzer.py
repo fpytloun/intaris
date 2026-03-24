@@ -88,8 +88,20 @@ _USER_NOTE_LIMIT = 500  # human user's escalation notes
 # ── Structural limits ─────────────────────────────────────────────────
 # Maximum sessions to include in L3 analysis prompt
 _MAX_L3_SESSIONS = 50
-# Maximum child sessions to include in parent summary (ARB M2)
-_MAX_CHILD_SESSIONS = 20
+# Maximum child sessions to query from DB (safety valve, not a budget).
+# The actual display budget is controlled by _MAX_CHILD_CHARS.
+_MAX_CHILD_SESSIONS = 100
+# Budget for the child section in window/compaction prompts (~28% of
+# _MAX_WINDOW_CHARS).  When total child data exceeds this budget,
+# lower-risk children are compressed (shorter summary, indicator names
+# only).  Higher-risk children always get full detail.
+_MAX_CHILD_CHARS = 40_000
+# Estimated chars per full child entry (summary + header + stats + indicators)
+_CHILD_FULL_EST = 3_500
+# Estimated chars per compressed child entry (shorter summary + stats + names)
+_CHILD_COMPRESSED_EST = 1_100
+# Summary limit for compressed children (vs _MAX_SUMMARY_CHARS for full)
+_CHILD_COMPRESSED_SUMMARY_CHARS = 800
 # Maximum window summaries to include in compaction prompt.
 # Intaris-generated content (not attacker-controlled); cap is a
 # practical token budget safeguard, not a security boundary.
@@ -367,6 +379,7 @@ def generate_summary(
 
     # ── Step 1: Check for child sessions (parent hierarchy) ───────
     child_data: list[dict[str, Any]] = []
+    children_compressed = 0
     children = _get_child_sessions(db, user_id, session_id)
 
     if children:
@@ -411,6 +424,21 @@ def generate_summary(
 
         # Collect child data (compacted > window summaries only)
         child_data = _collect_child_data(db, user_id, children)
+
+        # Apply budget-aware risk-prioritized compression
+        if child_data:
+            child_data, _full_ct, children_compressed = _budget_child_sessions(
+                child_data
+            )
+            if children_compressed:
+                logger.info(
+                    "Parent session %s: %d children full detail, "
+                    "%d compressed (budget %d chars)",
+                    session_id,
+                    _full_ct,
+                    children_compressed,
+                    _MAX_CHILD_CHARS,
+                )
 
     # ── Step 2: Determine window range ────────────────────────────
     now = datetime.now(timezone.utc).isoformat()
@@ -825,6 +853,7 @@ def generate_summary(
             compaction_result["event_enriched"] = event_enriched
             compaction_result["event_store_fallback"] = event_store_fallback
             compaction_result["windows_generated"] = windows_generated
+            compaction_result["children_compressed"] = children_compressed
             return compaction_result
 
     # If we only generated tail window(s), return that info
@@ -839,6 +868,7 @@ def generate_summary(
             "event_enriched": event_enriched,
             "event_store_fallback": event_store_fallback,
             "windows_generated": windows_generated,
+            "children_compressed": children_compressed,
         }
 
     # Exactly 1 window exists, no compaction needed
@@ -1239,8 +1269,10 @@ def _get_child_sessions(
 ) -> list[dict[str, Any]]:
     """Get child sessions for a parent, sorted by last_activity_at DESC.
 
-    Returns up to _MAX_CHILD_SESSIONS children. Logs a warning if
-    the breadth limit is hit.
+    Returns up to _MAX_CHILD_SESSIONS children (safety valve).
+    Always attaches ``_total_children`` metadata so the LLM knows the
+    full scope of delegation even when some children are compressed or
+    omitted.
     """
     with db.cursor() as cur:
         cur.execute(
@@ -1258,18 +1290,19 @@ def _get_child_sessions(
         )
         rows = [dict(row) for row in cur.fetchall()]
 
-    if len(rows) > _MAX_CHILD_SESSIONS:
-        total_children = len(rows)
+    total_children = len(rows)
+    if total_children > _MAX_CHILD_SESSIONS:
         rows = rows[:_MAX_CHILD_SESSIONS]
         logger.warning(
-            "Parent session %s: breadth limit hit (%d children, cap %d)",
+            "Parent session %s: safety valve hit (%d children, cap %d)",
             parent_session_id,
             total_children,
             _MAX_CHILD_SESSIONS,
         )
-        # Attach metadata about omitted children
-        for row in rows:
-            row["_total_children"] = total_children
+
+    # Always attach total count so the LLM knows the full delegation scope
+    for row in rows:
+        row["_total_children"] = total_children
 
     return rows
 
@@ -1382,6 +1415,82 @@ def _collect_child_data(
         child_data.append(entry)
 
     return child_data
+
+
+def _child_risk_sort_key(child: dict[str, Any]) -> tuple[int, int, int]:
+    """Sort key for risk-prioritized child ordering.
+
+    Lower tuple = higher risk = processed first (gets full format).
+
+    Priority:
+    1. misaligned children (alignment_rank=0)
+    2. partially_aligned children (alignment_rank=1)
+    3. unclear alignment (alignment_rank=2)
+    4. aligned children (alignment_rank=3)
+
+    Within the same alignment rank, children with higher max severity
+    from risk indicators come first.  Total calls is a final tiebreaker
+    (more calls = more important).
+    """
+    alignment = child.get("intent_alignment", "unclear")
+    alignment_rank = {
+        "misaligned": 0,
+        "partially_aligned": 1,
+        "unclear": 2,
+        "aligned": 3,
+    }.get(alignment, 2)
+
+    indicators = child.get("risk_indicators", [])
+    max_severity = 0
+    if isinstance(indicators, list):
+        for ind in indicators:
+            sev = ind.get("severity", 0)
+            if isinstance(sev, (int, float)) and sev > max_severity:
+                max_severity = int(sev)
+
+    total_calls = child.get("total_calls", 0) or 0
+
+    # Negate severity and calls so higher values sort first
+    return (alignment_rank, -max_severity, -total_calls)
+
+
+def _budget_child_sessions(
+    child_data: list[dict[str, Any]],
+    budget: int = _MAX_CHILD_CHARS,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Apply budget-aware risk-prioritized compression to child sessions.
+
+    Sorts children by risk (highest first) and assigns full or compressed
+    format based on the character budget.  Suspicious/misaligned children
+    always get full detail; aligned/low-risk children get compressed
+    format (shorter summary, indicator names only) when the budget is
+    exceeded.
+
+    Returns ``(processed_children, full_count, compressed_count)``.
+    The returned list is in risk-priority order (most suspicious first).
+    Children marked for compression have ``_compressed = True``.
+    """
+    if not child_data:
+        return [], 0, 0
+
+    sorted_children = sorted(child_data, key=_child_risk_sort_key)
+
+    full_count = 0
+    compressed_count = 0
+    used = 0
+
+    for child in sorted_children:
+        if used + _CHILD_FULL_EST <= budget:
+            # Fits in budget at full detail
+            used += _CHILD_FULL_EST
+            full_count += 1
+        else:
+            # Over budget — compress this child
+            child["_compressed"] = True
+            used += _CHILD_COMPRESSED_EST
+            compressed_count += 1
+
+    return sorted_children, full_count, compressed_count
 
 
 def _get_session_events(
@@ -2209,21 +2318,34 @@ def _append_child_section(
     """Append the 'Delegated Work' section to prompt parts.
 
     Formats child session data for inclusion in both window and
-    compaction prompts.
+    compaction prompts.  Children are rendered in risk-priority order
+    (most suspicious first).  Children marked with ``_compressed=True``
+    get a shorter summary and indicator names only.
     """
-    total_children = child_sessions[0].get("_total_children") if child_sessions else 0
+    if not child_sessions:
+        return
 
-    parts.append(
+    total_children = child_sessions[0].get("_total_children", len(child_sessions))
+    shown = len(child_sessions)
+    full_count = sum(1 for c in child_sessions if not c.get("_compressed"))
+    compressed_count = sum(1 for c in child_sessions if c.get("_compressed"))
+
+    # Header with delegation scope
+    header = (
         f"== DELEGATED WORK (SUB-SESSIONS) ==\n"
-        f"This session delegated work to {len(child_sessions)} sub-sessions. "
-        f"All are listed below."
+        f"This session delegated work to {total_children} sub-sessions."
     )
-    if total_children and total_children > len(child_sessions):
-        parts.append(
-            f"Note: {total_children - len(child_sessions)} additional "
-            f"sub-sessions omitted (low activity). "
-            f"Total child sessions: {total_children}."
+    if compressed_count:
+        header += (
+            f" {full_count} shown in detail (highest risk first), "
+            f"{compressed_count} compressed (aligned/low-risk)."
         )
+    if total_children > shown:
+        header += (
+            f" {total_children - shown} additional sub-sessions omitted "
+            f"(no summary available)."
+        )
+    parts.append(header)
     parts.append("")
 
     for child in child_sessions:
@@ -2231,33 +2353,70 @@ def _append_child_section(
         source = child.get("summary_source", "metadata")
         intention = child.get("intention", "")
         status = child.get("status", "unknown")
+        is_compressed = child.get("_compressed", False)
 
         if source in ("compacted", "window"):
-            label = "summarized" if source == "compacted" else "partial summary"
-            parts.append(f"--- Sub-Session: {sid} ({label}) ---")
-            parts.append(f'Intention: "{intention}"')
-            alignment = child.get("intent_alignment", "unclear")
-            parts.append(f"Status: {status} | Alignment: {alignment}")
-            parts.append(
-                f"Calls: {child.get('total_calls', 0)} total "
-                f"({child.get('approved_count', 0)} approved, "
-                f"{child.get('denied_count', 0)} denied, "
-                f"{child.get('escalated_count', 0)} escalated)"
-            )
-            summary = child.get("summary", "")
-            if summary:
-                parts.append(f"Summary: {summary}")
-            indicators = child.get("risk_indicators", [])
-            if indicators:
-                ind_strs = []
-                for i in indicators:
-                    sev = coerce_risk_score(i.get("severity", 1))
-                    ind_strs.append(
-                        f"{i.get('indicator', '?')}({sev}/{risk_band(sev)})"
+            if is_compressed:
+                # Compressed format: shorter summary, indicator names only
+                label = "compressed"
+                parts.append(f"--- Sub-Session: {sid} ({label}) ---")
+                parts.append(f'Intention: "{intention}"')
+                alignment = child.get("intent_alignment", "unclear")
+                parts.append(f"Status: {status} | Alignment: {alignment}")
+                parts.append(
+                    f"Calls: {child.get('total_calls', 0)} total "
+                    f"({child.get('approved_count', 0)} approved, "
+                    f"{child.get('denied_count', 0)} denied, "
+                    f"{child.get('escalated_count', 0)} escalated)"
+                )
+                summary = child.get("summary", "")
+                if summary:
+                    summary = _apply_safety_valve(
+                        summary,
+                        _CHILD_COMPRESSED_SUMMARY_CHARS,
+                        label="child_summary_compressed",
                     )
-                parts.append(f"Risk Indicators: {', '.join(ind_strs)}")
+                    parts.append(f"Summary: {summary}")
+                indicators = child.get("risk_indicators", [])
+                if indicators:
+                    ind_names = [
+                        i.get("indicator", "?")
+                        for i in indicators
+                        if isinstance(i, dict)
+                    ]
+                    if ind_names:
+                        parts.append(f"Indicators: {', '.join(ind_names)}")
+                    else:
+                        parts.append("Indicators: none")
+                else:
+                    parts.append("Indicators: none")
             else:
-                parts.append("Risk Indicators: none")
+                # Full format: complete summary, indicators with severity
+                label = "summarized" if source == "compacted" else "partial summary"
+                parts.append(f"--- Sub-Session: {sid} ({label}) ---")
+                parts.append(f'Intention: "{intention}"')
+                alignment = child.get("intent_alignment", "unclear")
+                parts.append(f"Status: {status} | Alignment: {alignment}")
+                parts.append(
+                    f"Calls: {child.get('total_calls', 0)} total "
+                    f"({child.get('approved_count', 0)} approved, "
+                    f"{child.get('denied_count', 0)} denied, "
+                    f"{child.get('escalated_count', 0)} escalated)"
+                )
+                summary = child.get("summary", "")
+                if summary:
+                    parts.append(f"Summary: {summary}")
+                indicators = child.get("risk_indicators", [])
+                if indicators:
+                    ind_strs = []
+                    for i in indicators:
+                        sev = coerce_risk_score(i.get("severity", 1))
+                        ind_strs.append(
+                            f"{i.get('indicator', '?')}({sev}/{risk_band(sev)})"
+                        )
+                    parts.append(f"Risk Indicators: {', '.join(ind_strs)}")
+                else:
+                    parts.append("Risk Indicators: none")
         else:
             # Raw metadata fallback
             parts.append(f"--- Sub-Session: {sid} (minimal activity) ---")
