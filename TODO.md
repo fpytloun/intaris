@@ -4,8 +4,6 @@
 
 ## Issues
 
-- if judge denies (typically with no-escalation mode), allow user change the decision (with note, but not loosing judge reasoning in UI) so that next round it can allow same command (eg. after client retries). Eg. client tries to write k8s secret, intaris denies, user approves ex-post "Allow wiring secret for this session", judge should allow next try
-
 ## Minor
 
 - make MCP env variables editable (separate secret from regular values)
@@ -23,6 +21,5 @@
 - Grafana dashboard
 
 - AI chat to examine session
-- Review async analytics of cross-sessions
 
 - guardrails involving memories (facts, preferences) as another policy layer - eg. memory sais never run git push without user instruction and agent runs git push without explicit instruction

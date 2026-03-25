@@ -778,6 +778,19 @@
                               <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="expandedAuditRecord.judge_reasoning"></div>
                             </div>
                           </template>
+                          <!-- User Override (when judge decision was overridden) -->
+                          <template x-if="expandedAuditRecord?.resolved_by === 'user' && expandedAuditRecord?.judge_reasoning">
+                            <div class="mb-2">
+                              <div class="text-xs text-muted mb-1">User Override</div>
+                              <div class="text-sm bg-amber-500/10 border border-amber-500/20 rounded p-3">
+                                <div class="flex items-center gap-2 mb-1">
+                                  <span :class="decisionBadgeClass(expandedAuditRecord.user_decision)" x-text="expandedAuditRecord.user_decision"></span>
+                                  <span class="text-xs text-muted" x-text="formatTime(expandedAuditRecord.resolved_at)"></span>
+                                </div>
+                                <div x-show="expandedAuditRecord.user_note" class="text-sm mt-1" x-text="expandedAuditRecord.user_note"></div>
+                              </div>
+                            </div>
+                          </template>
 
                           <!-- Approve/Deny actions (if escalated and NOT yet resolved) -->
                           <template x-if="expandedAuditRecord?.decision === 'escalate' && !expandedAuditRecord?.user_decision">
@@ -950,6 +963,19 @@
                     <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="expandedRecord.judge_reasoning"></div>
                   </div>
                 </template>
+                <!-- User Override (when judge decision was overridden) -->
+                <template x-if="expandedRecord?.resolved_by === 'user' && expandedRecord?.judge_reasoning">
+                  <div class="mb-3">
+                    <div class="text-xs text-muted mb-1">User Override</div>
+                    <div class="text-sm bg-amber-500/10 border border-amber-500/20 rounded p-3">
+                      <div class="flex items-center gap-2 mb-1">
+                        <span :class="decisionBadgeClass(expandedRecord.user_decision)" x-text="expandedRecord.user_decision"></span>
+                        <span class="text-xs text-muted" x-text="formatTime(expandedRecord.resolved_at)"></span>
+                      </div>
+                      <div x-show="expandedRecord.user_note" class="text-sm mt-1" x-text="expandedRecord.user_note"></div>
+                    </div>
+                  </div>
+                </template>
 
                 <!-- Metadata -->
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-muted">
@@ -1074,6 +1100,8 @@
                     <span class="badge badge-escalate">escalate</span>
                     <span :class="decisionBadgeClass(item.user_decision)" x-text="item.user_decision"></span>
                     <span x-show="item.resolved_by === 'judge'" class="badge badge-judge">judge</span>
+                    <span x-show="item.resolved_by === 'user' && item.judge_reasoning"
+                          class="text-xs font-medium px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">overridden</span>
                     <span class="font-mono text-sm" x-text="item.tool"></span>
                     <span :class="riskBadgeClass(item.risk)" x-text="item.risk" x-show="item.risk"></span>
                   </div>
@@ -1137,6 +1165,20 @@
                     <div class="mb-3">
                       <div class="text-xs text-muted mb-1">Judge Reasoning</div>
                       <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="expandedResolvedRecord.judge_reasoning"></div>
+                    </div>
+                  </template>
+
+                  <!-- User Override (when judge decision was overridden) -->
+                  <template x-if="expandedResolvedRecord?.resolved_by === 'user' && expandedResolvedRecord?.judge_reasoning">
+                    <div class="mb-3">
+                      <div class="text-xs text-muted mb-1">User Override</div>
+                      <div class="text-sm bg-amber-500/10 border border-amber-500/20 rounded p-3">
+                        <div class="flex items-center gap-2 mb-1">
+                          <span :class="decisionBadgeClass(expandedResolvedRecord.user_decision)" x-text="expandedResolvedRecord.user_decision"></span>
+                          <span class="text-xs text-muted" x-text="formatTime(expandedResolvedRecord.resolved_at)"></span>
+                        </div>
+                        <div x-show="expandedResolvedRecord.user_note" class="text-sm mt-1" x-text="expandedResolvedRecord.user_note"></div>
+                      </div>
                     </div>
                   </template>
 
@@ -2395,6 +2437,8 @@
                       <span x-show="r.decision === 'escalate' && r.user_decision"
                             :class="'badge badge-' + (r.user_decision || 'low')" x-text="r.user_decision"></span>
                       <span x-show="r.resolved_by === 'judge'" class="badge badge-judge text-xs">judge</span>
+                      <span x-show="r.resolved_by === 'user' && r.judge_reasoning"
+                            class="text-xs font-medium px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">overridden</span>
                       <span class="font-mono text-xs" x-text="r.tool || r.record_type"></span>
                       <span :class="'badge badge-' + (r.risk || 'low')" x-text="r.risk" x-show="r.risk" class="text-xs"></span>
                     </div>
@@ -2443,6 +2487,19 @@
                       <div class="mb-2">
                         <div class="text-xs text-muted mb-1">Judge Reasoning</div>
                         <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="$store.nav.sessionModalAuditRecord.judge_reasoning"></div>
+                      </div>
+                    </template>
+                    <!-- User Override (when judge decision was overridden) -->
+                    <template x-if="$store.nav.sessionModalAuditRecord?.resolved_by === 'user' && $store.nav.sessionModalAuditRecord?.judge_reasoning">
+                      <div class="mb-2">
+                        <div class="text-xs text-muted mb-1">User Override</div>
+                        <div class="text-sm bg-amber-500/10 border border-amber-500/20 rounded p-3">
+                          <div class="flex items-center gap-2 mb-1">
+                            <span :class="'badge badge-' + ($store.nav.sessionModalAuditRecord.user_decision || 'low')" x-text="$store.nav.sessionModalAuditRecord.user_decision"></span>
+                            <span class="text-xs text-muted" x-text="new Date($store.nav.sessionModalAuditRecord.resolved_at).toLocaleString()"></span>
+                          </div>
+                          <div x-show="$store.nav.sessionModalAuditRecord.user_note" class="text-sm mt-1" x-text="$store.nav.sessionModalAuditRecord.user_note"></div>
+                        </div>
                       </div>
                     </template>
                     <!-- Approve/Deny actions (if escalated and NOT yet resolved) -->
