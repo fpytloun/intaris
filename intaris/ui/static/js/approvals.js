@@ -201,31 +201,53 @@ function approvalsTab() {
 
     // ── User actions ─────────────────────────────────────────
 
-    async resolve(callId, decision) {
+    /**
+     * Shared resolution logic for both initial resolution and judge override.
+     * @param {string} callId - The call ID to resolve.
+     * @param {string} decision - "approve" or "deny".
+     * @param {boolean} isOverride - Whether this overrides a judge decision.
+     */
+    async _resolveOrOverride(callId, decision, isOverride) {
       if (!callId || !decision) return;
       if (this.resolving[callId]) return;
-      // Use spread to ensure Alpine reactivity when adding new keys
       this.resolving = { ...this.resolving, [callId]: true };
       try {
         const note = this.noteText[callId] || null;
         await IntarisAPI.resolveDecision(callId, decision, note);
-        Alpine.store('notify').success(
-          `Call ${decision === 'approve' ? 'approved' : 'denied'}`
-        );
-        // Optimistic removal + mark as recently resolved
-        this._markResolved(callId);
-        this.pending = this.pending.filter(p => p.call_id !== callId);
-        this.total = this.pending.length;
+        if (isOverride) {
+          Alpine.store('notify').success(
+            `Judge decision overridden to ${decision}`
+          );
+        } else {
+          Alpine.store('notify').success(
+            `Call ${decision === 'approve' ? 'approved' : 'denied'}`
+          );
+        }
+        if (!isOverride) {
+          // Optimistic removal + mark as recently resolved
+          this._markResolved(callId);
+          this.pending = this.pending.filter(p => p.call_id !== callId);
+          this.total = this.pending.length;
+        }
         delete this.noteText[callId];
-        // Refresh resolved list to show the newly resolved item
+        // Refresh resolved list to show the updated item
         this.loadResolved();
       } catch (e) {
-        console.error('[intaris] resolve failed:', e);
-        Alpine.store('notify').error('Failed to resolve: ' + (e.message || String(e)));
+        const action = isOverride ? 'override' : 'resolve';
+        console.error(`[intaris] ${action} failed:`, e);
+        Alpine.store('notify').error(`Failed to ${action}: ` + (e.message || String(e)));
       } finally {
         const { [callId]: _, ...rest } = this.resolving;
         this.resolving = rest;
       }
+    },
+
+    async resolve(callId, decision) {
+      return this._resolveOrOverride(callId, decision, false);
+    },
+
+    async override(callId, decision) {
+      return this._resolveOrOverride(callId, decision, true);
     },
 
     // ── Navigation ────────────────────────────────────────────

@@ -226,13 +226,161 @@ class TestAuditStoreJudge:
 
         audit_store.resolve_escalation("test-call", "approve", user_id="test-user")
 
-        with pytest.raises(ValueError, match="already resolved"):
+        with pytest.raises(ValueError, match="already resolved by user"):
             audit_store.resolve_escalation(
                 "test-call",
                 "deny",
                 user_id="test-user",
                 resolved_by="judge",
             )
+
+    def test_override_judge_deny_to_approve(self, audit_store, session_store):
+        """Human can override a judge-denied decision to approve."""
+        _create_session(session_store)
+        _create_escalated_record(audit_store, call_id="call-override-1")
+
+        # Judge denies
+        audit_store.resolve_escalation(
+            "call-override-1",
+            "deny",
+            user_note="Judge (high confidence)",
+            user_id="test-user",
+            resolved_by="judge",
+            judge_reasoning="Looks risky — outside project scope",
+        )
+
+        # Human overrides to approve
+        updated = audit_store.resolve_escalation(
+            "call-override-1",
+            "approve",
+            user_note="Allow writing secret for this session",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        assert updated["user_decision"] == "approve"
+        assert updated["resolved_by"] == "user"
+        assert updated["user_note"] == "Allow writing secret for this session"
+        # Judge reasoning preserved via COALESCE
+        assert updated["judge_reasoning"] == "Looks risky — outside project scope"
+
+    def test_override_judge_approve_to_deny(self, audit_store, session_store):
+        """Human can override a judge approval to deny."""
+        _create_session(session_store)
+        _create_escalated_record(audit_store, call_id="call-override-2")
+
+        # Judge approves
+        audit_store.resolve_escalation(
+            "call-override-2",
+            "approve",
+            user_note="Judge (high confidence)",
+            user_id="test-user",
+            resolved_by="judge",
+            judge_reasoning="Looks safe and aligned",
+        )
+
+        # Human overrides to deny
+        updated = audit_store.resolve_escalation(
+            "call-override-2",
+            "deny",
+            user_note="Actually not safe",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        assert updated["user_decision"] == "deny"
+        assert updated["resolved_by"] == "user"
+        assert updated["judge_reasoning"] == "Looks safe and aligned"
+
+    def test_cannot_override_user_decision(self, audit_store, session_store):
+        """Human decisions are final — cannot be overridden."""
+        _create_session(session_store)
+        _create_escalated_record(audit_store, call_id="call-final")
+
+        # Human resolves
+        audit_store.resolve_escalation(
+            "call-final",
+            "deny",
+            user_note="No way",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        # Another override attempt fails
+        with pytest.raises(ValueError, match="already resolved by user"):
+            audit_store.resolve_escalation(
+                "call-final",
+                "approve",
+                user_note="Override attempt",
+                user_id="test-user",
+                resolved_by="user",
+            )
+
+    def test_escalation_retry_after_override(self, audit_store, session_store):
+        """After human overrides judge denial, escalation retry finds the approval."""
+        import hashlib
+
+        _create_session(session_store)
+
+        # Create escalated record with args_hash
+        args = {"command": "kubectl apply -f secret.yaml"}
+        args_hash = hashlib.sha256(
+            json.dumps(args, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+        audit_store.insert(
+            call_id="call-retry",
+            user_id="test-user",
+            session_id="test-session",
+            agent_id="test-agent",
+            tool="bash",
+            args_redacted=args,
+            classification="write",
+            evaluation_path="llm",
+            decision="escalate",
+            risk="high",
+            reasoning="High risk operation",
+            latency_ms=100,
+            args_hash=args_hash,
+        )
+
+        # Judge denies
+        audit_store.resolve_escalation(
+            "call-retry",
+            "deny",
+            user_note="Judge (high confidence)",
+            user_id="test-user",
+            resolved_by="judge",
+            judge_reasoning="Risky operation",
+        )
+
+        # No approval found yet (judge denied)
+        result = audit_store.find_approved_escalation(
+            user_id="test-user",
+            tool="bash",
+            args_hash=args_hash,
+            cutoff="2000-01-01T00:00:00",
+        )
+        assert result is None
+
+        # Human overrides to approve
+        audit_store.resolve_escalation(
+            "call-retry",
+            "approve",
+            user_note="Allow kubectl apply for this session",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        # Now escalation retry should find the approval
+        result = audit_store.find_approved_escalation(
+            user_id="test-user",
+            tool="bash",
+            args_hash=args_hash,
+            cutoff="2000-01-01T00:00:00",
+        )
+        assert result is not None
+        assert result["call_id"] == "call-retry"
 
 
 # ── JudgeReviewer Tests ───────────────────────────────────────────────
@@ -663,6 +811,105 @@ class TestResolveWithSideEffects:
             )
 
             mock_eval.learn_from_approved_escalation.assert_not_called()
+
+        asyncio.run(_test())
+
+    def test_override_triggers_side_effects(self, audit_store, session_store):
+        """Overriding a judge denial triggers all side effects."""
+
+        async def _test():
+            from intaris.background import Metrics
+            from intaris.judge import resolve_with_side_effects
+
+            _create_session(session_store)
+            _create_escalated_record(audit_store, call_id="call-override-se")
+
+            # Judge denies first
+            audit_store.resolve_escalation(
+                "call-override-se",
+                "deny",
+                user_note="Judge (high confidence)",
+                user_id="test-user",
+                resolved_by="judge",
+                judge_reasoning="Risky",
+            )
+
+            mock_bus = MagicMock()
+            mock_eval = MagicMock()
+            metrics = Metrics()
+
+            # Human overrides to approve
+            record = await resolve_with_side_effects(
+                call_id="call-override-se",
+                user_id="test-user",
+                user_decision="approve",
+                user_note="Allow for this session",
+                resolved_by="user",
+                audit_store=audit_store,
+                evaluator=mock_eval,
+                event_bus=mock_bus,
+                metrics=metrics,
+            )
+
+            assert record["user_decision"] == "approve"
+            assert record["resolved_by"] == "user"
+            assert record["judge_reasoning"] == "Risky"
+
+            # EventBus published with resolved_by="user"
+            mock_bus.publish.assert_called_once()
+            event = mock_bus.publish.call_args[0][0]
+            assert event["type"] == "decided"
+            assert event["resolved_by"] == "user"
+            assert event["user_decision"] == "approve"
+
+            # Path learning triggered (approve)
+            mock_eval.learn_from_approved_escalation.assert_called_once()
+
+            # Override metric incremented
+            assert metrics.judge_overrides_total == 1
+
+        asyncio.run(_test())
+
+    def test_override_deny_does_not_learn_paths(self, audit_store, session_store):
+        """Overriding a judge approval to deny does not trigger path learning."""
+
+        async def _test():
+            from intaris.background import Metrics
+            from intaris.judge import resolve_with_side_effects
+
+            _create_session(session_store)
+            _create_escalated_record(audit_store, call_id="call-override-deny")
+
+            # Judge approves first
+            audit_store.resolve_escalation(
+                "call-override-deny",
+                "approve",
+                user_note="Judge (high confidence)",
+                user_id="test-user",
+                resolved_by="judge",
+                judge_reasoning="Safe",
+            )
+
+            mock_eval = MagicMock()
+            metrics = Metrics()
+
+            # Human overrides to deny
+            await resolve_with_side_effects(
+                call_id="call-override-deny",
+                user_id="test-user",
+                user_decision="deny",
+                user_note="Actually not safe",
+                resolved_by="user",
+                audit_store=audit_store,
+                evaluator=mock_eval,
+                metrics=metrics,
+            )
+
+            # Path learning NOT triggered (deny)
+            mock_eval.learn_from_approved_escalation.assert_not_called()
+
+            # Override metric still incremented
+            assert metrics.judge_overrides_total == 1
 
         asyncio.run(_test())
 

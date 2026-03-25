@@ -369,6 +369,11 @@ class AuditStore:
     ) -> dict[str, Any]:
         """Record a decision on an escalated tool call.
 
+        Supports overriding judge decisions: when ``resolved_by`` on the
+        existing record is ``"judge"``, a human can re-resolve the call.
+        Human decisions (``resolved_by="user"``) are final and cannot be
+        overridden.
+
         Args:
             call_id: The escalated call to resolve.
             user_decision: "approve" or "deny".
@@ -381,7 +386,8 @@ class AuditStore:
             Updated audit record.
 
         Raises:
-            ValueError: If record not found or not escalated.
+            ValueError: If record not found, not escalated, or already
+                resolved by a human user.
         """
         if user_decision not in ("approve", "deny"):
             raise ValueError(
@@ -395,16 +401,20 @@ class AuditStore:
         now = datetime.now(timezone.utc).isoformat()
 
         # Atomic update: conditions in WHERE prevent TOCTOU races.
-        # Only updates if the record is escalated AND not yet resolved.
+        # Matches unresolved records OR records resolved by the judge
+        # (allowing human override of judge decisions). Human decisions
+        # are final — resolved_by='user' is NOT matched.
+        # COALESCE preserves existing judge_reasoning when the caller
+        # does not provide it (i.e., human override passes None).
         with self._db.cursor() as cur:
             cur.execute(
                 """
                 UPDATE audit_log
                 SET user_decision = ?, user_note = ?, resolved_at = ?,
-                    resolved_by = ?, judge_reasoning = ?
+                    resolved_by = ?, judge_reasoning = COALESCE(?, judge_reasoning)
                 WHERE call_id = ? AND user_id = ?
                   AND decision = 'escalate'
-                  AND user_decision IS NULL
+                  AND (user_decision IS NULL OR resolved_by = 'judge')
                 """,
                 (
                     user_decision,
@@ -425,6 +435,11 @@ class AuditStore:
                         f"(decision={record['decision']})"
                     )
                 if record.get("user_decision"):
+                    if record.get("resolved_by") == "user":
+                        raise ValueError(
+                            f"Call {call_id} already resolved by user "
+                            f"(user_decision={record['user_decision']})"
+                        )
                     raise ValueError(
                         f"Call {call_id} already resolved "
                         f"(user_decision={record['user_decision']})"

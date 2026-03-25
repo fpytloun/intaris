@@ -399,6 +399,7 @@ async def resolve_with_side_effects(
     alignment_barrier: Any | None = None,
     event_bus: Any | None = None,
     notification_dispatcher: Any | None = None,
+    metrics: Any | None = None,
 ) -> dict[str, Any]:
     """Resolve an escalation with all side effects.
 
@@ -410,6 +411,11 @@ async def resolve_with_side_effects(
     3. ``evaluator.learn_from_approved_escalation()`` — path prefix learning
     4. ``event_bus.publish("decided")`` — WebSocket streaming
     5. Notification dispatch — resolution confirmation
+
+    Supports human override of judge decisions: when a human resolves
+    a call that was previously resolved by the judge, the judge's
+    reasoning is preserved and a ``judge_overrides_total`` metric is
+    incremented.
 
     Args:
         call_id: The escalated call to resolve.
@@ -423,13 +429,30 @@ async def resolve_with_side_effects(
         alignment_barrier: AlignmentBarrier instance.
         event_bus: EventBus instance.
         notification_dispatcher: NotificationDispatcher instance.
+        metrics: Metrics instance for observability counters.
 
     Returns:
         The updated audit record dict.
 
     Raises:
-        ValueError: If record not found, not escalated, or already resolved.
+        ValueError: If record not found, not escalated, or already
+            resolved by a human user.
     """
+    # Detect judge override: check if the record was previously resolved
+    # by the judge before we overwrite it. This pre-check runs before
+    # the atomic UPDATE. In a concurrent override race, the second
+    # caller's resolve_escalation() raises ValueError (resolved_by is
+    # already 'user'), so the metric increment below is never reached
+    # — double-counting is impossible.
+    is_judge_override = False
+    if resolved_by == "user":
+        try:
+            existing = audit_store.get_by_call_id(call_id, user_id=user_id)
+            if existing.get("resolved_by") == "judge":
+                is_judge_override = True
+        except ValueError:
+            pass
+
     # Step 1: Resolve the escalation (atomic DB update)
     audit_store.resolve_escalation(
         call_id=call_id,
@@ -446,6 +469,17 @@ async def resolve_with_side_effects(
         record = audit_store.get_by_call_id(call_id, user_id=user_id)
     except ValueError:
         pass
+
+    # Log and count judge overrides
+    if is_judge_override:
+        logger.info(
+            "Human overrode judge decision for call_id=%s: new_decision=%s note=%s",
+            call_id,
+            user_decision,
+            user_note,
+        )
+        if metrics is not None:
+            metrics.judge_overrides_total += 1
 
     # Step 2: Alignment barrier acknowledgment
     if (
@@ -483,10 +517,11 @@ async def resolve_with_side_effects(
     if notification_dispatcher is not None and record is not None:
         from intaris.notifications.providers import Notification
 
-        # Use judge reasoning when the judge resolved, otherwise the
-        # original evaluator reasoning.
+        # Use judge reasoning when available (from caller or stored on
+        # the record from a prior judge review), otherwise fall back to
+        # the original evaluator reasoning.
         notification_reasoning = (
-            judge_reasoning if judge_reasoning else record.get("reasoning")
+            judge_reasoning or record.get("judge_reasoning") or record.get("reasoning")
         )
 
         notification = Notification(

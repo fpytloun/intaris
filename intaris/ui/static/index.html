@@ -764,6 +764,8 @@
                               <div class="flex items-center gap-2">
                                 <span :class="decisionBadgeClass(expandedAuditRecord.user_decision)" x-text="expandedAuditRecord.user_decision"></span>
                                 <span x-show="expandedAuditRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
+                                <span x-show="expandedAuditRecord.resolved_by === 'user' && expandedAuditRecord.judge_reasoning"
+                                      class="text-xs font-medium text-amber-400">overridden by user</span>
                                 <span class="text-sm" x-text="expandedAuditRecord.user_note" x-show="expandedAuditRecord.user_note"></span>
                                 <span class="text-xs text-muted" x-text="formatTime(expandedAuditRecord.resolved_at)"></span>
                               </div>
@@ -934,6 +936,8 @@
                     <div class="flex items-center gap-2">
                       <span :class="decisionBadgeClass(expandedRecord.user_decision)" x-text="expandedRecord.user_decision"></span>
                       <span x-show="expandedRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
+                      <span x-show="expandedRecord.resolved_by === 'user' && expandedRecord.judge_reasoning"
+                            class="text-xs font-medium text-amber-400">overridden by user</span>
                       <span class="text-sm" x-text="expandedRecord.user_note" x-show="expandedRecord.user_note"></span>
                       <span class="text-xs text-muted" x-text="formatTime(expandedRecord.resolved_at)"></span>
                     </div>
@@ -1120,6 +1124,8 @@
                       <div class="flex items-center gap-2">
                         <span :class="decisionBadgeClass(expandedResolvedRecord.user_decision)" x-text="expandedResolvedRecord.user_decision"></span>
                         <span x-show="expandedResolvedRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
+                        <span x-show="expandedResolvedRecord.resolved_by === 'user' && expandedResolvedRecord.judge_reasoning"
+                              class="text-xs font-medium text-amber-400">overridden by user</span>
                         <span class="text-sm" x-text="expandedResolvedRecord.user_note" x-show="expandedResolvedRecord.user_note"></span>
                         <span class="text-xs text-muted" x-text="formatTime(expandedResolvedRecord.resolved_at)"></span>
                       </div>
@@ -1131,6 +1137,29 @@
                     <div class="mb-3">
                       <div class="text-xs text-muted mb-1">Judge Reasoning</div>
                       <div class="text-sm bg-purple-500/10 border border-purple-500/20 rounded p-3" x-text="expandedResolvedRecord.judge_reasoning"></div>
+                    </div>
+                  </template>
+
+                  <!-- Override Judge Decision -->
+                  <template x-if="expandedResolvedRecord?.resolved_by === 'judge'">
+                    <div class="mb-3 p-3 border border-amber-500/30 rounded bg-amber-500/5">
+                      <div class="text-xs text-muted mb-2">Override Judge Decision</div>
+                      <div class="flex items-end gap-3">
+                        <div class="flex-1">
+                          <input type="text" placeholder="Override note (e.g., 'Allow for this session')..."
+                                 class="input text-sm"
+                                 @click.stop
+                                 x-model="noteText[item.call_id]">
+                        </div>
+                        <button @click.stop="override(item.call_id, 'approve')"
+                                :disabled="resolving[item.call_id] === true"
+                                class="btn-success text-sm"
+                                x-text="resolving[item.call_id] === true ? 'Approving...' : 'Approve'"></button>
+                        <button @click.stop="override(item.call_id, 'deny')"
+                                :disabled="resolving[item.call_id] === true"
+                                class="btn-danger text-sm"
+                                x-text="resolving[item.call_id] === true ? 'Denying...' : 'Deny'"></button>
+                      </div>
                     </div>
                   </template>
 
@@ -2403,6 +2432,8 @@
                         <div class="flex items-center gap-2">
                           <span :class="'badge badge-' + ($store.nav.sessionModalAuditRecord.user_decision || 'low')" x-text="$store.nav.sessionModalAuditRecord.user_decision"></span>
                           <span x-show="$store.nav.sessionModalAuditRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
+                          <span x-show="$store.nav.sessionModalAuditRecord.resolved_by === 'user' && $store.nav.sessionModalAuditRecord.judge_reasoning"
+                                class="text-xs font-medium text-amber-400">overridden by user</span>
                           <span class="text-sm" x-text="$store.nav.sessionModalAuditRecord.user_note" x-show="$store.nav.sessionModalAuditRecord.user_note"></span>
                           <span class="text-xs text-muted" x-text="new Date($store.nav.sessionModalAuditRecord.resolved_at).toLocaleString()"></span>
                         </div>

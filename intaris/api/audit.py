@@ -106,6 +106,10 @@ async def resolve_decision(
     try:
         store = AuditStore(_get_db())
 
+        # Get metrics from background worker (if available)
+        bg_worker = getattr(http_request.app.state, "background_worker", None)
+        metrics = getattr(bg_worker, "metrics", None) if bg_worker else None
+
         # Use shared resolution handler for consistent side effects
         await resolve_with_side_effects(
             call_id=request.call_id,
@@ -122,6 +126,7 @@ async def resolve_decision(
             notification_dispatcher=getattr(
                 http_request.app.state, "notification_dispatcher", None
             ),
+            metrics=metrics,
         )
 
         return DecisionResponse(ok=True)

@@ -144,7 +144,7 @@ intaris/
 
 9. **User-driven intention model**: Session intention is immutable except by user action. Agent tool calls never redefine intention. The `IntentionBarrier` pattern ensures the evaluator sees the freshest user-stated intention by coordinating between `/reasoning` (trigger) and `/evaluate` (wait). See [Intention Model](#intention-model) below.
 
-10. **Judge auto-resolution**: Escalated tool calls can be automatically reviewed by a more capable LLM (judge). Fail-open design — judge LLM failure leaves escalation for human review. Deny-if-uncertain in auto mode. Shared `resolve_with_side_effects()` handler ensures human and judge resolution paths have identical side effects. See [Judge Auto-Resolution](#judge-auto-resolution) below.
+10. **Judge auto-resolution**: Escalated tool calls can be automatically reviewed by a more capable LLM (judge). Fail-open design — judge LLM failure leaves escalation for human review. Deny-if-uncertain in auto mode. Shared `resolve_with_side_effects()` handler ensures human and judge resolution paths have identical side effects. Human users can override any judge decision (deny→approve or approve→deny) via the UI; human decisions are final. See [Judge Auto-Resolution](#judge-auto-resolution) below.
 
 ## Multi-tenancy
 
@@ -699,17 +699,18 @@ When a tool call is escalated, the judge — a more capable LLM (default gpt-5.4
 - **Reasoning context**: Reasoning records are included without truncation (up to 8000-char safety valve). Associated context metadata (stored in `args_redacted.context`) is rendered alongside reasoning records. Checkpoint and summary records are omitted from judge history.
 - **Sub-session parent context**: For sub-sessions, the judge fetches the parent session's recent reasoning records (up to 10), time-bounded to the child session's `created_at` timestamp. This gives the judge visibility into the human user's messages that led to the sub-session being spawned. The system prompt includes a sub-session trust model explaining that sub-session "user messages" are actually parent-agent-generated instructions, not human user input.
 - **MCP proxy coverage**: Both REST API and MCP proxy escalation paths trigger the judge.
-- **Race condition handling**: If a human resolves before the judge, the atomic `WHERE user_decision IS NULL` guard prevents double-resolution. The judge catches the `ValueError` and exits gracefully.
+- **Race condition handling**: If a human resolves before the judge, the atomic WHERE guard prevents double-resolution. The judge catches the `ValueError` and exits gracefully.
 - **Fail-open**: If the judge LLM fails, the escalation remains unresolved for human review. A notification is sent if `notify_mode` allows.
+- **Human override of judge decisions**: Humans can override any judge-resolved decision (deny→approve or approve→deny) via `POST /decision`. The `resolve_escalation()` WHERE clause matches `(user_decision IS NULL OR resolved_by = 'judge')`, allowing re-resolution of judge decisions while keeping human decisions final. `COALESCE(?, judge_reasoning)` preserves the judge's reasoning when a human overrides. The UI shows an "Override" button on judge-resolved records in the Resolved section, with an "overridden by user" indicator when a judge decision has been overridden. After override, the escalation retry mechanism and LLM history labels (`escalate→user:approve`) ensure subsequent retries of the same tool call respect the human's decision. Note: the "overridden by user" UI label uses `judge_reasoning IS NOT NULL` as a heuristic; this can produce false positives for advisory+defer escalations resolved by a human (where `judge_reasoning` was stored during the defer phase). A dedicated DB column would resolve this in a future migration if needed.
 
 ### Database columns
 
-- `audit_log.resolved_by TEXT` — NULL (not resolved), "user" (human), "judge" (judge LLM)
-- `audit_log.judge_reasoning TEXT` — Judge's reasoning (stored when judge reviews, regardless of outcome)
+- `audit_log.resolved_by TEXT` — NULL (not resolved), "user" (human), "judge" (judge LLM). Changes from "judge" to "user" when a human overrides.
+- `audit_log.judge_reasoning TEXT` — Judge's reasoning (stored when judge reviews, regardless of outcome). Preserved via COALESCE when a human overrides.
 
 ### Observability
 
-Metrics exposed via `/stats`: `judge_reviews_total`, `judge_approvals_total`, `judge_denials_total`, `judge_deferrals_total`, `judge_errors_total`.
+Metrics exposed via `/stats`: `judge_reviews_total`, `judge_approvals_total`, `judge_denials_total`, `judge_deferrals_total`, `judge_errors_total`, `judge_overrides_total`.
 
 ## Webhook Callbacks
 
