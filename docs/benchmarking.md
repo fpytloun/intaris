@@ -17,25 +17,26 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 
 | Metric | Value | What it means |
 |---|---|---|
-| **Precision** | 97.9% | Of everything Intaris blocked, 97.9% was actually harmful -- almost no false alarms |
-| **F1 Score** | 83.2% | Overall balance of catching threats vs. not blocking legitimate work |
-| **False Positive Rate** | 0.4% | Only 0.4% of legitimate tool calls were incorrectly blocked |
+| **Precision** | 100% | Of everything Intaris blocked, 100% was actually harmful -- zero false alarms |
+| **F1 Score** | 93.7% | Overall balance of catching threats vs. not blocking legitimate work |
+| **False Positive Rate** | 0.0% | No legitimate tool calls were incorrectly blocked |
 | **Critical Misses** | 0 | No inherently dangerous calls (rm -rf, RCE, disk wipe) were ever approved |
-| **Avg Latency** | 1.7s | Average evaluation time per tool call |
-| **P95 Latency** | 5.3s | 95th percentile evaluation time |
+| **Avg Latency** | 1.1s | Average evaluation time per tool call |
+| **P95 Latency** | 2.5s | 95th percentile evaluation time |
 
 ### By Category
 
 | Category | F1 | Precision | Recall | Scenarios | Notes |
 |---|---|---|---|---|---|
-| coding | 1.000 | 1.000 | 1.000 | 6 | Perfect -- benign development, path traversal, session policy, intention updates |
+| gold | 1.000 | 1.000 | 1.000 | 8 | Perfect -- all calibration scenarios pass |
+| hierarchical | 1.000 | 1.000 | 1.000 | 4 | Perfect -- parent/child alignment enforcement via AlignmentBarrier |
 | infra | 1.000 | 1.000 | 1.000 | 3 | Perfect -- deployment verification, careless commands, production sabotage |
 | research | 1.000 | 1.000 | 1.000 | 2 | Perfect -- benign medical research and dangerous self-medication drift |
 | social | 1.000 | 1.000 | 1.000 | 2 | Perfect -- LinkedIn browsing and profile stalking |
-| cross_session | 0.900 | 1.000 | 0.818 | 9 | Near-perfect -- reconnaissance chains, credential harvesting, progressive escalation |
-| gold | 0.889 | 0.923 | 0.857 | 8 | Calibration scenarios -- 1 false block on a read in a policy-deny session |
-| workplace | 0.667 | 1.000 | 0.500 | 3 | LLM misses escalation patterns (stalking, aggressive drafts) but catches overt threats |
-| adversarial | 0.545 | 1.000 | 0.375 | 4 | Hardest category -- subtle backdoors and prompt injection in code content |
+| coding | 0.947 | 1.000 | 0.900 | 6 | Near-perfect -- benign development, path traversal, session policy, intention updates |
+| cross_session | 0.941 | 1.000 | 0.889 | 9 | Near-perfect -- reconnaissance chains, credential harvesting, progressive escalation |
+| workplace | 0.889 | 1.000 | 0.800 | 3 | Catches threatening emails and harassment; misses passive-aggressive Slack posts |
+| adversarial | 0.839 | 1.000 | 0.722 | 4 | Hardest category -- subtle backdoors and prompt injection in code content |
 
 ### What Intaris Catches
 
@@ -57,7 +58,7 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 
 Scores are **evaluator-model-dependent** -- they measure agreement between Intaris and the evaluator LLM (gpt-5.4), not objective ground truth. Use them as **regression indicators** when comparing runs after configuration changes, not as absolute quality metrics.
 
-The gold calibration agreement (80.2%) is below the 95% target, meaning the evaluator occasionally disagrees with hand-labeled ground truth on borderline cases. This affects the absolute numbers but not the relative comparisons between runs.
+The gold calibration agreement (~70%) is below the 95% target, meaning the evaluator occasionally disagrees with hand-labeled ground truth on borderline cases. This affects the absolute numbers but not the relative comparisons between runs.
 
 ## Quick Start
 
