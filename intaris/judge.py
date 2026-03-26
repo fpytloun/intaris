@@ -524,8 +524,15 @@ async def resolve_with_side_effects(
             judge_reasoning or record.get("judge_reasoning") or record.get("reasoning")
         )
 
+        # Judge resolutions use judge-specific event types so channels
+        # can independently subscribe to judge vs human notifications.
+        if resolved_by == "judge":
+            event_type = "judge_denial" if user_decision == "deny" else "judge_approval"
+        else:
+            event_type = "resolution"
+
         notification = Notification(
-            event_type="resolution",
+            event_type=event_type,
             call_id=call_id,
             session_id=record.get("session_id", ""),
             user_id=user_id,
@@ -650,17 +657,31 @@ class JudgeReviewer:
             if self._metrics:
                 self._metrics.judge_errors_total += 1
 
-            # On failure in advisory mode, send notification so human knows
+            # On failure, send notification so human knows to review.
+            # Best-effort record lookup to enrich the notification with
+            # tool/risk context that would otherwise be missing.
             if (
                 self._config.notify_mode != "never"
                 and self._notification_dispatcher is not None
             ):
+                _tool = None
+                _risk = None
+                try:
+                    rec = self._audit.get_by_call_id(call_id, user_id=user_id)
+                    _tool = rec.get("tool")
+                    _risk = rec.get("risk")
+                except Exception:
+                    pass
                 try:
                     await self._send_escalation_notification(
                         call_id=call_id,
                         user_id=user_id,
                         session_id=session_id,
                         agent_id=agent_id,
+                        tool=_tool,
+                        risk=_risk,
+                        reasoning="Judge review failed — escalation requires human review",
+                        event_type="judge_error",
                     )
                 except Exception:
                     logger.debug("Failed to send fallback notification", exc_info=True)
@@ -878,6 +899,7 @@ class JudgeReviewer:
                             f"Judge deferred to human ({confidence} confidence): "
                             f"{reasoning}"
                         ),
+                        event_type="judge_deferral",
                     )
 
                 logger.info(
@@ -951,11 +973,17 @@ class JudgeReviewer:
         tool: str | None = None,
         risk: str | None = None,
         reasoning: str | None = None,
+        event_type: str = "escalation",
     ) -> None:
         """Send an escalation notification to the user.
 
         Used when judge defers (advisory mode) or when judge fails
         and the escalation falls back to human review.
+
+        Args:
+            event_type: Notification event type.  Callers should pass
+                ``"judge_deferral"`` for advisory deferrals and
+                ``"judge_error"`` for LLM failures.
         """
         if self._notification_dispatcher is None:
             return
@@ -963,7 +991,7 @@ class JudgeReviewer:
         from intaris.notifications.providers import Notification
 
         notification = Notification(
-            event_type="escalation",
+            event_type=event_type,
             call_id=call_id,
             session_id=session_id,
             user_id=user_id,

@@ -120,34 +120,10 @@ async def evaluate(
 
         if result.get("decision") == "escalate":
             if judge_reviewer is not None and judge_reviewer.is_enabled:
-                # Judge is enabled — notification behavior depends on notify_mode
-                if judge_reviewer.notify_mode == "always" and dispatcher is not None:
-                    # Send escalation notification before judge reviews
-                    from intaris.notifications.providers import Notification
-
-                    notification = Notification(
-                        event_type="escalation",
-                        call_id=result["call_id"],
-                        session_id=request.session_id,
-                        user_id=ctx.user_id,
-                        agent_id=agent_id,
-                        tool=request.tool,
-                        args_redacted=result.get("args_redacted"),
-                        risk=result.get("risk"),
-                        reasoning=result.get("reasoning"),
-                        ui_url=None,
-                        approve_url=None,
-                        deny_url=None,
-                        timestamp=datetime.now(tz.utc).isoformat(),
-                    )
-                    asyncio.create_task(
-                        dispatcher.notify(
-                            user_id=ctx.user_id,
-                            notification=notification,
-                        )
-                    )
-
-                # Launch judge review as fire-and-forget
+                # Judge is enabled — defer notification to judge outcome.
+                # The judge will send a single notification with its
+                # decision (judge_denial, judge_approval, judge_deferral,
+                # or judge_error) instead of a noisy pre-judge escalation.
                 asyncio.create_task(
                     judge_reviewer.review_and_resolve(
                         call_id=result["call_id"],

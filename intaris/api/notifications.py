@@ -34,7 +34,10 @@ class ChannelRequest(BaseModel):
     events: list[str] | None = Field(
         None,
         description="Event types to receive: escalation, resolution, "
-        "session_suspended, denial. Null = default set (no denial).",
+        "session_suspended, denial, summary_alert, analysis_alert, "
+        "judge_denial, judge_approval, judge_deferral, judge_error. "
+        "Null = default set (escalation, resolution, session_suspended, "
+        "judge_denial, judge_deferral, judge_error).",
     )
 
 

@@ -61,9 +61,13 @@ function settingsTab() {
     allEventTypes() {
       return [
         { key: 'escalation', label: 'Escalations', desc: 'Tool call requires approval', defaultOn: true },
-        { key: 'resolution', label: 'Resolutions', desc: 'Escalation resolved', defaultOn: true },
+        { key: 'resolution', label: 'Resolutions', desc: 'Escalation resolved by human', defaultOn: true },
         { key: 'session_suspended', label: 'Session suspended', desc: 'Session was suspended', defaultOn: true },
         { key: 'denial', label: 'Denials', desc: 'Tool call denied', defaultOn: false },
+        { key: 'judge_denial', label: 'Judge denials', desc: 'Judge denied a tool call', defaultOn: true },
+        { key: 'judge_approval', label: 'Judge approvals', desc: 'Judge approved a tool call', defaultOn: false },
+        { key: 'judge_deferral', label: 'Judge deferrals', desc: 'Judge deferred to human review', defaultOn: true },
+        { key: 'judge_error', label: 'Judge errors', desc: 'Judge failed, needs human review', defaultOn: true },
         { key: 'summary_alert', label: 'Summary alerts (L2)', desc: 'Misaligned or high-risk session summary', defaultOn: false },
         { key: 'analysis_alert', label: 'Analysis alerts (L3)', desc: 'High/critical behavioral risk from cross-session analysis', defaultOn: false },
       ];

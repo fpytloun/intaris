@@ -27,8 +27,35 @@ logger = logging.getLogger(__name__)
 __all__ = ["Notification", "NotificationDispatcher"]
 
 # Default event types when channel has no explicit events config.
-# Denial is opt-in — users must explicitly add it to avoid noise.
-DEFAULT_CHANNEL_EVENTS = {"escalation", "resolution", "session_suspended"}
+# Denial and judge_approval are opt-in — users must explicitly add them
+# to avoid noise.  Judge denial/deferral/error are included because they
+# represent the final outcome of judge-reviewed escalations and may
+# require human attention.
+DEFAULT_CHANNEL_EVENTS = {
+    "escalation",
+    "resolution",
+    "session_suspended",
+    "judge_denial",
+    "judge_deferral",
+    "judge_error",
+}
+
+# Judge event types that map to a "parent" event type for backward
+# compatibility.  When a channel has an explicit events list that
+# includes the parent type but none of the judge-specific types, the
+# judge event is accepted as a fallback.  This prevents silent
+# notification loss for channels configured before judge event types
+# existed.
+_JUDGE_EVENT_FALLBACK: dict[str, str] = {
+    "judge_denial": "resolution",
+    "judge_approval": "resolution",
+    "judge_deferral": "escalation",
+    "judge_error": "escalation",
+}
+
+# Event types that represent pending escalations needing human action
+# (approve/deny links should be generated).
+_ACTIONABLE_EVENT_TYPES = {"escalation", "judge_deferral", "judge_error"}
 
 
 class NotificationDispatcher:
@@ -84,7 +111,7 @@ class NotificationDispatcher:
         if (
             self._base_url
             and self._encryption_key
-            and notification.event_type == "escalation"
+            and notification.event_type in _ACTIONABLE_EVENT_TYPES
         ):
             try:
                 approve_url, deny_url = generate_action_urls(
@@ -138,8 +165,14 @@ class NotificationDispatcher:
 
         Channels can specify an ``events`` field (JSON array of event type
         strings). When absent or null, the channel uses the default set
-        which includes escalation, resolution, and session_suspended but
-        NOT denial (opt-in to avoid noise).
+        which includes escalation, resolution, session_suspended, and
+        judge outcome events (judge_denial, judge_deferral, judge_error).
+
+        For backward compatibility, channels with explicit event lists
+        that include a "parent" type (e.g. ``resolution``) but none of
+        the judge-specific types will still receive the corresponding
+        judge events.  This prevents silent notification loss for
+        channels configured before judge event types were introduced.
         """
         events_raw = channel.get("events")
         if not events_raw:
@@ -156,7 +189,32 @@ class NotificationDispatcher:
         else:
             return event_type in DEFAULT_CHANNEL_EVENTS
 
-        return event_type in events
+        if event_type in events:
+            return True
+
+        # Backward compatibility: accept judge events when the channel
+        # subscribes to the parent type but has no explicit judge types.
+        fallback_parent = _JUDGE_EVENT_FALLBACK.get(event_type)
+        if fallback_parent and fallback_parent in events:
+            # Only fall back when the channel has NO judge-specific types
+            # at all — once a user adds any judge_* type, they've opted
+            # into granular control and the fallback is disabled.
+            has_any_judge = bool(events & set(_JUDGE_EVENT_FALLBACK))
+            if not has_any_judge:
+                logger.debug(
+                    "Channel '%s' accepted '%s' via fallback (has '%s')",
+                    channel.get("name", "?"),
+                    event_type,
+                    fallback_parent,
+                )
+                return True
+
+        logger.debug(
+            "Channel '%s' filtered out event_type='%s'",
+            channel.get("name", "?"),
+            event_type,
+        )
+        return False
 
     async def _send_to_channel(
         self,

@@ -777,6 +777,216 @@ class TestNotificationEventTypes:
         assert "summary_alert" not in DEFAULT_CHANNEL_EVENTS
         assert "analysis_alert" not in DEFAULT_CHANNEL_EVENTS
 
+    def test_judge_denial_is_valid_event(self, db):
+        """judge_denial is accepted as a valid event type."""
+        from cryptography.fernet import Fernet
+
+        from intaris.notifications.store import NotificationStore
+
+        key = Fernet.generate_key().decode()
+        store = NotificationStore(db, encryption_key=key)
+        store.upsert_channel(
+            user_id="user-1",
+            name="judge-channel-1",
+            provider="webhook",
+            config={"url": "https://example.com/hook"},
+            events=["judge_denial"],
+        )
+
+    def test_judge_approval_is_valid_event(self, db):
+        """judge_approval is accepted as a valid event type."""
+        from cryptography.fernet import Fernet
+
+        from intaris.notifications.store import NotificationStore
+
+        key = Fernet.generate_key().decode()
+        store = NotificationStore(db, encryption_key=key)
+        store.upsert_channel(
+            user_id="user-1",
+            name="judge-channel-2",
+            provider="webhook",
+            config={"url": "https://example.com/hook"},
+            events=["judge_approval"],
+        )
+
+    def test_judge_deferral_is_valid_event(self, db):
+        """judge_deferral is accepted as a valid event type."""
+        from cryptography.fernet import Fernet
+
+        from intaris.notifications.store import NotificationStore
+
+        key = Fernet.generate_key().decode()
+        store = NotificationStore(db, encryption_key=key)
+        store.upsert_channel(
+            user_id="user-1",
+            name="judge-channel-3",
+            provider="webhook",
+            config={"url": "https://example.com/hook"},
+            events=["judge_deferral"],
+        )
+
+    def test_judge_error_is_valid_event(self, db):
+        """judge_error is accepted as a valid event type."""
+        from cryptography.fernet import Fernet
+
+        from intaris.notifications.store import NotificationStore
+
+        key = Fernet.generate_key().decode()
+        store = NotificationStore(db, encryption_key=key)
+        store.upsert_channel(
+            user_id="user-1",
+            name="judge-channel-4",
+            provider="webhook",
+            config={"url": "https://example.com/hook"},
+            events=["judge_error"],
+        )
+
+    def test_judge_events_in_default_set(self):
+        """Judge denial/deferral/error are in defaults; approval is opt-in."""
+        from intaris.notifications.dispatcher import DEFAULT_CHANNEL_EVENTS
+
+        assert "judge_denial" in DEFAULT_CHANNEL_EVENTS
+        assert "judge_deferral" in DEFAULT_CHANNEL_EVENTS
+        assert "judge_error" in DEFAULT_CHANNEL_EVENTS
+        assert "judge_approval" not in DEFAULT_CHANNEL_EVENTS
+
+    def test_all_judge_events_configurable_together(self, db):
+        """All four judge event types can be configured on a single channel."""
+        from cryptography.fernet import Fernet
+
+        from intaris.notifications.store import NotificationStore
+
+        key = Fernet.generate_key().decode()
+        store = NotificationStore(db, encryption_key=key)
+        store.upsert_channel(
+            user_id="user-1",
+            name="judge-all",
+            provider="webhook",
+            config={"url": "https://example.com/hook"},
+            events=[
+                "judge_denial",
+                "judge_approval",
+                "judge_deferral",
+                "judge_error",
+            ],
+        )
+
+
+class TestDispatcherChannelAcceptsEvent:
+    """Tests for _channel_accepts_event with judge event types."""
+
+    def test_default_events_accept_judge_denial(self):
+        """Channels with default events accept judge_denial."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        channel = {"name": "test", "events": None}
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_denial")
+
+    def test_default_events_accept_judge_deferral(self):
+        """Channels with default events accept judge_deferral."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        channel = {"name": "test", "events": None}
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_deferral")
+
+    def test_default_events_accept_judge_error(self):
+        """Channels with default events accept judge_error."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        channel = {"name": "test", "events": None}
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_error")
+
+    def test_default_events_reject_judge_approval(self):
+        """Channels with default events reject judge_approval (opt-in)."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        channel = {"name": "test", "events": None}
+        assert not NotificationDispatcher._channel_accepts_event(
+            channel, "judge_approval"
+        )
+
+    def test_explicit_judge_events_accepted(self):
+        """Channels with explicit judge events accept them."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        channel = {"name": "test", "events": ["judge_denial", "judge_error"]}
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_denial")
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_error")
+        assert not NotificationDispatcher._channel_accepts_event(
+            channel, "judge_approval"
+        )
+
+    def test_backward_compat_resolution_fallback(self):
+        """Channels with explicit 'resolution' but no judge types get judge_denial."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        # Pre-existing channel config: explicit events without judge types
+        channel = {
+            "name": "legacy",
+            "events": ["escalation", "resolution", "session_suspended"],
+        }
+        # judge_denial falls back to resolution
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_denial")
+        # judge_approval also falls back to resolution
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_approval")
+
+    def test_backward_compat_escalation_fallback(self):
+        """Channels with explicit 'escalation' but no judge types get judge_deferral."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        channel = {
+            "name": "legacy",
+            "events": ["escalation", "resolution"],
+        }
+        # judge_deferral falls back to escalation
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_deferral")
+        # judge_error falls back to escalation
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_error")
+
+    def test_backward_compat_disabled_when_judge_types_present(self):
+        """Fallback is disabled once any judge_* type is in the explicit list."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        # User has opted into granular control by adding judge_denial
+        channel = {
+            "name": "granular",
+            "events": ["resolution", "judge_denial"],
+        }
+        # judge_denial is explicitly listed → accepted
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_denial")
+        # judge_approval is NOT listed and fallback is disabled → rejected
+        assert not NotificationDispatcher._channel_accepts_event(
+            channel, "judge_approval"
+        )
+
+    def test_no_fallback_when_parent_not_in_events(self):
+        """No fallback when the parent type is not in the explicit list."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        # Channel only has denial — no resolution or escalation
+        channel = {"name": "denial-only", "events": ["denial"]}
+        assert not NotificationDispatcher._channel_accepts_event(
+            channel, "judge_denial"
+        )
+        assert not NotificationDispatcher._channel_accepts_event(
+            channel, "judge_deferral"
+        )
+
+    def test_judge_only_channel(self):
+        """Channel configured for judge events only."""
+        from intaris.notifications.dispatcher import NotificationDispatcher
+
+        channel = {
+            "name": "judge-only",
+            "events": ["judge_denial", "judge_deferral", "judge_error"],
+        }
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_denial")
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_deferral")
+        assert NotificationDispatcher._channel_accepts_event(channel, "judge_error")
+        # Normal events rejected
+        assert not NotificationDispatcher._channel_accepts_event(channel, "escalation")
+        assert not NotificationDispatcher._channel_accepts_event(channel, "resolution")
+
 
 class TestProviderFormatting:
     """Tests for provider formatting of behavioral analysis notifications."""
@@ -901,6 +1111,97 @@ class TestProviderFormatting:
         assert n.findings_count == 3
         assert n.context_summary is not None
         assert n.sessions_analyzed == 5
+
+
+class TestProviderJudgeEventRouting:
+    """Tests that providers route judge event types to correct formatters."""
+
+    @staticmethod
+    def _make_judge_notification(event_type):
+        from intaris.notifications.providers import Notification
+
+        return Notification(
+            event_type=event_type,
+            call_id="judge-call-1",
+            session_id="sess-1",
+            user_id="user-1",
+            agent_id="test-agent",
+            tool="bash",
+            args_redacted={"command": "rm -rf /"},
+            risk="high",
+            reasoning="Judge reasoning text",
+            ui_url=None,
+            approve_url=None,
+            deny_url=None,
+            timestamp="2026-03-26T10:00:00Z",
+            user_decision="deny" if "denial" in event_type else "approve",
+        )
+
+    def test_pushover_judge_denial_uses_denial_format(self):
+        """Pushover routes judge_denial to denial formatting."""
+        from intaris.notifications.providers import PushoverProvider
+
+        n = self._make_judge_notification("judge_denial")
+        # PushoverProvider._format_denial_message is a static method
+        msg = PushoverProvider._format_denial_message(n)
+        assert "bash" in msg
+        assert "high" in msg
+
+    def test_pushover_judge_approval_uses_resolution_format(self):
+        """Pushover routes judge_approval to resolution formatting."""
+        from intaris.notifications.providers import PushoverProvider
+
+        n = self._make_judge_notification("judge_approval")
+        msg = PushoverProvider._format_resolution_message(n)
+        assert "bash" in msg
+
+    def test_pushover_judge_deferral_uses_escalation_format(self):
+        """Pushover routes judge_deferral to escalation formatting."""
+        from intaris.notifications.providers import PushoverProvider
+
+        n = self._make_judge_notification("judge_deferral")
+        msg = PushoverProvider._format_escalation_message(n)
+        assert "Judge reasoning text" in msg
+
+    def test_pushover_judge_error_uses_escalation_format(self):
+        """Pushover routes judge_error to escalation formatting."""
+        from intaris.notifications.providers import PushoverProvider
+
+        n = self._make_judge_notification("judge_error")
+        msg = PushoverProvider._format_escalation_message(n)
+        assert "Judge reasoning text" in msg
+
+    def test_slack_judge_denial_uses_denial_blocks(self):
+        """Slack routes judge_denial to denial block builder."""
+        from intaris.notifications.providers import SlackProvider
+
+        n = self._make_judge_notification("judge_denial")
+        blocks = SlackProvider._build_denial_blocks(n)
+        assert any(b.get("type") == "header" for b in blocks)
+
+    def test_slack_judge_approval_uses_resolution_blocks(self):
+        """Slack routes judge_approval to resolution block builder."""
+        from intaris.notifications.providers import SlackProvider
+
+        n = self._make_judge_notification("judge_approval")
+        blocks = SlackProvider._build_resolution_blocks(n)
+        assert any(b.get("type") == "header" for b in blocks)
+
+    def test_slack_judge_deferral_uses_escalation_blocks(self):
+        """Slack routes judge_deferral to escalation block builder."""
+        from intaris.notifications.providers import SlackProvider
+
+        n = self._make_judge_notification("judge_deferral")
+        blocks = SlackProvider._build_escalation_blocks(n)
+        assert any(b.get("type") == "header" for b in blocks)
+
+    def test_slack_judge_error_uses_escalation_blocks(self):
+        """Slack routes judge_error to escalation block builder."""
+        from intaris.notifications.providers import SlackProvider
+
+        n = self._make_judge_notification("judge_error")
+        blocks = SlackProvider._build_escalation_blocks(n)
+        assert any(b.get("type") == "header" for b in blocks)
 
 
 class TestNotificationTruncation:

@@ -114,6 +114,10 @@ class NotificationStore:
             "denial",
             "summary_alert",
             "analysis_alert",
+            "judge_denial",
+            "judge_approval",
+            "judge_deferral",
+            "judge_error",
         }
         if events is not None:
             invalid = set(events) - valid_events

@@ -207,7 +207,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `ANALYSIS_L3_LLM_TIMEOUT_MS` | Timeout for L3 analysis LLM calls (falls back to `ANALYSIS_LLM_TIMEOUT_MS`, default `30000`) |
 | `NOTIFICATION_ACTION_TTL_MINUTES` | TTL for notification action tokens in minutes (default `60`) |
 | `JUDGE_MODE` | Judge auto-resolution mode: `disabled` (default), `auto`, `advisory` |
-| `JUDGE_NOTIFY_MODE` | Judge notification mode: `deny_only` (default), `always`, `never` |
+| `JUDGE_NOTIFY_MODE` | Judge notification mode: `deny_only` (default — judge_denial + judge_deferral + judge_error), `always` (all judge events incl. judge_approval), `never` |
 | `JUDGE_LLM_MODEL` | Judge LLM model (default `gpt-5.4`) |
 | `JUDGE_LLM_BASE_URL` | Judge LLM base URL (falls back to `LLM_BASE_URL`) |
 | `JUDGE_LLM_API_KEY` | Judge LLM API key (falls back to `LLM_API_KEY`) |
@@ -686,9 +686,22 @@ When a tool call is escalated, the judge — a more capable LLM (default gpt-5.4
 
 | Mode | Behavior |
 |---|---|
-| `deny_only` (default) | Only notify when judge denies. |
-| `always` | Notify on escalation (before judge) AND on judge resolution. |
+| `deny_only` (default) | Dispatch `judge_denial`, `judge_deferral`, `judge_error` events. Not `judge_approval`. |
+| `always` | Dispatch all four judge event types including `judge_approval`. |
 | `never` | Fully silent — no notifications in judge mode. |
+
+**Deferred notifications**: When the judge is enabled, the initial escalation notification is never sent from the evaluate endpoint. Instead, the judge produces a single notification with its outcome. This prevents double notifications (one for the escalation, one for the judge decision).
+
+### Judge notification event types
+
+| Event Type | Source | Description | In Default Channel Events? |
+|---|---|---|---|
+| `judge_denial` | Judge resolves deny | Judge denied a tool call | Yes |
+| `judge_approval` | Judge resolves approve | Judge approved a tool call | No (opt-in) |
+| `judge_deferral` | Judge defers (advisory) | Judge deferred to human review | Yes |
+| `judge_error` | Judge LLM failure | Judge failed, needs human review | Yes |
+
+These are separate from the standard event types (`escalation`, `resolution`, `denial`, etc.) so notification channels can independently subscribe to judge notifications vs normal evaluator notifications. For backward compatibility, channels with explicit event lists that include `resolution` but no `judge_*` types will still receive judge events via fallback mapping (`judge_denial`/`judge_approval` → `resolution`, `judge_deferral`/`judge_error` → `escalation`). Once a channel adds any `judge_*` type, the fallback is disabled and only explicitly listed types are delivered.
 
 ### Architecture
 

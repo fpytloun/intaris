@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -910,6 +910,100 @@ class TestResolveWithSideEffects:
 
             # Override metric still incremented
             assert metrics.judge_overrides_total == 1
+
+        asyncio.run(_test())
+
+    def test_judge_resolution_uses_judge_denial_event_type(
+        self, audit_store, session_store
+    ):
+        """Judge deny resolution sends judge_denial event type."""
+
+        async def _test():
+            from intaris.judge import resolve_with_side_effects
+
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_dispatcher = MagicMock()
+            mock_dispatcher.notify = AsyncMock()
+
+            await resolve_with_side_effects(
+                call_id="test-call",
+                user_id="test-user",
+                user_decision="deny",
+                user_note="Judge (high confidence)",
+                resolved_by="judge",
+                judge_reasoning="Dangerous operation",
+                audit_store=audit_store,
+                notification_dispatcher=mock_dispatcher,
+            )
+
+            mock_dispatcher.notify.assert_called_once()
+            notification = mock_dispatcher.notify.call_args[1]["notification"]
+            assert notification.event_type == "judge_denial"
+
+        asyncio.run(_test())
+
+    def test_judge_resolution_uses_judge_approval_event_type(
+        self, audit_store, session_store
+    ):
+        """Judge approve resolution sends judge_approval event type."""
+
+        async def _test():
+            from intaris.judge import resolve_with_side_effects
+
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_dispatcher = MagicMock()
+            mock_dispatcher.notify = AsyncMock()
+
+            await resolve_with_side_effects(
+                call_id="test-call",
+                user_id="test-user",
+                user_decision="approve",
+                user_note="Judge (high confidence)",
+                resolved_by="judge",
+                judge_reasoning="Safe operation",
+                audit_store=audit_store,
+                evaluator=MagicMock(),
+                notification_dispatcher=mock_dispatcher,
+            )
+
+            mock_dispatcher.notify.assert_called_once()
+            notification = mock_dispatcher.notify.call_args[1]["notification"]
+            assert notification.event_type == "judge_approval"
+
+        asyncio.run(_test())
+
+    def test_human_resolution_uses_resolution_event_type(
+        self, audit_store, session_store
+    ):
+        """Human resolution sends standard resolution event type."""
+
+        async def _test():
+            from intaris.judge import resolve_with_side_effects
+
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_dispatcher = MagicMock()
+            mock_dispatcher.notify = AsyncMock()
+
+            await resolve_with_side_effects(
+                call_id="test-call",
+                user_id="test-user",
+                user_decision="approve",
+                user_note="Looks good",
+                resolved_by="user",
+                audit_store=audit_store,
+                evaluator=MagicMock(),
+                notification_dispatcher=mock_dispatcher,
+            )
+
+            mock_dispatcher.notify.assert_called_once()
+            notification = mock_dispatcher.notify.call_args[1]["notification"]
+            assert notification.event_type == "resolution"
 
         asyncio.run(_test())
 

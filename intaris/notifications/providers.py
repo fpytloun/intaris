@@ -77,7 +77,8 @@ class Notification:
     """
 
     event_type: str  # "escalation", "resolution", "session_suspended", "denial",
-    #                   "summary_alert", or "analysis_alert"
+    #                   "summary_alert", "analysis_alert", "judge_denial",
+    #                   "judge_approval", "judge_deferral", "judge_error"
     call_id: str
     session_id: str
     user_id: str
@@ -274,6 +275,22 @@ class PushoverProvider:
             priority = (
                 2 if (notification.risk_level or 0) >= 10 else config.get("priority", 1)
             )
+        elif notification.event_type == "judge_denial":
+            title = "Intaris: Judge Denied Tool Call"
+            message = self._format_denial_message(notification)
+            priority = config.get("denial_priority", 0)
+        elif notification.event_type == "judge_approval":
+            title = "Intaris: Judge Approved Tool Call"
+            message = self._format_resolution_message(notification)
+            priority = config.get("resolution_priority", -1)
+        elif notification.event_type in ("judge_deferral", "judge_error"):
+            title = (
+                "Intaris: Judge Deferred — Review Required"
+                if notification.event_type == "judge_deferral"
+                else "Intaris: Judge Error — Review Required"
+            )
+            message = self._format_escalation_message(notification)
+            priority = config.get("priority", 1)
         else:
             title = "Intaris: Escalation Required"
             message = self._format_escalation_message(notification)
@@ -557,6 +574,20 @@ class SlackProvider:
             blocks = self._build_summary_alert_blocks(notification)
         elif notification.event_type == "analysis_alert":
             blocks = self._build_analysis_alert_blocks(notification)
+        elif notification.event_type == "judge_denial":
+            blocks = self._build_denial_blocks(notification)
+            self._override_header(blocks, "Intaris: Judge Denied Tool Call")
+        elif notification.event_type == "judge_approval":
+            blocks = self._build_resolution_blocks(notification)
+            self._override_header(blocks, "Intaris: Judge Approved Tool Call")
+        elif notification.event_type == "judge_deferral":
+            blocks = self._build_escalation_blocks(notification)
+            self._override_header(
+                blocks, "Intaris: Judge Deferred \u2014 Review Required"
+            )
+        elif notification.event_type == "judge_error":
+            blocks = self._build_escalation_blocks(notification)
+            self._override_header(blocks, "Intaris: Judge Error \u2014 Review Required")
         else:
             blocks = self._build_escalation_blocks(notification)
 
@@ -573,6 +604,14 @@ class SlackProvider:
             "Slack notification sent for call_id=%s",
             notification.call_id,
         )
+
+    @staticmethod
+    def _override_header(blocks: list[dict[str, Any]], text: str) -> None:
+        """Replace the header text in a Slack block list."""
+        for block in blocks:
+            if block.get("type") == "header" and "text" in block:
+                block["text"]["text"] = text
+                break
 
     @staticmethod
     def _build_escalation_blocks(n: Notification) -> list[dict[str, Any]]:
