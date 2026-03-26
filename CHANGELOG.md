@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-03-26
+
+### Added
+
+- **Judge notification event types** -- Dedicated event types (`judge_denial`, `judge_approval`, `judge_deferral`, `judge_error`) for judge auto-resolution outcomes. Initial escalation notification is deferred when judge is enabled, replaced by a single judge outcome notification. Backward-compatible fallback mapping for existing notification channels.
+
+### Fixed
+
+- **Prompts** -- Enforce English-only output across all LLM system prompts (evaluator, judge, intention, analysis) to prevent non-English responses when processing non-English user content.
+
 ## [0.3.0] - 2026-03-26
 
 ### Added
@@ -76,6 +86,7 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.3.1]: https://github.com/fpytloun/intaris/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fpytloun/intaris/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fpytloun/intaris/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fpytloun/intaris/releases/tag/v0.1.0
