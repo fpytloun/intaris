@@ -1082,6 +1082,101 @@
           </template>
         </div>
 
+        <!-- Recent Denials Section -->
+        <div class="mt-8">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-medium text-secondary">Recent Denials</h2>
+            <span class="text-sm text-muted" x-text="denialsTotal + ' denied'" x-show="denialsTotal > 0"></span>
+          </div>
+
+          <div x-show="denialsLoading && denials.length === 0" class="text-center py-8 text-secondary">Loading denials...</div>
+          <div x-show="!denialsLoading && denials.length === 0" class="text-center py-6 text-muted text-sm">No recent overridable denials</div>
+
+          <div class="space-y-2">
+            <template x-for="item in denials" :key="item.call_id">
+              <div class="card cursor-pointer" @click="toggleDenialExpand(item)">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-3">
+                    <span class="badge badge-deny">deny</span>
+                    <span class="font-mono text-sm" x-text="item.tool"></span>
+                    <span :class="riskBadgeClass(item.risk)" x-text="item.risk" x-show="item.risk"></span>
+                    <span class="text-xs text-muted px-1.5 py-0.5 rounded bg-surface-tertiary" x-text="item.evaluation_path"></span>
+                  </div>
+                  <div class="flex items-center gap-3 text-xs text-muted">
+                    <span x-show="item.agent_id" class="font-mono px-1.5 py-0.5 rounded bg-surface-tertiary" x-text="item.agent_id"></span>
+                    <span class="text-brand-accent hover:underline cursor-pointer"
+                          @click.stop="goToSession(item.session_id)"
+                          x-text="item.session_id"></span>
+                    <span x-text="formatTime(item.timestamp)"></span>
+                  </div>
+                </div>
+                <div x-show="item.reasoning && expandedDenialId !== item.call_id" class="mt-2 text-sm text-secondary truncate" x-text="truncate(item.reasoning, 150)"></div>
+
+                <!-- Expanded Detail -->
+                <div x-show="expandedDenialId === item.call_id" x-cloak @click.stop class="mt-4 pt-4 border-t border-brand-border">
+                  <!-- Reasoning -->
+                  <template x-if="expandedDenialRecord?.reasoning">
+                    <div class="mb-3">
+                      <div class="text-xs text-muted mb-1">Reasoning</div>
+                      <div class="text-sm bg-brand-elevated rounded p-3" x-text="expandedDenialRecord.reasoning"></div>
+                    </div>
+                  </template>
+
+                  <!-- Args (expandable) -->
+                  <div x-show="expandedDenialRecord?.args_redacted" class="mb-3">
+                    <div class="flex items-center gap-2 mb-1">
+                      <div class="text-xs text-muted">Arguments</div>
+                      <button @click.stop="expandedDenialArgs === item.call_id ? (expandedDenialArgs = null) : (expandedDenialArgs = item.call_id)"
+                              class="text-xs text-brand-accent hover:underline cursor-pointer"
+                              x-text="expandedDenialArgs === item.call_id ? 'Collapse' : 'Expand'"></button>
+                    </div>
+                    <pre x-show="expandedDenialArgs !== item.call_id"
+                         class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto cursor-pointer"
+                         @click.stop="expandedDenialArgs = item.call_id"
+                         x-text="truncateArgs(expandedDenialRecord?.args_redacted)"></pre>
+                    <pre x-show="expandedDenialArgs === item.call_id" x-cloak
+                         class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap break-words max-h-96 overflow-y-auto"
+                         x-text="formatArgs(expandedDenialRecord?.args_redacted)"></pre>
+                  </div>
+
+                  <!-- Intention -->
+                  <template x-if="expandedDenialRecord?.intention">
+                    <div class="mb-3">
+                      <div class="text-xs text-muted mb-1">Intention</div>
+                      <div class="text-sm bg-brand-elevated rounded p-3" x-text="expandedDenialRecord.intention"></div>
+                    </div>
+                  </template>
+
+                  <!-- Metadata -->
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs text-muted mb-3">
+                    <div>Call ID: <span class="font-mono" x-text="expandedDenialRecord?.call_id"></span></div>
+                    <div>Classification: <span x-text="expandedDenialRecord?.classification"></span></div>
+                    <div>Agent: <span x-text="expandedDenialRecord?.agent_id || 'none'"></span></div>
+                    <div>Path: <span x-text="expandedDenialRecord?.evaluation_path"></span></div>
+                  </div>
+
+                  <!-- Override Actions -->
+                  <div class="p-3 border border-amber-500/30 rounded bg-amber-500/5">
+                    <div class="text-xs text-muted mb-2">Override Denial</div>
+                    <div class="flex items-end gap-3">
+                      <div class="flex-1">
+                        <input type="text" placeholder="Override note (e.g., 'Allow this command')..."
+                               class="input text-sm" @click.stop x-model="noteText[item.call_id]">
+                      </div>
+                      <button @click.stop="overrideDenial(item.call_id, 'approve')"
+                              :disabled="resolving[item.call_id] === true" class="btn-success text-sm"
+                              x-text="resolving[item.call_id] === true ? 'Approving...' : 'Approve'"></button>
+                      <button @click.stop="overrideDenial(item.call_id, 'deny')"
+                              :disabled="resolving[item.call_id] === true" class="btn-danger text-sm"
+                              x-text="resolving[item.call_id] === true ? 'Confirming...' : 'Confirm Deny'"></button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
         <!-- Resolved Approvals Section -->
         <div class="mt-8">
           <div class="flex items-center justify-between mb-4">

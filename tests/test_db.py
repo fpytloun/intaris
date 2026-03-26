@@ -388,7 +388,7 @@ class TestAuditStore:
             latency_ms=1,
         )
 
-        with pytest.raises(ValueError, match="not escalated"):
+        with pytest.raises(ValueError, match="cannot be resolved"):
             audit_store.resolve_escalation("call_ne", "approve", user_id=TEST_USER)
 
     def test_resolve_already_resolved(self, audit_store, session_store):

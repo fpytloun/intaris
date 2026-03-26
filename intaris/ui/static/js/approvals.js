@@ -21,6 +21,14 @@ function approvalsTab() {
     noteText: {},       // call_id -> note text
     expandedArgs: null, // call_id of item with expanded args
 
+    // Denials section state
+    denials: [],
+    denialsTotal: 0,
+    denialsLoading: false,
+    expandedDenialId: null,
+    expandedDenialRecord: null,
+    expandedDenialArgs: null,
+
     // Resolved section state
     expandedResolvedId: null,   // call_id of expanded resolved item
     expandedResolvedRecord: null,
@@ -34,6 +42,7 @@ function approvalsTab() {
     // Polling fallback state
     pollTimer: null,
     _loadDebounce: null,
+    _loadDenialsDebounce: null,
     recentlyResolved: new Map(),  // call_id -> timestamp
     _tabActive: false,
 
@@ -45,6 +54,7 @@ function approvalsTab() {
             this.initialized = true;
           }
           this.load();
+          this.loadDenials();
           this.loadResolved();
           // Start polling fallback if WebSocket is not connected
           if (!Alpine.store('ws').connected) {
@@ -54,23 +64,27 @@ function approvalsTab() {
           this._tabActive = false;
           this.stopPolling();
           clearTimeout(this._loadDebounce);
+          clearTimeout(this._loadDenialsDebounce);
         }
       });
       window.addEventListener('intaris:user-changed', () => {
         if (this.initialized && this._tabActive) {
           this.load();
+          this.loadDenials();
           this.loadResolved();
         }
       });
       window.addEventListener('intaris:agent-changed', () => {
         if (this.initialized && this._tabActive) {
           this.load();
+          this.loadDenials();
           this.loadResolved();
         }
       });
       window.addEventListener('intaris:logout', () => {
         this.stopPolling();
         clearTimeout(this._loadDebounce);
+        clearTimeout(this._loadDenialsDebounce);
       });
 
       // Subscribe to shared WebSocket events
@@ -86,13 +100,22 @@ function approvalsTab() {
     _handleWsMessage(data) {
       if (data.type === 'evaluated' && data.decision === 'escalate') {
         this._scheduleLoad();
+      } else if (data.type === 'evaluated' && data.decision === 'deny') {
+        this._scheduleLoadDenials();
       } else if (data.type === 'decided') {
-        // Another user (or this user via resolve()) resolved an item
+        // Another user (or this user via resolve/override) resolved an item
         const callId = data.call_id;
         if (callId) {
-          this._markResolved(callId);
-          this.pending = this.pending.filter(p => p.call_id !== callId);
-          this.total = this.pending.length;
+          if (data.decision === 'deny') {
+            // Denial override — remove from denials list
+            this.denials = this.denials.filter(d => d.call_id !== callId);
+            this.denialsTotal = this.denials.length;
+          } else {
+            // Escalation resolution — remove from pending list
+            this._markResolved(callId);
+            this.pending = this.pending.filter(p => p.call_id !== callId);
+            this.total = this.pending.length;
+          }
           // Refresh resolved list to show the newly resolved item
           this.loadResolved();
         }
@@ -103,7 +126,10 @@ function approvalsTab() {
 
     startPolling() {
       this.stopPolling();
-      this.pollTimer = setInterval(() => this.load(), POLL_INTERVAL_MS);
+      this.pollTimer = setInterval(() => {
+        this.load();
+        this.loadDenials();
+      }, POLL_INTERVAL_MS);
     },
 
     stopPolling() {
@@ -122,6 +148,11 @@ function approvalsTab() {
     _scheduleLoad() {
       clearTimeout(this._loadDebounce);
       this._loadDebounce = setTimeout(() => this.load(), WS_LOAD_DEBOUNCE_MS);
+    },
+
+    _scheduleLoadDenials() {
+      clearTimeout(this._loadDenialsDebounce);
+      this._loadDenialsDebounce = setTimeout(() => this.loadDenials(), WS_LOAD_DEBOUNCE_MS);
     },
 
     async load() {
@@ -165,6 +196,32 @@ function approvalsTab() {
         Alpine.store('notify').error('Failed to load resolved approvals: ' + e.message);
       } finally {
         this.resolvedLoading = false;
+      }
+    },
+
+    async loadDenials() {
+      this.denialsLoading = true;
+      try {
+        const params = {
+          decision: 'deny',
+          record_type: 'tool_call',
+          resolved: false,
+          limit: 20,
+        };
+        const agentFilter = Alpine.store('nav').selectedAgent;
+        if (agentFilter) params.agent_id = agentFilter;
+        const result = await IntarisAPI.listAudit(params);
+        // Filter out session-status denials (evaluation_path='fast')
+        // which cannot benefit from the denial override retry mechanism.
+        const items = (result.items || []).filter(
+          item => item.evaluation_path !== 'fast'
+        );
+        this.denials = items;
+        this.denialsTotal = items.length;
+      } catch (e) {
+        Alpine.store('notify').error('Failed to load denials: ' + e.message);
+      } finally {
+        this.denialsLoading = false;
       }
     },
 
@@ -250,6 +307,30 @@ function approvalsTab() {
       return this._resolveOrOverride(callId, decision, true);
     },
 
+    async overrideDenial(callId, decision) {
+      if (!callId || !decision) return;
+      if (this.resolving[callId]) return;
+      this.resolving = { ...this.resolving, [callId]: true };
+      try {
+        const note = this.noteText[callId] || null;
+        await IntarisAPI.resolveDecision(callId, decision, note);
+        Alpine.store('notify').success(
+          decision === 'approve'
+            ? 'Denial overridden — retry will be approved'
+            : 'Denial confirmed'
+        );
+        this.denials = this.denials.filter(d => d.call_id !== callId);
+        this.denialsTotal = this.denials.length;
+        delete this.noteText[callId];
+      } catch (e) {
+        console.error('[intaris] denial override failed:', e);
+        Alpine.store('notify').error('Failed to override denial: ' + (e.message || String(e)));
+      } finally {
+        const { [callId]: _, ...rest } = this.resolving;
+        this.resolving = rest;
+      }
+    },
+
     // ── Navigation ────────────────────────────────────────────
 
     goToSession(sessionId) {
@@ -257,6 +338,22 @@ function approvalsTab() {
     },
 
     // ── Resolved item expand ─────────────────────────────────
+
+    async toggleDenialExpand(item) {
+      if (this.expandedDenialId === item.call_id) {
+        this.expandedDenialId = null;
+        this.expandedDenialRecord = null;
+        this.expandedDenialArgs = null;
+        return;
+      }
+      this.expandedDenialId = item.call_id;
+      this.expandedDenialArgs = null;
+      try {
+        this.expandedDenialRecord = await IntarisAPI.getAuditRecord(item.call_id);
+      } catch (e) {
+        this.expandedDenialRecord = item;
+      }
+    },
 
     async toggleResolvedExpand(item) {
       if (this.expandedResolvedId === item.call_id) {

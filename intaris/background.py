@@ -68,6 +68,8 @@ class Metrics:
         self.judge_deferrals_total: int = 0
         self.judge_errors_total: int = 0
         self.judge_overrides_total: int = 0
+        # Denial override metrics (ex-post approval of L1 denials)
+        self.denial_overrides_total: int = 0
         # Gauges
         self.sessions_needing_summaries: int = 0
         # Liveness timestamps (ISO 8601)
@@ -101,6 +103,7 @@ class Metrics:
             "judge_deferrals_total": self.judge_deferrals_total,
             "judge_errors_total": self.judge_errors_total,
             "judge_overrides_total": self.judge_overrides_total,
+            "denial_overrides_total": self.denial_overrides_total,
             "sessions_needing_summaries": self.sessions_needing_summaries,
             "last_worker_poll": self.last_worker_poll,
             "last_idle_sweep": self.last_idle_sweep,

@@ -440,10 +440,21 @@ class Evaluator:
                     )
             decision = make_fast_decision("read", reasoning)
         elif classification == Classification.CRITICAL:
-            decision = make_fast_decision(
-                "critical",
-                f"Critical pattern detected in {tool} call",
+            # Check for prior approved override before auto-deny.
+            # If the user explicitly approved the exact same command
+            # (via denial override), bypass the critical auto-deny.
+            retry_decision = self._check_escalation_retry(
+                user_id=user_id,
+                tool=tool,
+                args_hash=args_hash,
             )
+            if retry_decision is not None:
+                decision = retry_decision
+            else:
+                decision = make_fast_decision(
+                    "critical",
+                    f"Critical pattern detected in {tool} call",
+                )
         elif classification == Classification.ESCALATE:
             # Check escalation retry: reuse prior approval if same
             # tool+args was approved within the TTL window.
@@ -460,15 +471,26 @@ class Evaluator:
                     f"Tool preference requires escalation for {tool}",
                 )
         else:
-            # Step 6: LLM safety evaluation
-            decision = self._llm_evaluate(
-                session=session,
+            # Check for prior approved denial override before LLM.
+            # If the user previously approved a denial of the same
+            # command, skip the LLM call and approve directly.
+            retry_decision = self._check_escalation_retry(
+                user_id=user_id,
                 tool=tool,
-                args_redacted=args_redacted,
-                agent_id=agent_id,
-                context=context,
-                parent_intention=parent_intention,
+                args_hash=args_hash,
             )
+            if retry_decision is not None:
+                decision = retry_decision
+            else:
+                # Step 6: LLM safety evaluation
+                decision = self._llm_evaluate(
+                    session=session,
+                    tool=tool,
+                    args_redacted=args_redacted,
+                    agent_id=agent_id,
+                    context=context,
+                    parent_intention=parent_intention,
+                )
 
         # Learn from LLM approvals: cache path prefixes for path-reclassified
         # calls so subsequent reads to the same directory are fast-pathed.
@@ -617,12 +639,16 @@ class Evaluator:
         tool: str,
         args_hash: str,
     ) -> Decision | None:
-        """Check if a prior escalation for the same tool+args was approved.
+        """Check if a prior escalation or denial for the same tool+args was approved.
 
         Looks for an audit record within the retry TTL window where:
         - Same user, tool, and args_hash (session-independent so approvals
           survive MCP proxy reconnects)
-        - The escalation was resolved with user_decision='approve'
+        - The record was resolved with user_decision='approve'
+
+        This covers both escalation retry (existing) and denial override
+        retry (ex-post approval of L1 denials). The underlying SQL query
+        is decision-agnostic — it matches any approved override.
 
         Returns:
             Decision to approve (reusing prior approval), or None if no

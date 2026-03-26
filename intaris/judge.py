@@ -405,7 +405,7 @@ async def resolve_with_side_effects(
     notification_dispatcher: Any | None = None,
     metrics: Any | None = None,
 ) -> dict[str, Any]:
-    """Resolve an escalation with all side effects.
+    """Resolve an escalation or denial with all side effects.
 
     Shared handler used by both human resolution (``POST /decision``)
     and judge auto-resolution. Ensures identical side effects:
@@ -416,13 +416,13 @@ async def resolve_with_side_effects(
     4. ``event_bus.publish("decided")`` — WebSocket streaming
     5. Notification dispatch — resolution confirmation
 
-    Supports human override of judge decisions: when a human resolves
-    a call that was previously resolved by the judge, the judge's
-    reasoning is preserved and a ``judge_overrides_total`` metric is
-    incremented.
+    Supports:
+    - Resolving unresolved escalations (first resolution)
+    - Overriding judge decisions on escalations
+    - Ex-post overriding L1 denials (critical auto-deny, LLM deny)
 
     Args:
-        call_id: The escalated call to resolve.
+        call_id: The escalated or denied call to resolve.
         user_id: Tenant identifier.
         user_decision: "approve" or "deny".
         user_note: Optional note from the resolver.
@@ -439,21 +439,24 @@ async def resolve_with_side_effects(
         The updated audit record dict.
 
     Raises:
-        ValueError: If record not found, not escalated, or already
-            resolved by a human user.
+        ValueError: If record not found, not an escalation or denial,
+            or already resolved by a human user.
     """
-    # Detect judge override: check if the record was previously resolved
-    # by the judge before we overwrite it. This pre-check runs before
-    # the atomic UPDATE. In a concurrent override race, the second
+    # Detect judge override and denial override: check the existing
+    # record before we overwrite it. This pre-check runs before the
+    # atomic UPDATE. In a concurrent override race, the second
     # caller's resolve_escalation() raises ValueError (resolved_by is
     # already 'user'), so the metric increment below is never reached
     # — double-counting is impossible.
     is_judge_override = False
+    is_denial_override = False
     if resolved_by == "user":
         try:
             existing = audit_store.get_by_call_id(call_id, user_id=user_id)
             if existing.get("resolved_by") == "judge":
                 is_judge_override = True
+            if existing.get("decision") == "deny" and user_decision == "approve":
+                is_denial_override = True
         except ValueError:
             pass
 
@@ -485,6 +488,16 @@ async def resolve_with_side_effects(
         if metrics is not None:
             metrics.judge_overrides_total += 1
 
+    # Log and count denial overrides (ex-post approval of L1 denials)
+    if is_denial_override:
+        logger.info(
+            "Human overrode denial for call_id=%s: note=%s",
+            call_id,
+            user_note,
+        )
+        if metrics is not None:
+            metrics.denial_overrides_total += 1
+
     # Step 2: Alignment barrier acknowledgment
     if (
         record is not None
@@ -511,6 +524,7 @@ async def resolve_with_side_effects(
                 "call_id": call_id,
                 "session_id": record.get("session_id"),
                 "user_id": user_id,
+                "decision": record.get("decision"),
                 "user_decision": user_decision,
                 "user_note": user_note,
                 "resolved_by": resolved_by,

@@ -324,11 +324,15 @@ class AuditStore:
         args_hash: str,
         cutoff: str,
     ) -> dict[str, Any] | None:
-        """Find a prior approved escalation for the same tool+args.
+        """Find a prior approved override for the same tool+args.
 
-        Used by the evaluator for escalation retry: if the same tool+args
-        combination was approved within the TTL window, the approval can
-        be reused.
+        Used by the evaluator for retry: if the same tool+args
+        combination was approved (via escalation resolution or denial
+        override) within the TTL window, the approval can be reused.
+
+        The query is decision-agnostic — it matches any audit record
+        with ``user_decision='approve'`` regardless of the original
+        ``decision`` column (escalate or deny).
 
         Args:
             user_id: Tenant identifier.
@@ -367,15 +371,18 @@ class AuditStore:
         resolved_by: str = "user",
         judge_reasoning: str | None = None,
     ) -> dict[str, Any]:
-        """Record a decision on an escalated tool call.
+        """Record a user decision on an escalated or denied tool call.
 
-        Supports overriding judge decisions: when ``resolved_by`` on the
-        existing record is ``"judge"``, a human can re-resolve the call.
+        Supports:
+        - Resolving unresolved escalations (first resolution)
+        - Overriding judge decisions on escalations
+        - Ex-post overriding L1 denials (critical auto-deny, LLM deny)
+
         Human decisions (``resolved_by="user"``) are final and cannot be
         overridden.
 
         Args:
-            call_id: The escalated call to resolve.
+            call_id: The escalated or denied call to resolve.
             user_decision: "approve" or "deny".
             user_note: Optional note from the resolver.
             user_id: Tenant identifier.
@@ -386,8 +393,8 @@ class AuditStore:
             Updated audit record.
 
         Raises:
-            ValueError: If record not found, not escalated, or already
-                resolved by a human user.
+            ValueError: If record not found, not an escalation or denial,
+                or already resolved by a human user.
         """
         if user_decision not in ("approve", "deny"):
             raise ValueError(
@@ -401,9 +408,9 @@ class AuditStore:
         now = datetime.now(timezone.utc).isoformat()
 
         # Atomic update: conditions in WHERE prevent TOCTOU races.
-        # Matches unresolved records OR records resolved by the judge
-        # (allowing human override of judge decisions). Human decisions
-        # are final — resolved_by='user' is NOT matched.
+        # Matches unresolved escalations/denials OR records resolved by
+        # the judge (allowing human override of judge decisions). Human
+        # decisions are final — resolved_by='user' is NOT matched.
         # COALESCE preserves existing judge_reasoning when the caller
         # does not provide it (i.e., human override passes None).
         with self._db.cursor() as cur:
@@ -413,7 +420,7 @@ class AuditStore:
                 SET user_decision = ?, user_note = ?, resolved_at = ?,
                     resolved_by = ?, judge_reasoning = COALESCE(?, judge_reasoning)
                 WHERE call_id = ? AND user_id = ?
-                  AND decision = 'escalate'
+                  AND decision IN ('escalate', 'deny')
                   AND (user_decision IS NULL OR resolved_by = 'judge')
                 """,
                 (
@@ -429,9 +436,9 @@ class AuditStore:
             if cur.rowcount == 0:
                 # Determine why the update failed for a clear error message
                 record = self.get_by_call_id(call_id, user_id=user_id)
-                if record["decision"] != "escalate":
+                if record["decision"] not in ("escalate", "deny"):
                     raise ValueError(
-                        f"Call {call_id} is not escalated "
+                        f"Call {call_id} cannot be resolved "
                         f"(decision={record['decision']})"
                     )
                 if record.get("user_decision"):
@@ -445,7 +452,7 @@ class AuditStore:
                         f"(user_decision={record['user_decision']})"
                     )
                 # Shouldn't reach here, but raise generic error
-                raise ValueError(f"Failed to resolve escalation for {call_id}")
+                raise ValueError(f"Failed to resolve call {call_id}")
 
         return self.get_by_call_id(call_id, user_id=user_id)
 

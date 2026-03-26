@@ -716,6 +716,24 @@ These are separate from the standard event types (`escalation`, `resolution`, `d
 - **Fail-open**: If the judge LLM fails, the escalation remains unresolved for human review. A notification is sent if `notify_mode` allows.
 - **Human override of judge decisions**: Humans can override any judge-resolved decision (deny→approve or approve→deny) via `POST /decision`. The `resolve_escalation()` WHERE clause matches `(user_decision IS NULL OR resolved_by = 'judge')`, allowing re-resolution of judge decisions while keeping human decisions final. `COALESCE(?, judge_reasoning)` preserves the judge's reasoning when a human overrides. The UI shows an "Override" button on judge-resolved records in the Resolved section, with an "overridden by user" indicator when a judge decision has been overridden. After override, the escalation retry mechanism and LLM history labels (`escalate→user:approve`) ensure subsequent retries of the same tool call respect the human's decision. Note: the "overridden by user" UI label uses `judge_reasoning IS NOT NULL` as a heuristic; this can produce false positives for advisory+defer escalations resolved by a human (where `judge_reasoning` was stored during the defer phase). A dedicated DB column would resolve this in a future migration if needed.
 
+### Ex-post denial overrides (L1 denials)
+
+Parallel to the judge override flow, humans can also override L1 denials — tool calls denied by the critical classifier or LLM evaluation before reaching the judge layer. This provides a recovery path when a critical action is denied but the user explicitly confirms it afterward.
+
+**Flow:**
+1. Tool call denied (critical auto-deny or LLM deny) → audit record with `decision='deny'`, `args_hash` set.
+2. User approves via `POST /decision` (same endpoint as escalation resolution) → `user_decision='approve'`, `resolved_by='user'`.
+3. Agent retries the same command → evaluator finds the prior approval via `args_hash` (same retry mechanism as escalation retry) → auto-approves within 10 minutes.
+
+**Implementation details:**
+- `resolve_escalation()` SQL WHERE clause: `decision IN ('escalate', 'deny')` — accepts both escalations and denials.
+- The evaluator calls `_check_escalation_retry()` before CRITICAL auto-deny and before LLM evaluation for WRITE classifications.
+- Session-status denials (completed/suspended/terminated) are NOT overridable in the UI — they lack `args_hash` (computed after the early-return session status check) and are filtered from the "Recent Denials" section by `evaluation_path !== 'fast'`.
+- Human decisions on denials are final (`resolved_by='user'` is not re-resolvable).
+- The original `decision='deny'` column is preserved; `user_decision` records the override.
+
+**UI:** The Approvals tab includes a "Recent Denials" section showing overridable denials (evaluation_path `critical` or `llm`) with Approve/Confirm Deny buttons.
+
 ### Database columns
 
 - `audit_log.resolved_by TEXT` — NULL (not resolved), "user" (human), "judge" (judge LLM). Changes from "judge" to "user" when a human overrides.
@@ -723,7 +741,7 @@ These are separate from the standard event types (`escalation`, `resolution`, `d
 
 ### Observability
 
-Metrics exposed via `/stats`: `judge_reviews_total`, `judge_approvals_total`, `judge_denials_total`, `judge_deferrals_total`, `judge_errors_total`, `judge_overrides_total`.
+Metrics exposed via `/stats`: `judge_reviews_total`, `judge_approvals_total`, `judge_denials_total`, `judge_deferrals_total`, `judge_errors_total`, `judge_overrides_total`, `denial_overrides_total`.
 
 ## Webhook Callbacks
 

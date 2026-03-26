@@ -333,7 +333,13 @@ async def action_post(request: Request) -> HTMLResponse:
             status_code=403,
         )
 
-    # Execute the action using the token's user_id (not any header value)
+    # Execute the action using the token's user_id (not any header value).
+    # NOTE: resolve_escalation() also accepts decision='deny' records
+    # (for denial overrides), but notification action tokens are only
+    # generated for escalations — so this path only handles escalations.
+    # This calls resolve_escalation() directly rather than
+    # resolve_with_side_effects() — EventBus publish, path learning,
+    # and notification dispatch are intentionally skipped for action links.
     from intaris.audit import AuditStore
     from intaris.server import _get_db
 

@@ -1454,6 +1454,336 @@ class TestAuditGetRecentBefore:
         assert records[0]["record_type"] == "reasoning"
 
 
+# ── Denial Override Tests ─────────────────────────────────────────────
+
+
+def _create_denied_record(
+    audit_store,
+    call_id="deny-call",
+    user_id="test-user",
+    evaluation_path="critical",
+    classification="critical",
+    risk="critical",
+    args_hash=None,
+):
+    """Helper to create a denied audit record."""
+    return audit_store.insert(
+        call_id=call_id,
+        user_id=user_id,
+        session_id="test-session",
+        agent_id="test-agent",
+        tool="bash",
+        args_redacted={"command": "rm -rf /tmp/dangerous"},
+        classification=classification,
+        evaluation_path=evaluation_path,
+        decision="deny",
+        risk=risk,
+        reasoning="Critical pattern detected in bash call",
+        latency_ms=50,
+        args_hash=args_hash,
+    )
+
+
+class TestDenialOverride:
+    """Test ex-post approval/denial override for L1 denials."""
+
+    def test_resolve_denial_to_approve(self, audit_store, session_store):
+        """User can approve a previously denied tool call."""
+        _create_session(session_store)
+        _create_denied_record(audit_store, call_id="deny-approve-1")
+
+        result = audit_store.resolve_escalation(
+            "deny-approve-1",
+            "approve",
+            user_note="Allow this command for my workflow",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        assert result["decision"] == "deny"  # Original decision preserved
+        assert result["user_decision"] == "approve"
+        assert result["resolved_by"] == "user"
+        assert result["user_note"] == "Allow this command for my workflow"
+        assert result["resolved_at"] is not None
+
+    def test_resolve_denial_to_confirm_deny(self, audit_store, session_store):
+        """User can confirm a denial (set user_decision to deny)."""
+        _create_session(session_store)
+        _create_denied_record(audit_store, call_id="deny-confirm-1")
+
+        result = audit_store.resolve_escalation(
+            "deny-confirm-1",
+            "deny",
+            user_note="Confirmed, this is dangerous",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        assert result["decision"] == "deny"
+        assert result["user_decision"] == "deny"
+        assert result["resolved_by"] == "user"
+
+    def test_cannot_override_user_resolved_denial(self, audit_store, session_store):
+        """Human decisions on denials are final — cannot be overridden."""
+        _create_session(session_store)
+        _create_denied_record(audit_store, call_id="deny-final-1")
+
+        # First resolution
+        audit_store.resolve_escalation(
+            "deny-final-1",
+            "approve",
+            user_note="Allow",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        # Second attempt fails
+        with pytest.raises(ValueError, match="already resolved by user"):
+            audit_store.resolve_escalation(
+                "deny-final-1",
+                "deny",
+                user_note="Changed my mind",
+                user_id="test-user",
+                resolved_by="user",
+            )
+
+    def test_approve_record_not_deny_or_escalate_fails(
+        self, audit_store, session_store
+    ):
+        """Cannot resolve a record whose decision is 'approve'."""
+        _create_session(session_store)
+        audit_store.insert(
+            call_id="approve-call",
+            user_id="test-user",
+            session_id="test-session",
+            agent_id="test-agent",
+            tool="bash",
+            args_redacted={"command": "ls"},
+            classification="read",
+            evaluation_path="fast",
+            decision="approve",
+            risk="low",
+            reasoning="Read-only",
+            latency_ms=1,
+        )
+
+        with pytest.raises(ValueError, match="cannot be resolved"):
+            audit_store.resolve_escalation(
+                "approve-call",
+                "deny",
+                user_id="test-user",
+                resolved_by="user",
+            )
+
+    def test_denial_override_retry_with_args_hash(self, audit_store, session_store):
+        """After approving a denied call, retry finds the approval via args_hash."""
+        import hashlib
+
+        _create_session(session_store)
+
+        args = {"command": "rm -rf /tmp/dangerous"}
+        args_hash = hashlib.sha256(
+            json.dumps(args, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+        _create_denied_record(
+            audit_store,
+            call_id="deny-retry-1",
+            args_hash=args_hash,
+        )
+
+        # Before override: no approval found
+        result = audit_store.find_approved_escalation(
+            user_id="test-user",
+            tool="bash",
+            args_hash=args_hash,
+            cutoff="2000-01-01T00:00:00",
+        )
+        assert result is None
+
+        # User approves the denial
+        audit_store.resolve_escalation(
+            "deny-retry-1",
+            "approve",
+            user_note="Allow this specific command",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        # After override: approval found via args_hash
+        result = audit_store.find_approved_escalation(
+            user_id="test-user",
+            tool="bash",
+            args_hash=args_hash,
+            cutoff="2000-01-01T00:00:00",
+        )
+        assert result is not None
+        assert result["call_id"] == "deny-retry-1"
+
+    def test_session_status_deny_resolve_succeeds_but_no_retry(
+        self, audit_store, session_store
+    ):
+        """Session-status denials can be resolved but lack args_hash for retry."""
+        _create_session(session_store)
+
+        # Session-status deny — no args_hash
+        audit_store.insert(
+            call_id="status-deny-1",
+            user_id="test-user",
+            session_id="test-session",
+            agent_id="test-agent",
+            tool="bash",
+            args_redacted={"command": "ls"},
+            classification="write",
+            evaluation_path="fast",
+            decision="deny",
+            risk="low",
+            reasoning="Session is completed",
+            latency_ms=1,
+        )
+
+        # Resolve succeeds (SQL matches decision='deny')
+        result = audit_store.resolve_escalation(
+            "status-deny-1",
+            "approve",
+            user_note="Try to unblock",
+            user_id="test-user",
+            resolved_by="user",
+        )
+        assert result["user_decision"] == "approve"
+
+        # But retry won't find it — no args_hash
+        retry = audit_store.find_approved_escalation(
+            user_id="test-user",
+            tool="bash",
+            args_hash="any-hash",
+            cutoff="2000-01-01T00:00:00",
+        )
+        assert retry is None
+
+    def test_resolve_with_side_effects_denial_override(
+        self, audit_store, session_store
+    ):
+        """Shared handler works for denial overrides with all side effects."""
+
+        async def _test():
+            from intaris.background import Metrics
+            from intaris.judge import resolve_with_side_effects
+
+            _create_session(session_store)
+            _create_denied_record(audit_store, call_id="deny-se-1")
+
+            mock_bus = MagicMock()
+            mock_eval = MagicMock()
+            metrics = Metrics()
+
+            record = await resolve_with_side_effects(
+                call_id="deny-se-1",
+                user_id="test-user",
+                user_decision="approve",
+                user_note="Allow this",
+                resolved_by="user",
+                audit_store=audit_store,
+                evaluator=mock_eval,
+                event_bus=mock_bus,
+                metrics=metrics,
+            )
+
+            assert record["decision"] == "deny"  # Original preserved
+            assert record["user_decision"] == "approve"
+            assert record["resolved_by"] == "user"
+
+            # EventBus published with decision field
+            mock_bus.publish.assert_called_once()
+            event = mock_bus.publish.call_args[0][0]
+            assert event["type"] == "decided"
+            assert event["decision"] == "deny"
+            assert event["user_decision"] == "approve"
+            assert event["resolved_by"] == "user"
+
+            # Path learning triggered
+            mock_eval.learn_from_approved_escalation.assert_called_once()
+
+            # Denial override metric incremented
+            assert metrics.denial_overrides_total == 1
+            # Judge override NOT incremented (this was a denial, not a judge decision)
+            assert metrics.judge_overrides_total == 0
+
+        asyncio.run(_test())
+
+    def test_denial_confirm_does_not_learn_paths(self, audit_store, session_store):
+        """Confirming a denial (user_decision=deny) does not trigger path learning."""
+
+        async def _test():
+            from intaris.judge import resolve_with_side_effects
+
+            _create_session(session_store)
+            _create_denied_record(audit_store, call_id="deny-confirm-se")
+
+            mock_eval = MagicMock()
+
+            await resolve_with_side_effects(
+                call_id="deny-confirm-se",
+                user_id="test-user",
+                user_decision="deny",
+                user_note="Confirmed",
+                resolved_by="user",
+                audit_store=audit_store,
+                evaluator=mock_eval,
+            )
+
+            mock_eval.learn_from_approved_escalation.assert_not_called()
+
+        asyncio.run(_test())
+
+    def test_llm_deny_override_retry(self, audit_store, session_store):
+        """LLM deny → user override → retry finds approval."""
+        import hashlib
+
+        _create_session(session_store)
+
+        args = {"command": "kubectl delete namespace production"}
+        args_hash = hashlib.sha256(
+            json.dumps(args, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+        # LLM denies (evaluation_path='llm')
+        audit_store.insert(
+            call_id="llm-deny-1",
+            user_id="test-user",
+            session_id="test-session",
+            agent_id="test-agent",
+            tool="bash",
+            args_redacted=args,
+            classification="write",
+            evaluation_path="llm",
+            decision="deny",
+            risk="critical",
+            reasoning="Critical risk — auto-denied",
+            latency_ms=3500,
+            args_hash=args_hash,
+        )
+
+        # User approves the LLM denial
+        audit_store.resolve_escalation(
+            "llm-deny-1",
+            "approve",
+            user_note="I need this for migration",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        # Retry finds the approval
+        result = audit_store.find_approved_escalation(
+            user_id="test-user",
+            tool="bash",
+            args_hash=args_hash,
+            cutoff="2000-01-01T00:00:00",
+        )
+        assert result is not None
+        assert result["call_id"] == "llm-deny-1"
+
+
 # ── DB Migration Tests ────────────────────────────────────────────────
 
 
