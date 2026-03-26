@@ -302,6 +302,70 @@ class TestGenerateIntention:
         assert not result.startswith('"')
         assert not result.endswith('"')
 
+    def test_prompt_enforces_english_output(self, db, session_store, mock_llm):
+        """System prompt must instruct LLM to generate intention in English."""
+        session_store.create(
+            user_id="user-1", session_id="sess-1", intention="Initial intention"
+        )
+        _insert_tool_call(db, "user-1", "sess-1")
+
+        generate_intention(
+            llm=mock_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+        )
+
+        call_args = mock_llm.generate.call_args
+        messages = call_args[0][0]
+        system_prompt = messages[0]["content"]
+        assert "English" in system_prompt
+        assert "regardless" in system_prompt.lower()
+
+    def test_czech_messages_still_produce_english_prompt_instruction(
+        self, db, session_store, mock_llm
+    ):
+        """Regression: Czech user messages must not suppress English enforcement.
+
+        When user messages are in Czech, the system prompt must still
+        contain the English language instruction.
+        """
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-1",
+            intention="Oprava přihlašovacího formuláře",
+        )
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: Oprav chybu v přihlašovacím formuláři",
+            call_id="call-cz1",
+        )
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: Přidej validaci emailu",
+            call_id="call-cz2",
+        )
+        _insert_tool_call(db, "user-1", "sess-1")
+
+        generate_intention(
+            llm=mock_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+        )
+
+        call_args = mock_llm.generate.call_args
+        messages = call_args[0][0]
+        system_prompt = messages[0]["content"]
+        # English enforcement must be present even with Czech context
+        assert "Always write the intention in English" in system_prompt
+
 
 # ── IntentionBarrier ──────────────────────────────────────────────────
 

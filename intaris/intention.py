@@ -192,6 +192,8 @@ def generate_intention(
                 "You update a session's intention description. "
                 "Sessions are long-lived and cover multiple topics over time.\n\n"
                 "Rules:\n"
+                "- Always write the intention in English, regardless of the "
+                "language of user messages or existing intention text\n"
                 "- Retain goals from the current intention that are still relevant\n"
                 "- Add new goals introduced in recent user messages\n"
                 "- Remove goals only when clearly completed or abandoned\n"
