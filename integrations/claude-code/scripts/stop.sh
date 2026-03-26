@@ -1,35 +1,33 @@
 #!/usr/bin/env bash
 # intaris stop hook for Claude Code
 #
-# Called on Stop. Signals session completion to Intaris and sends an
-# agent summary with session statistics. Both HTTP calls run in parallel
-# to stay within the hook timeout.
+# Called on Stop. Behavior depends on stop_hook_active:
+#
+# stop_hook_active=false (genuine final stop):
+#   - Store last_assistant_message in state file
+#   - Signal session completion (PATCH status + POST agent-summary)
+#   - Complete child sessions
+#   - Upload transcript (if recording enabled)
+#   - Clean up state file
+#
+# stop_hook_active=true (Claude continuing from another stop hook):
+#   - Store last_assistant_message in state file only
+#   - Do NOT signal completion or clean up
 #
 # Environment variables:
-#   INTARIS_URL        - Intaris server URL (default: http://localhost:8060)
-#   INTARIS_API_KEY    - API key for authentication (required)
-#   INTARIS_AGENT_ID   - Agent ID (default: claude-code)
-#   INTARIS_USER_ID    - User ID (optional if API key maps to user)
+#   INTARIS_URL                - Intaris server URL (default: http://localhost:8060)
+#   INTARIS_API_KEY            - API key for authentication (required)
+#   INTARIS_AGENT_ID           - Agent ID (default: claude-code)
+#   INTARIS_USER_ID            - User ID (optional if API key maps to user)
 #   INTARIS_SESSION_RECORDING  - Enable session recording (default: false)
 #   INTARIS_DEBUG              - Enable debug logging to stderr (default: false)
 
 set -euo pipefail
 
-# Guard: jq is required for JSON state file parsing
-command -v jq >/dev/null 2>&1 || { echo '{}'; exit 0; }
+# Source shared library
+. "$(dirname "$0")/intaris-lib.sh"
 
-INTARIS_URL="${INTARIS_URL:-http://localhost:8060}"
-INTARIS_API_KEY="${INTARIS_API_KEY:-}"
-INTARIS_AGENT_ID="${INTARIS_AGENT_ID:-claude-code}"
-INTARIS_USER_ID="${INTARIS_USER_ID:-}"
-INTARIS_SESSION_RECORDING="${INTARIS_SESSION_RECORDING:-false}"
-INTARIS_DEBUG="${INTARIS_DEBUG:-false}"
-
-log() {
-    if [ "$INTARIS_DEBUG" = "true" ]; then
-        echo "[intaris] $*" >&2
-    fi
-}
+require_jq
 
 # Read hook input from stdin
 INPUT=$(cat)
@@ -37,6 +35,8 @@ INPUT=$(cat)
 # Extract session info from the hook input
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+STOP_HOOK_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null || echo "false")
+LAST_MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)
 
 if [ -z "$SESSION_ID" ]; then
     log "No session_id in hook input, skipping"
@@ -44,15 +44,13 @@ if [ -z "$SESSION_ID" ]; then
     exit 0
 fi
 
-# Validate session ID format to prevent path traversal in state file paths
-if [[ "$SESSION_ID" =~ [/\\] ]] || [[ "$SESSION_ID" == *".."* ]]; then
-    log "Invalid session_id format, skipping"
+if ! validate_session_id "$SESSION_ID"; then
     echo '{}'
     exit 0
 fi
 
-# Load session state from JSON state file
-SESSION_FILE="/tmp/intaris_state_${SESSION_ID}.json"
+# Load session state
+SESSION_FILE=$(state_file_for "$SESSION_ID")
 
 if [ ! -f "$SESSION_FILE" ]; then
     log "No state file found, skipping"
@@ -60,8 +58,66 @@ if [ ! -f "$SESSION_FILE" ]; then
     exit 0
 fi
 
-# Parse state file (JSON format)
+# -- Always: Store last_assistant_message in state file ----------------------
+# This provides context for the next UserPromptSubmit → /reasoning call.
+
+if [ -n "$LAST_MSG" ]; then
+    # Truncate to 4000 chars to bound state file size and /reasoning context
+    LAST_MSG=$(printf '%s' "$LAST_MSG" | cut -c1-4000)
+
+    acquire_lock "$SESSION_FILE" || { echo '{}'; exit 0; }
+    if [ -f "$SESSION_FILE" ]; then
+        UPDATED=$(jq --arg text "$LAST_MSG" '.last_assistant_text = $text' "$SESSION_FILE" 2>/dev/null || cat "$SESSION_FILE")
+        write_state "$SESSION_FILE" "$UPDATED"
+    fi
+    release_lock "$SESSION_FILE"
+fi
+
+# -- Always: Record assistant message event for session recording ------------
+# Fires on every Stop (intermediate and final) since each corresponds to one
+# assistant turn. Needs session_id from state file.
+
+if [ "$INTARIS_SESSION_RECORDING" = "true" ] && [ -n "$LAST_MSG" ]; then
+    STOP_SID=$(jq -r '.session_id // empty' "$SESSION_FILE" 2>/dev/null || true)
+    if [ -n "$STOP_SID" ]; then
+        build_headers
+        RECORD_BODY=$(jq -n --arg text "$LAST_MSG" \
+            '[{type: "message", data: {role: "assistant", text: $text}}]')
+        curl -s --max-time 2 \
+            -X POST \
+            "${HEADERS[@]}" \
+            -H "X-Intaris-Source: claude-code" \
+            -d "$RECORD_BODY" \
+            "${INTARIS_URL}/api/v1/session/${STOP_SID}/events" >/dev/null 2>&1 || true
+        log "Recorded assistant message event (${#LAST_MSG} chars)"
+    fi
+fi
+
+# -- If stop_hook_active=true, Claude is continuing — don't complete ---------
+
+if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+    log "stop_hook_active=true, storing assistant text only"
+    echo '{}'
+    exit 0
+fi
+
+# -- Genuine final stop: signal completion -----------------------------------
+
+acquire_lock "$SESSION_FILE" || { echo '{}'; exit 0; }
+
 INTARIS_SESSION_ID=$(jq -r '.session_id // empty' "$SESSION_FILE" 2>/dev/null || true)
+CALL_COUNT=$(jq -r '.call_count // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+APPROVED=$(jq -r '.approved // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+DENIED=$(jq -r '.denied // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+ESCALATED=$(jq -r '.escalated // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+SUBAGENTS=$(jq -c '.subagents // {}' "$SESSION_FILE" 2>/dev/null || echo '{}')
+
+# Fall back to state file cwd if not in hook input
+if [ -z "$CWD" ]; then
+    CWD=$(jq -r '.cwd // empty' "$SESSION_FILE" 2>/dev/null || true)
+fi
+
+release_lock "$SESSION_FILE"
 
 if [ -z "$INTARIS_SESSION_ID" ]; then
     log "No session_id in state file, skipping"
@@ -69,24 +125,30 @@ if [ -z "$INTARIS_SESSION_ID" ]; then
     exit 0
 fi
 
-CALL_COUNT=$(jq -r '.call_count // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
-APPROVED=$(jq -r '.approved // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
-DENIED=$(jq -r '.denied // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
-ESCALATED=$(jq -r '.escalated // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+build_headers
 
-# Fall back to state file cwd if not in hook input
-if [ -z "$CWD" ]; then
-    CWD=$(jq -r '.cwd // empty' "$SESSION_FILE" 2>/dev/null || true)
+# -- Complete child sessions -------------------------------------------------
+
+if [ "$SUBAGENTS" != "{}" ] && [ "$SUBAGENTS" != "null" ]; then
+    # Iterate subagent mappings and signal completion for each
+    for agent_id in $(echo "$SUBAGENTS" | jq -r 'keys[]' 2>/dev/null); do
+        child_sid=$(echo "$SUBAGENTS" | jq -r --arg k "$agent_id" '.[$k]' 2>/dev/null || true)
+        if [ -n "$child_sid" ]; then
+            log "Completing child session: $child_sid (agent: $agent_id)"
+            curl -s --max-time 2 \
+                -X PATCH \
+                "${HEADERS[@]}" \
+                -d '{"status":"completed"}' \
+                "${INTARIS_URL}/api/v1/session/${child_sid}/status" >/dev/null 2>&1 || true
+
+            # Clean up child state file
+            CHILD_FILE=$(state_file_for_subagent "$SESSION_ID" "$agent_id")
+            rm -f "$CHILD_FILE"
+        fi
+    done
 fi
 
-# Build request headers
-HEADERS=(-H "Content-Type: application/json" -H "X-Agent-Id: $INTARIS_AGENT_ID")
-if [ -n "$INTARIS_API_KEY" ]; then
-    HEADERS+=(-H "Authorization: Bearer $INTARIS_API_KEY")
-fi
-if [ -n "$INTARIS_USER_ID" ]; then
-    HEADERS+=(-H "X-User-Id: $INTARIS_USER_ID")
-fi
+# -- Signal Completion (before transcript upload to ensure it always fires) --
 
 # Build agent summary
 SUMMARY="Claude Code session completed. ${CALL_COUNT} tool calls (${APPROVED} approved, ${DENIED} denied, ${ESCALATED} escalated)."
@@ -94,70 +156,8 @@ if [ -n "$CWD" ]; then
     SUMMARY="${SUMMARY} Working directory: ${CWD}"
 fi
 
-# Build request bodies
-STATUS_BODY=$(jq -n '{status: "completed"}')
+STATUS_BODY='{"status":"completed"}'
 SUMMARY_BODY=$(jq -n --arg s "$SUMMARY" '{summary: $s}')
-
-# -- Session Recording: upload transcript (fire-and-forget) -----------------
-
-if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
-    # Claude Code stores transcripts as JSONL files. The transcript path
-    # may be available in the hook input or can be found by session ID.
-    TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
-
-    if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
-        log "Uploading transcript from: $TRANSCRIPT_PATH"
-
-        # Read transcript and wrap each line as a recording event.
-        # Build the JSON array in a single jq pass (O(n) instead of O(n^2))
-        # and chunk uploads to avoid shell argument length limits.
-        CHUNK_SIZE=500
-        CHUNK="[]"
-        CHUNK_COUNT=0
-        TOTAL_UPLOADED=0
-
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            CHUNK=$(echo "$CHUNK" | jq --argjson entry "$line" \
-                '. + [{type: "transcript", data: $entry}]' 2>/dev/null || echo "$CHUNK")
-            CHUNK_COUNT=$((CHUNK_COUNT + 1))
-
-            if [ "$CHUNK_COUNT" -ge "$CHUNK_SIZE" ]; then
-                curl -s --max-time 10 \
-                    -X POST \
-                    "${HEADERS[@]}" \
-                    -H "X-Intaris-Source: claude-code" \
-                    -d "$CHUNK" \
-                    "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
-                TOTAL_UPLOADED=$((TOTAL_UPLOADED + CHUNK_COUNT))
-                CHUNK="[]"
-                CHUNK_COUNT=0
-            fi
-        done < "$TRANSCRIPT_PATH"
-
-        # Upload remaining events
-        if [ "$CHUNK_COUNT" -gt 0 ]; then
-            curl -s --max-time 10 \
-                -X POST \
-                "${HEADERS[@]}" \
-                -H "X-Intaris-Source: claude-code" \
-                -d "$CHUNK" \
-                "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
-            TOTAL_UPLOADED=$((TOTAL_UPLOADED + CHUNK_COUNT))
-        fi
-
-        if [ "$TOTAL_UPLOADED" -gt 0 ]; then
-            log "Uploaded $TOTAL_UPLOADED transcript events"
-            # Flush events to storage
-            curl -s --max-time 2 \
-                -X POST \
-                "${HEADERS[@]}" \
-                "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events/flush" >/dev/null 2>&1 || true
-        fi
-    else
-        log "No transcript path available or file not found"
-    fi
-fi
 
 log "Signaling completion for session: $INTARIS_SESSION_ID"
 
@@ -174,10 +174,66 @@ curl -s --max-time 2 \
     -d "$SUMMARY_BODY" \
     "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/agent-summary" >/dev/null 2>&1 &
 
-# Wait for both background calls to complete (or timeout)
 wait
 
 log "Session completion signaled: $INTARIS_SESSION_ID"
+
+# -- Session Recording: upload transcript (best-effort, after completion) ----
+# Transcript upload runs after completion signals so session state is always
+# correct even if the hook is killed during upload (8s hook timeout).
+
+if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
+    TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+
+    if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+        log "Uploading transcript from: $TRANSCRIPT_PATH"
+
+        CHUNK_SIZE=500
+        CHUNK="[]"
+        CHUNK_COUNT=0
+        TOTAL_UPLOADED=0
+
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            CHUNK=$(echo "$CHUNK" | jq --argjson entry "$line" \
+                '. + [{type: "transcript", data: $entry}]' 2>/dev/null || echo "$CHUNK")
+            CHUNK_COUNT=$((CHUNK_COUNT + 1))
+
+            if [ "$CHUNK_COUNT" -ge "$CHUNK_SIZE" ]; then
+                curl -s --max-time 4 \
+                    -X POST \
+                    "${HEADERS[@]}" \
+                    -H "X-Intaris-Source: claude-code" \
+                    -d "$CHUNK" \
+                    "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
+                TOTAL_UPLOADED=$((TOTAL_UPLOADED + CHUNK_COUNT))
+                CHUNK="[]"
+                CHUNK_COUNT=0
+            fi
+        done < "$TRANSCRIPT_PATH"
+
+        # Upload remaining events
+        if [ "$CHUNK_COUNT" -gt 0 ]; then
+            curl -s --max-time 4 \
+                -X POST \
+                "${HEADERS[@]}" \
+                -H "X-Intaris-Source: claude-code" \
+                -d "$CHUNK" \
+                "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
+            TOTAL_UPLOADED=$((TOTAL_UPLOADED + CHUNK_COUNT))
+        fi
+
+        if [ "$TOTAL_UPLOADED" -gt 0 ]; then
+            log "Uploaded $TOTAL_UPLOADED transcript events"
+            curl -s --max-time 2 \
+                -X POST \
+                "${HEADERS[@]}" \
+                "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events/flush" >/dev/null 2>&1 || true
+        fi
+    else
+        log "No transcript path available or file not found"
+    fi
+fi
 
 # Clean up state file
 rm -f "$SESSION_FILE"

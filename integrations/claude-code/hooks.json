@@ -2,12 +2,23 @@
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume",
+        "matcher": "startup|resume|clear|compact",
         "hooks": [
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-session.sh",
             "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/intaris-prompt.sh",
+            "timeout": 10000
           }
         ]
       }
@@ -18,7 +29,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-evaluate.sh",
-            "timeout": 10000
+            "timeout": 60000
           }
         ]
       }
@@ -34,6 +45,28 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/intaris-subagent.sh",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/intaris-subagent-stop.sh",
+            "timeout": 8000
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
@@ -41,6 +74,17 @@
             "type": "command",
             "command": "~/.claude/scripts/intaris-stop.sh",
             "timeout": 8000
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/scripts/intaris-stop-failure.sh",
+            "timeout": 3000
           }
         ]
       }
