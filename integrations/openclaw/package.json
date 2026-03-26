@@ -1,6 +1,6 @@
 {
   "name": "@fpytloun/openclaw-intaris",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenClaw plugin for Intaris — tool call safety guardrails with session management and MCP proxy",
   "type": "module",
   "license": "MIT",

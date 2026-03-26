@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-26
+
+### Added
+
+- **Judge auto-resolution** -- Escalated tool calls can be automatically reviewed by a more capable LLM (gpt-5.4), reducing human intervention while maintaining safety. Three modes: `disabled` (default), `auto`, `advisory`. Deny-if-uncertain in auto mode. Shared `resolve_with_side_effects()` handler ensures identical side effects for human and judge resolution paths. Human users can override any judge decision via the UI; human decisions are final.
+- **Judge enriched context** -- Judge receives full reasoning records (up to 8000-char safety valve) with associated context metadata. Sub-session parent context included for cross-session visibility. Judge reasoning stored and used in resolution notifications.
+- **OpenClaw plugin** -- Full `@fpytloun/openclaw-intaris` extension with 10 hooks (`session_start`, `before_tool_call`, `after_tool_call`, `before_agent_start`, `llm_output`, `subagent_spawning`, `subagent_ended`, `agent_end`, `before_reset`, `session_end`), MCP tool factory, session recording, sub-agent support, and npm publish CI workflow.
+- **Claude Code hooks overhaul** -- Major rewrite for feature parity with OpenCode plugin: shared library (`intaris-lib.sh`), sub-agent support (`intaris-subagent.sh`, `intaris-subagent-stop.sh`), prompt injection hook (`intaris-prompt.sh`), stop-failure handler, and session recording via `PostToolUse`.
+- **Budget-aware child compression** -- Parent summaries compress lower-risk child sessions when the child budget (`_MAX_CHILD_CHARS`) is exceeded, with observability metrics (`summary_child_compressed_count`, `summary_child_overflow_total`).
+
+### Changed
+
+- **Default LLM models** -- Updated to gpt-5.4 generation: `gpt-5.4-nano` (evaluate), `gpt-5.4-mini` (analysis), `gpt-5.4` (L3/judge/benchmark).
+
+### Fixed
+
+- **Security** -- Prevent sensitive data leaks in log output across alignment, streaming, background, config, intention, LLM, MCP client, and sanitize modules.
+- **LLM** -- Harden JSON key handling with alias remapping and summary validation.
+- **Notifications** -- Budget-aware formatting to resolve truncation issues. Add `agent_id` to escalation, denial, suspension, and resolution messages. Use judge reasoning in resolution notifications.
+- **Evaluation** -- Suppress contradictory reasoning in user-approved escalation history to prevent LLM confusion.
+- **UI** -- Make user override of judge decisions more visible in approvals tab with "overridden by user" indicator.
+- **Benchmarks** -- Resolve hierarchical scenario parent sessions. Refresh benchmark results and roadmap notes.
+- **Tests** -- Update stale assertion to match current prompt wording. Add LLM JSON key validation and alias remapping tests.
+
 ## [0.2.0] - 2026-03-20
 
 ### Added
@@ -52,5 +76,6 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.3.0]: https://github.com/fpytloun/intaris/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fpytloun/intaris/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/fpytloun/intaris/releases/tag/v0.1.0
