@@ -956,6 +956,54 @@
                     </div>
                   </div>
                 </template>
+
+                <!-- Resolve pending escalation -->
+                <template x-if="canResolveEscalation(expandedRecord)">
+                  <div class="mb-3 p-3 border border-brand-border rounded bg-brand-elevated/50">
+                    <div class="text-xs text-muted mb-2">Resolve Approval Request</div>
+                    <div class="flex items-end gap-3">
+                      <div class="flex-1">
+                        <input type="text"
+                               placeholder="Optional note..."
+                               class="input text-sm"
+                               @click.stop
+                               x-model="noteText[expandedRecord.call_id]">
+                      </div>
+                      <button @click.stop="resolveEscalation(expandedRecord.call_id, 'approve')"
+                              :disabled="resolving[expandedRecord.call_id]"
+                              class="btn-success text-sm"
+                              x-text="resolving[expandedRecord.call_id] ? 'Approving...' : 'Approve'"></button>
+                      <button @click.stop="resolveEscalation(expandedRecord.call_id, 'deny')"
+                              :disabled="resolving[expandedRecord.call_id]"
+                              class="btn-danger text-sm"
+                              x-text="resolving[expandedRecord.call_id] ? 'Denying...' : 'Deny'"></button>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Override denial -->
+                <template x-if="canOverrideDenial(expandedRecord)">
+                  <div class="mb-3 p-3 border border-amber-500/30 rounded bg-amber-500/5">
+                    <div class="text-xs text-muted mb-2">Override Denial</div>
+                    <div class="flex items-end gap-3">
+                      <div class="flex-1">
+                        <input type="text"
+                               placeholder="Override note (e.g., 'Allow this command')..."
+                               class="input text-sm"
+                               @click.stop
+                               x-model="noteText[expandedRecord.call_id]">
+                      </div>
+                      <button @click.stop="overrideDenial(expandedRecord.call_id, 'approve')"
+                              :disabled="resolving[expandedRecord.call_id]"
+                              class="btn-success text-sm"
+                              x-text="resolving[expandedRecord.call_id] ? 'Approving...' : 'Approve'"></button>
+                      <button @click.stop="overrideDenial(expandedRecord.call_id, 'deny')"
+                              :disabled="resolving[expandedRecord.call_id]"
+                              class="btn-danger text-sm"
+                              x-text="resolving[expandedRecord.call_id] ? 'Confirming...' : 'Confirm Deny'"></button>
+                    </div>
+                  </div>
+                </template>
                 <!-- Judge Reasoning -->
                 <template x-if="expandedRecord?.judge_reasoning">
                   <div class="mb-3">
@@ -973,6 +1021,30 @@
                         <span class="text-xs text-muted" x-text="formatTime(expandedRecord.resolved_at)"></span>
                       </div>
                       <div x-show="expandedRecord.user_note" class="text-sm mt-1" x-text="expandedRecord.user_note"></div>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Override judge decision -->
+                <template x-if="canOverrideJudge(expandedRecord)">
+                  <div class="mb-3 p-3 border border-amber-500/30 rounded bg-amber-500/5">
+                    <div class="text-xs text-muted mb-2">Override Judge Decision</div>
+                    <div class="flex items-end gap-3">
+                      <div class="flex-1">
+                        <input type="text"
+                               placeholder="Override note (e.g., 'Allow for this session')..."
+                               class="input text-sm"
+                               @click.stop
+                               x-model="noteText[expandedRecord.call_id]">
+                      </div>
+                      <button @click.stop="overrideJudge(expandedRecord.call_id, 'approve')"
+                              :disabled="resolving[expandedRecord.call_id]"
+                              class="btn-success text-sm"
+                              x-text="resolving[expandedRecord.call_id] ? 'Approving...' : 'Approve'"></button>
+                      <button @click.stop="overrideJudge(expandedRecord.call_id, 'deny')"
+                              :disabled="resolving[expandedRecord.call_id]"
+                              class="btn-danger text-sm"
+                              x-text="resolving[expandedRecord.call_id] ? 'Denying...' : 'Deny'"></button>
                     </div>
                   </div>
                 </template>

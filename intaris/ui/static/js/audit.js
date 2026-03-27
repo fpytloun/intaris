@@ -13,6 +13,8 @@ function auditTab() {
     pages: 1,
     expandedId: null,
     expandedRecord: null,
+    resolving: {},
+    noteText: {},
 
     // Filters
     filterSession: '',
@@ -80,12 +82,12 @@ function auditTab() {
 
       if (data.type === 'decided') {
         // Update the resolved record in-place if visible
-        const record = this.records.find(r => r.call_id === data.call_id);
-        if (record) {
-          record.user_decision = data.decision;
-          record.user_note = data.note;
-          record.resolved_at = new Date().toISOString();
-        }
+        this._applyResolutionUpdate(data.call_id, {
+          user_decision: data.user_decision,
+          user_note: data.user_note,
+          resolved_by: data.resolved_by,
+          resolved_at: new Date().toISOString(),
+        });
       }
     },
 
@@ -146,6 +148,85 @@ function auditTab() {
       } catch (e) {
         this.expandedRecord = record;
       }
+    },
+
+    _applyResolutionUpdate(callId, updates) {
+      if (!callId) return;
+      const record = this.records.find(r => r.call_id === callId);
+      if (record) {
+        Object.assign(record, updates);
+      }
+      if (this.expandedRecord && this.expandedRecord.call_id === callId) {
+        this.expandedRecord = { ...this.expandedRecord, ...updates };
+      }
+    },
+
+    async _resolveRecord(callId, decision, mode) {
+      if (!callId || !decision) return;
+      if (this.resolving[callId]) return;
+
+      this.resolving = { ...this.resolving, [callId]: true };
+      try {
+        const note = this.noteText[callId] || null;
+        await IntarisAPI.resolveDecision(callId, decision, note);
+        this._applyResolutionUpdate(callId, {
+          user_decision: decision,
+          user_note: note,
+          resolved_by: 'user',
+          resolved_at: new Date().toISOString(),
+        });
+        delete this.noteText[callId];
+
+        if (mode === 'judge-override') {
+          Alpine.store('notify').success(`Judge decision overridden to ${decision}`);
+        } else if (mode === 'denial-override') {
+          Alpine.store('notify').success(
+            decision === 'approve'
+              ? 'Denial overridden — retry will be approved'
+              : 'Denial confirmed'
+          );
+        } else {
+          Alpine.store('notify').success(
+            `Call ${decision === 'approve' ? 'approved' : 'denied'}`
+          );
+        }
+      } catch (e) {
+        const action = mode === 'judge-override'
+          ? 'override judge decision'
+          : mode === 'denial-override'
+            ? 'override denial'
+            : 'resolve';
+        Alpine.store('notify').error(`Failed to ${action}: ` + (e.message || String(e)));
+      } finally {
+        const { [callId]: _, ...rest } = this.resolving;
+        this.resolving = rest;
+      }
+    },
+
+    resolveEscalation(callId, decision) {
+      return this._resolveRecord(callId, decision, 'resolve');
+    },
+
+    overrideDenial(callId, decision) {
+      return this._resolveRecord(callId, decision, 'denial-override');
+    },
+
+    overrideJudge(callId, decision) {
+      return this._resolveRecord(callId, decision, 'judge-override');
+    },
+
+    canResolveEscalation(record) {
+      return record?.decision === 'escalate' && !record?.user_decision;
+    },
+
+    canOverrideDenial(record) {
+      return record?.decision === 'deny'
+        && !record?.user_decision
+        && record?.evaluation_path !== 'fast';
+    },
+
+    canOverrideJudge(record) {
+      return record?.resolved_by === 'judge';
     },
 
     decisionBadgeClass(decision) {
