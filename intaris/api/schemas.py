@@ -444,8 +444,10 @@ class SessionEvent(BaseModel):
     type: str = Field(
         ...,
         description=(
-            "Canonical event type: message, tool_call, tool_result, "
-            "evaluation, part, lifecycle, checkpoint, reasoning, transcript"
+            "Canonical event type: message, user_message, assistant_message, "
+            "tool_call, tool_result, evaluation, delegation, "
+            "compaction_summary, part, lifecycle, checkpoint, reasoning, "
+            "transcript"
         ),
     )
     data: dict[str, Any] = Field(

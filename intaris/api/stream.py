@@ -291,12 +291,16 @@ def _authenticate_token(
     Returns:
         The resolved user_id, or None if authentication fails.
     """
-    import hmac as hmac_mod
-
-    from intaris.server import _get_config, _match_api_key
+    from intaris.auth import resolve_auth
+    from intaris.server import _get_config
 
     cfg = _get_config()
-    has_auth = bool(cfg.server.api_keys or cfg.server.api_key)
+    has_auth = bool(
+        cfg.server.api_keys
+        or cfg.server.api_key
+        or cfg.server.jwt_public_key
+        or cfg.server.jwks_url
+    )
 
     if not has_auth:
         # No auth configured (dev mode) — accept any connection,
@@ -306,17 +310,16 @@ def _authenticate_token(
     if not token:
         return None
 
-    # Try multi-key mapping
-    mapped_user_id = _match_api_key(token, cfg.server.api_keys)
-    if mapped_user_id is not None:
-        if mapped_user_id != "*":
-            return mapped_user_id
-        # Wildcard key — auth OK, use fallback user_id
-        return fallback_user_id
-
-    # Try single key
-    if cfg.server.api_key and hmac_mod.compare_digest(token, cfg.server.api_key):
-        return fallback_user_id
-
-    # No match — authentication failed
-    return None
+    resolution = resolve_auth(
+        token=token,
+        header_user_id=fallback_user_id,
+        header_agent_id=None,
+        api_key=cfg.server.api_key,
+        api_keys=cfg.server.api_keys,
+        jwt_public_key=cfg.server.jwt_public_key,
+        jwks_url=cfg.server.jwks_url,
+        allow_no_auth=False,
+    )
+    if resolution is None:
+        return None
+    return resolution.user_id

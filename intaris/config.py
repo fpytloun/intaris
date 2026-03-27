@@ -49,7 +49,7 @@ def _parse_api_keys() -> dict[str, str]:
             "Failed to parse INTARIS_API_KEYS: %s at position %d", e.msg, e.pos or 0
         )
         return {}
-    except ValueError as e:
+    except ValueError:
         logger.error("Failed to parse INTARIS_API_KEYS: invalid value")
         return {}
 
@@ -141,6 +141,10 @@ class ServerConfig:
     # Multi-key with user_id mapping: {"key": "username", "key2": "*"}
     # A value of "*" means auth-only (no user binding).
     api_keys: dict[str, str] = field(default_factory=_parse_api_keys)
+
+    # Cognis JWT validation (optional, additive to API key auth).
+    jwt_public_key: str = field(default_factory=lambda: _env("INTARIS_JWT_PUBLIC_KEY"))
+    jwks_url: str = field(default_factory=lambda: _env("INTARIS_JWKS_URL"))
 
     # Max evaluations per session per minute (0 = no limit).
     rate_limit: int = field(default_factory=lambda: _env_int("RATE_LIMIT", 60))
@@ -467,6 +471,17 @@ class Config:
             raise ValueError(
                 "INTARIS_API_KEYS is set but could not be parsed. "
                 'Must be a JSON object: {"key": "username", ...}'
+            )
+        if self.server.jwt_public_key and self.server.jwks_url:
+            raise ValueError(
+                "Configure only one JWT verifier source: "
+                "INTARIS_JWT_PUBLIC_KEY or INTARIS_JWKS_URL"
+            )
+        if self.server.jwt_public_key and not os.path.isfile(
+            self.server.jwt_public_key
+        ):
+            raise ValueError(
+                f"INTARIS_JWT_PUBLIC_KEY={self.server.jwt_public_key} does not exist"
             )
 
         # Webhook secret is required when webhook URL is configured.

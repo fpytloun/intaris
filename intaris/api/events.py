@@ -8,7 +8,11 @@ Provides endpoints for:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
+import time
+from datetime import timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -19,11 +23,18 @@ from intaris.api.schemas import (
     EventReadResponse,
     SessionEvent,
 )
+from intaris.events.idempotency import EventAppendIdempotencyStore
 from intaris.events.store import VALID_EVENT_TYPES
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[a-zA-Z0-9._:@-]{1,256}$")
+_IDEMPOTENCY_STALE_AFTER = timedelta(seconds=60)
+_IDEMPOTENCY_RETENTION = timedelta(hours=24)
+_IDEMPOTENCY_CLEANUP_INTERVAL_S = 300.0
+_last_idempotency_cleanup_monotonic = 0.0
 
 
 def _get_event_store(request: Request):
@@ -53,6 +64,68 @@ def _validate_session_exists(request: Request, user_id: str, session_id: str) ->
         )
 
 
+def _get_idempotency_store() -> EventAppendIdempotencyStore:
+    """Return the DB-backed idempotency ledger helper."""
+    from intaris.server import _get_db
+
+    return EventAppendIdempotencyStore(_get_db())
+
+
+def _response_from_record(record: dict[str, Any]) -> EventAppendResponse:
+    """Build an append response from an idempotency ledger record."""
+    return EventAppendResponse(
+        count=int(record.get("count") or 0),
+        first_seq=int(record.get("first_seq") or 0),
+        last_seq=int(record.get("last_seq") or 0),
+    )
+
+
+async def _wait_for_completed_record(
+    store: EventAppendIdempotencyStore,
+    user_id: str,
+    session_id: str,
+    idempotency_key: str,
+    *,
+    attempts: int = 20,
+    delay_seconds: float = 0.05,
+) -> dict[str, Any] | None:
+    """Wait briefly for an in-flight idempotent append to complete."""
+    for _ in range(attempts):
+        await asyncio.sleep(delay_seconds)
+        record = store.get(user_id, session_id, idempotency_key)
+        if record and record.get("status") == "completed":
+            return record
+    return store.get(user_id, session_id, idempotency_key)
+
+
+def _validate_idempotency_key(session_id: str, idempotency_key: str) -> None:
+    """Validate the optional idempotency key format."""
+    if not _IDEMPOTENCY_KEY_RE.match(idempotency_key):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid idempotency_key. Use up to 256 characters from "
+                "[a-zA-Z0-9._:@-]."
+            ),
+        )
+    if not idempotency_key.startswith(f"{session_id}:"):
+        raise HTTPException(
+            status_code=400,
+            detail="idempotency_key must start with the current session_id",
+        )
+
+
+def _maybe_cleanup_idempotency_store(store: EventAppendIdempotencyStore) -> None:
+    """Run retention cleanup periodically instead of on every request."""
+    global _last_idempotency_cleanup_monotonic
+
+    now = time.monotonic()
+    if now - _last_idempotency_cleanup_monotonic < _IDEMPOTENCY_CLEANUP_INTERVAL_S:
+        return
+    store.delete_expired(max_age=_IDEMPOTENCY_RETENTION)
+    _last_idempotency_cleanup_monotonic = now
+
+
 @router.post(
     "/session/{session_id}/events",
     response_model=EventAppendResponse,
@@ -68,6 +141,10 @@ async def append_events(
     events: list[SessionEvent] | SessionEvent,
     request: Request,
     ctx: SessionContext = Depends(get_session_context),
+    idempotency_key: str | None = Query(
+        None,
+        description="Optional idempotency key for duplicate-safe event append retries",
+    ),
 ) -> EventAppendResponse:
     """Append events to a session's event log."""
     event_store = _get_event_store(request)
@@ -104,20 +181,93 @@ async def append_events(
     # Determine source from request header or default
     source = request.headers.get("X-Intaris-Source", "client")
 
+    idempotency_store: EventAppendIdempotencyStore | None = None
+    claimed_idempotency = False
+    if idempotency_key:
+        _validate_idempotency_key(session_id, idempotency_key)
+        idempotency_store = _get_idempotency_store()
+        _maybe_cleanup_idempotency_store(idempotency_store)
+        claimed_idempotency, existing = idempotency_store.claim(
+            ctx.user_id,
+            session_id,
+            idempotency_key,
+        )
+        if not claimed_idempotency:
+            if existing and idempotency_store.is_stale_pending(
+                existing,
+                stale_after=_IDEMPOTENCY_STALE_AFTER,
+            ):
+                idempotency_store.delete(ctx.user_id, session_id, idempotency_key)
+                claimed_idempotency, existing = idempotency_store.claim(
+                    ctx.user_id,
+                    session_id,
+                    idempotency_key,
+                )
+            if not claimed_idempotency:
+                if existing and existing.get("status") == "completed":
+                    return _response_from_record(existing)
+                completed = await _wait_for_completed_record(
+                    idempotency_store,
+                    ctx.user_id,
+                    session_id,
+                    idempotency_key,
+                )
+                if completed and completed.get("status") == "completed":
+                    return _response_from_record(completed)
+                raise HTTPException(
+                    status_code=409,
+                    detail="idempotency key is already in progress",
+                )
+
     # Convert to dicts for the event store
     event_dicts = [{"type": e.type, "data": e.data} for e in events]
 
     try:
         seqs = event_store.append(ctx.user_id, session_id, event_dicts, source=source)
     except Exception as e:
+        if idempotency_store is not None and claimed_idempotency:
+            idempotency_store.delete(ctx.user_id, session_id, idempotency_key or "")
         logger.exception("Failed to append events for %s/%s", ctx.user_id, session_id)
         raise HTTPException(status_code=500, detail=f"Failed to append events: {e}")
 
-    return EventAppendResponse(
+    response = EventAppendResponse(
         count=len(seqs),
         first_seq=seqs[0],
         last_seq=seqs[-1],
     )
+
+    if idempotency_store is not None and claimed_idempotency:
+        finalized = False
+        for _ in range(5):
+            try:
+                idempotency_store.mark_completed(
+                    ctx.user_id,
+                    session_id,
+                    idempotency_key or "",
+                    count=response.count,
+                    first_seq=response.first_seq,
+                    last_seq=response.last_seq,
+                )
+                finalized = True
+                break
+            except Exception:
+                logger.exception(
+                    "Failed to persist idempotency completion for %s/%s/%s",
+                    ctx.user_id,
+                    session_id,
+                    idempotency_key,
+                )
+                await asyncio.sleep(0.05)
+        if not finalized:
+            logger.error(
+                "Returning successful append response with pending idempotency row "
+                "after finalize retries were exhausted for %s/%s/%s",
+                ctx.user_id,
+                session_id,
+                idempotency_key,
+            )
+
+    return response
 
 
 @router.get(
@@ -135,6 +285,11 @@ async def read_events(
     ctx: SessionContext = Depends(get_session_context),
     after_seq: int = Query(0, ge=0, description="Return events with seq > this value"),
     limit: int = Query(0, ge=0, description="Max events to return (0 = all)"),
+    last_n: int = Query(
+        0,
+        ge=0,
+        description="Return the last N matching events in chronological order",
+    ),
     type: str | None = Query(
         None,
         description="Comma-separated event type filter (e.g., 'tool_call,evaluation')",
@@ -158,6 +313,17 @@ async def read_events(
 ) -> EventReadResponse:
     """Read events from a session's event log."""
     event_store = _get_event_store(request)
+
+    if last_n and after_seq:
+        raise HTTPException(
+            status_code=400,
+            detail="last_n and after_seq are mutually exclusive",
+        )
+    if last_n and limit:
+        raise HTTPException(
+            status_code=400,
+            detail="last_n and limit are mutually exclusive",
+        )
 
     # Parse type filter
     event_types: set[str] | None = None
@@ -185,30 +351,46 @@ async def read_events(
     _validate_session_exists(request, ctx.user_id, session_id)
 
     try:
-        # Request one extra to determine has_more
-        fetch_limit = limit + 1 if limit else 0
-        events = event_store.read(
-            ctx.user_id,
-            session_id,
-            after_seq=after_seq,
-            limit=fetch_limit,
-            event_types=event_types,
-            sources=event_sources,
-            exclude_sources=event_exclude_sources,
-            after_ts=after_ts,
-            before_ts=before_ts,
-        )
+        if last_n:
+            fetch_limit = last_n + 1
+            events = event_store.read_tail(
+                ctx.user_id,
+                session_id,
+                limit=fetch_limit,
+                event_types=event_types,
+                sources=event_sources,
+                exclude_sources=event_exclude_sources,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
+        else:
+            # Request one extra to determine has_more
+            fetch_limit = limit + 1 if limit else 0
+            events = event_store.read(
+                ctx.user_id,
+                session_id,
+                after_seq=after_seq,
+                limit=fetch_limit,
+                event_types=event_types,
+                sources=event_sources,
+                exclude_sources=event_exclude_sources,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
     except Exception as e:
         logger.exception("Failed to read events for %s/%s", ctx.user_id, session_id)
         raise HTTPException(status_code=500, detail=f"Failed to read events: {e}")
 
     # Determine has_more
     has_more = False
-    if limit and len(events) > limit:
+    if last_n and len(events) > last_n:
+        has_more = True
+        events = events[-last_n:]
+    elif limit and len(events) > limit:
         has_more = True
         events = events[:limit]
 
-    last_seq = events[-1]["seq"] if events else after_seq
+    last_seq = event_store.last_seq(ctx.user_id, session_id)
 
     return EventReadResponse(
         events=events,

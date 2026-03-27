@@ -12,17 +12,34 @@ Data is stored in `~/.intaris` by default (override with `DATA_DIR`). In Docker,
 | `INTARIS_PORT` | `8060` | HTTP server port |
 | `INTARIS_API_KEY` | (empty) | Single shared API key. Authenticates requests but does not bind to a user -- clients must send `X-User-Id` header. |
 | `INTARIS_API_KEYS` | (empty) | JSON dict mapping API keys to user IDs: `{"key1": "alice", "key2": "bob", "key3": "*"}`. A value of `"*"` means auth-only (no user binding). |
+| `INTARIS_JWT_PUBLIC_KEY` | (empty) | Path to a Cognis ES256 public key PEM for JWT validation |
+| `INTARIS_JWKS_URL` | (empty) | JWKS URL for Cognis-issued JWT validation (mutually exclusive with `INTARIS_JWT_PUBLIC_KEY`) |
 | `RATE_LIMIT` | `60` | Max evaluations per session per minute. Set to `0` to disable. |
 | `DATA_DIR` | `~/.intaris` | Base directory for database and event store files |
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 
 ### Authentication
 
-At least one of `INTARIS_API_KEY` or `INTARIS_API_KEYS` should be set in production. Without either, the server accepts unauthenticated requests.
+At least one of `INTARIS_API_KEY`, `INTARIS_API_KEYS`, `INTARIS_JWT_PUBLIC_KEY`, or `INTARIS_JWKS_URL` should be set in production. Without any of them, the server accepts unauthenticated requests.
 
-With `INTARIS_API_KEY` (single shared key), clients must also send `X-User-Id` to identify themselves. With `INTARIS_API_KEYS`, the user identity is resolved from the key mapping.
+With `INTARIS_API_KEY` (single shared key), clients must also send `X-User-Id` to identify themselves. With `INTARIS_API_KEYS`, the user identity is resolved from the key mapping. With Cognis JWTs, Intaris resolves `user_id` from the JWT `sub` claim and optional `agent_id` from the JWT `agent_id` claim (or `X-Agent-Id` when the claim is absent).
 
-Clients authenticate via `Authorization: Bearer <key>` header or `X-API-Key: <key>` header.
+Clients authenticate via `Authorization: Bearer <key-or-jwt>` header or `X-API-Key: <key>` header.
+
+For Cognis integration, configure one JWT verifier source:
+
+```bash
+INTARIS_JWT_PUBLIC_KEY=/path/to/cognis-public.pem
+# or
+INTARIS_JWKS_URL=https://cognis.example.com/.well-known/jwks.json
+```
+
+JWT validation requires:
+
+- `iss="cognis"`
+- `aud` includes `"intaris"`
+- `sub` claim present
+- matching `agent_id` claim and `X-Agent-Id` header when both are provided
 
 ## LLM (Safety Evaluation)
 

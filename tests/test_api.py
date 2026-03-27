@@ -39,6 +39,7 @@ def env_no_auth(tmp_db):
     env = {
         "LLM_API_KEY": "test-key",
         "DB_PATH": tmp_db,
+        "DATA_DIR": str(os.path.dirname(tmp_db)),
         "RATE_LIMIT": "60",
     }
     with patch.dict(os.environ, env, clear=False):
@@ -59,6 +60,7 @@ def env_with_auth(tmp_db):
     env = {
         "LLM_API_KEY": "test-key",
         "DB_PATH": tmp_db,
+        "DATA_DIR": str(os.path.dirname(tmp_db)),
         "INTARIS_API_KEY": "test-api-key",
         "RATE_LIMIT": "60",
     }
@@ -217,6 +219,93 @@ class TestSessions:
         assert data["session_id"] == "sess-get"
         assert data["intention"] == "Test session for unit tests"
         assert data["status"] == "active"
+
+
+class TestSessionEvents:
+    """Tests for session event recording endpoints."""
+
+    def test_read_events_last_n(self, client_no_auth):
+        headers = {"X-User-Id": "events-user", "X-Agent-Id": "agent-1"}
+        _create_session(client_no_auth, "sess-events-last-n", headers)
+
+        for idx in range(5):
+            resp = client_no_auth.post(
+                "/api/v1/session/sess-events-last-n/events",
+                json={"type": "message", "data": {"index": idx}},
+                headers=headers,
+            )
+            assert resp.status_code == 200
+
+        resp = client_no_auth.get(
+            "/api/v1/session/sess-events-last-n/events?last_n=2&type=message",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [event["seq"] for event in data["events"]] == [5, 6]
+        assert data["last_seq"] == 6
+
+    def test_last_n_and_after_seq_are_mutually_exclusive(self, client_no_auth):
+        headers = {"X-User-Id": "events-user-2", "X-Agent-Id": "agent-1"}
+        _create_session(client_no_auth, "sess-events-mutual", headers)
+
+        resp = client_no_auth.get(
+            "/api/v1/session/sess-events-mutual/events?last_n=2&after_seq=1",
+            headers=headers,
+        )
+        assert resp.status_code == 400
+        assert "mutually exclusive" in resp.json()["detail"]
+
+    def test_empty_filtered_result_still_reports_real_last_seq(self, client_no_auth):
+        headers = {"X-User-Id": "events-user-3", "X-Agent-Id": "agent-1"}
+        _create_session(client_no_auth, "sess-events-last-seq", headers)
+
+        for idx in range(2):
+            resp = client_no_auth.post(
+                "/api/v1/session/sess-events-last-seq/events",
+                json={"type": "message", "data": {"index": idx}},
+                headers=headers,
+            )
+            assert resp.status_code == 200
+
+        resp = client_no_auth.get(
+            "/api/v1/session/sess-events-last-seq/events?type=evaluation",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["events"] == []
+        assert data["last_seq"] == 3
+
+    def test_append_events_idempotency_key_replay(self, client_no_auth):
+        headers = {
+            "X-User-Id": "events-user-4",
+            "X-Agent-Id": "agent-1",
+            "X-Intaris-Source": "cognis",
+        }
+        _create_session(client_no_auth, "sess-events-idempotency", headers)
+
+        first = client_no_auth.post(
+            "/api/v1/session/sess-events-idempotency/events?idempotency_key=sess-events-idempotency:1:0",
+            json={"type": "user_message", "data": {"content": "hello"}},
+            headers=headers,
+        )
+        assert first.status_code == 200
+
+        replay = client_no_auth.post(
+            "/api/v1/session/sess-events-idempotency/events?idempotency_key=sess-events-idempotency:1:0",
+            json={"type": "user_message", "data": {"content": "hello"}},
+            headers=headers,
+        )
+        assert replay.status_code == 200
+        assert replay.json() == first.json()
+
+        events = client_no_auth.get(
+            "/api/v1/session/sess-events-idempotency/events?type=user_message",
+            headers=headers,
+        )
+        assert events.status_code == 200
+        assert len(events.json()["events"]) == 1
 
     def test_get_session_not_found(self, client_no_auth):
         headers = {"X-User-Id": "user1"}

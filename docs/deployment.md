@@ -94,6 +94,8 @@ volumes:
 
 ## Authentication
 
+Intaris supports both standalone API keys and Cognis-issued ES256 JWTs.
+
 ### Single Shared Key
 
 Simplest setup -- one key for all clients:
@@ -115,6 +117,26 @@ export INTARIS_API_KEYS='{"key-for-alice": "alice@example.com", "key-for-bob": "
 - Each key maps to a `user_id` -- no `X-User-Id` header needed
 - A value of `"*"` means auth-only (no user binding) -- useful for admin keys that can impersonate users via `X-User-Id`
 - All sessions and audit records are scoped to the resolved `user_id`
+
+### Cognis JWT Service Auth
+
+When Cognis is the caller, configure Intaris to trust Cognis-issued JWTs:
+
+```bash
+export INTARIS_JWT_PUBLIC_KEY=/path/to/cognis-public.pem
+# or
+export INTARIS_JWKS_URL=https://cognis.example.com/.well-known/jwks.json
+```
+
+Intaris expects:
+
+- `Authorization: Bearer <jwt>`
+- `iss="cognis"`
+- `aud` includes `"intaris"`
+- `sub` = user identity
+- optional `agent_id` claim (falls back to `X-Agent-Id` when absent)
+
+API keys remain supported for direct standalone clients.
 
 ### No Authentication
 

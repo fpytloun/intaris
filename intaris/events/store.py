@@ -31,9 +31,13 @@ logger = logging.getLogger(__name__)
 VALID_EVENT_TYPES = frozenset(
     {
         "message",
+        "user_message",
+        "assistant_message",
         "tool_call",
         "tool_result",
         "evaluation",
+        "delegation",
+        "compaction_summary",
         "part",
         "lifecycle",
         "checkpoint",
@@ -249,6 +253,71 @@ class EventStore:
 
         return events
 
+    def read_tail(
+        self,
+        user_id: str,
+        session_id: str,
+        limit: int,
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[dict]:
+        """Read the last matching events in chronological order.
+
+        Buffered events are considered first. Persisted tail reads request
+        ``limit + buffered_matches`` items to tolerate overlap if a flush
+        happens while the read is in progress.
+        """
+        if limit <= 0:
+            return []
+
+        with self._lock:
+            key = (user_id, session_id)
+            buffer_events = list(self._buffers.get(key, []))
+
+        filtered_buffer = [
+            event
+            for event in buffer_events
+            if self._event_matches_filters(
+                event,
+                event_types=event_types,
+                sources=sources,
+                exclude_sources=exclude_sources,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
+        ]
+
+        if len(filtered_buffer) >= limit:
+            filtered_buffer.sort(key=lambda e: e.get("seq", 0))
+            return filtered_buffer[-limit:]
+
+        persisted_events = self._backend.read_tail(
+            user_id,
+            session_id,
+            limit=limit + len(filtered_buffer),
+            event_types=event_types,
+            sources=sources,
+            exclude_sources=exclude_sources,
+            after_ts=after_ts,
+            before_ts=before_ts,
+        )
+
+        events = persisted_events + filtered_buffer
+        events.sort(key=lambda e: e.get("seq", 0))
+
+        seen: set[int] = set()
+        deduped: list[dict] = []
+        for event in events:
+            seq = event.get("seq", 0)
+            if seq not in seen:
+                seen.add(seq)
+                deduped.append(event)
+
+        return deduped[-limit:]
+
     def read_stream(
         self,
         user_id: str,
@@ -305,6 +374,30 @@ class EventStore:
                 self._buffers.pop(key, None)
                 self._seq_counters.pop(key, None)
         self._backend.delete_all_for_user(user_id)
+
+    @staticmethod
+    def _event_matches_filters(
+        event: dict,
+        *,
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> bool:
+        """Return True when the event matches the requested read filters."""
+        event_ts = event.get("ts", "")
+        if after_ts and event_ts < after_ts:
+            return False
+        if before_ts and event_ts > before_ts:
+            return False
+        if event_types and event.get("type") not in event_types:
+            return False
+        if sources and event.get("source") not in sources:
+            return False
+        if exclude_sources and event.get("source") in exclude_sources:
+            return False
+        return True
 
     def exists(self, user_id: str, session_id: str) -> bool:
         """Check if any events exist for a session (storage or buffer)."""

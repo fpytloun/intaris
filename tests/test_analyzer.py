@@ -1117,6 +1117,31 @@ class TestGetSessionEvents:
         result = _get_session_events(es, TEST_USER, "s", None, None)
         assert "Part 1" in result[0]["text"] and "Part 2" in result[0]["text"]
 
+    def test_cognis_message_event_types(self):
+        from intaris.analyzer import _get_session_events
+
+        es = MagicMock()
+        es.read.return_value = [
+            {
+                "type": "user_message",
+                "seq": 1,
+                "ts": "2026-01-01T00:00:00",
+                "data": {"content": "Hello"},
+            },
+            {
+                "type": "assistant_message",
+                "seq": 2,
+                "ts": "2026-01-01T00:00:01",
+                "data": {"content": "Hi there"},
+            },
+        ]
+
+        result = _get_session_events(es, TEST_USER, "s", None, None)
+        assert [(item["role"], item["text"]) for item in result] == [
+            ("user", "Hello"),
+            ("assistant", "Hi there"),
+        ]
+
     def test_dedup_parts_by_id(self):
         from intaris.analyzer import _get_session_events
 

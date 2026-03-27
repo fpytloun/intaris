@@ -365,9 +365,13 @@ function sessionPlayer() {
     eventTypeBadge(type) {
       const classes = {
         message: 'badge-approve',
+        user_message: 'badge-approve',
+        assistant_message: 'badge-low',
         tool_call: 'badge-escalate',
         tool_result: 'badge-fast',
         evaluation: 'badge-deny',
+        delegation: 'badge-medium',
+        compaction_summary: 'badge-high',
         part: 'badge-low',
         lifecycle: 'badge-medium',
         checkpoint: 'badge-high',
@@ -395,8 +399,18 @@ function sessionPlayer() {
         case 'message':
           if (data.role === 'user') return 'User: ' + (data.text || '');
           return (data.role || 'message') + (data.model ? ` [${data.model}]` : '');
+        case 'user_message':
+          return 'User: ' + (data.content || '');
+        case 'assistant_message':
+          return 'Assistant: ' + (data.content || '');
         case 'part':
           return (data.part?.type || 'part') + (data.part?.text ? ': ' + data.part.text : '');
+        case 'delegation':
+          return [data.mode || 'delegation', data.status || '', data.task || '']
+            .filter(Boolean)
+            .join(' · ');
+        case 'compaction_summary':
+          return data.summary || 'compaction summary';
         case 'lifecycle':
           return data.event_type || data.status || 'lifecycle';
         case 'checkpoint':
@@ -447,7 +461,8 @@ function sessionPlayer() {
 
     get filteredTypes() {
       return [
-        '__all__', 'message', 'tool_call', 'tool_result', 'evaluation',
+        '__all__', 'message', 'user_message', 'assistant_message', 'tool_call',
+        'tool_result', 'evaluation', 'delegation', 'compaction_summary',
         'part', 'lifecycle', 'checkpoint', 'reasoning', 'transcript',
       ];
     },

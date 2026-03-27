@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import hmac
 import logging
 import os
 import sys
@@ -24,6 +23,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Mount, Route, WebSocketRoute
 
 from intaris import __version__
+from intaris.auth import match_api_key, resolve_auth
 from intaris.config import load_config
 
 logging.basicConfig(
@@ -184,48 +184,58 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         try:
-            has_auth = bool(cfg.server.api_keys or cfg.server.api_key)
+            from intaris.sanitize import validate_agent_id
+
+            raw_agent_id = request.headers.get("x-agent-id", "").strip() or None
+            header_agent_id = validate_agent_id(raw_agent_id) if raw_agent_id else None
+            header_user_id = request.headers.get("x-user-id", "").strip() or None
+
+            has_auth = bool(
+                cfg.server.api_keys
+                or cfg.server.api_key
+                or cfg.server.jwt_public_key
+                or cfg.server.jwks_url
+            )
 
             if has_auth:
                 # Extract token from Authorization header
                 token = _extract_token(request)
                 if not token:
                     return JSONResponse(
-                        {"error": "Missing API key"},
+                        {"error": "Missing credentials"},
                         status_code=401,
                     )
 
-                # Try multi-key mapping first
-                mapped_user_id = _match_api_key(token, cfg.server.api_keys)
-                if mapped_user_id is not None:
-                    # Key found in api_keys
-                    if mapped_user_id != "*":
-                        _session_user_id.set(mapped_user_id)
-                        _session_user_bound.set(True)
-                    else:
-                        # Wildcard key — auth OK but no user binding
-                        _set_user_from_header(request)
-                elif cfg.server.api_key and hmac.compare_digest(
-                    token, cfg.server.api_key
-                ):
-                    # Matched single api_key — auth OK, no user binding
-                    _set_user_from_header(request)
-                else:
+                resolution = resolve_auth(
+                    token=token,
+                    header_user_id=header_user_id,
+                    header_agent_id=header_agent_id,
+                    api_key=cfg.server.api_key,
+                    api_keys=cfg.server.api_keys,
+                    jwt_public_key=cfg.server.jwt_public_key,
+                    jwks_url=cfg.server.jwks_url,
+                    allow_no_auth=False,
+                )
+                if resolution is None:
                     return JSONResponse(
-                        {"error": "Invalid API key"},
+                        {"error": "Invalid credentials"},
                         status_code=401,
                     )
             else:
-                # No auth configured (dev mode) — read identity from headers
-                _set_user_from_header(request)
+                resolution = resolve_auth(
+                    token="",
+                    header_user_id=header_user_id,
+                    header_agent_id=header_agent_id,
+                    api_key=cfg.server.api_key,
+                    api_keys=cfg.server.api_keys,
+                    jwt_public_key=cfg.server.jwt_public_key,
+                    jwks_url=cfg.server.jwks_url,
+                    allow_no_auth=True,
+                )
 
-            # Always read agent_id from header — validated against a
-            # strict pattern to prevent prompt injection via the header.
-            from intaris.sanitize import validate_agent_id
-
-            raw_agent_id = request.headers.get("x-agent-id", "").strip() or None
-            agent_id = validate_agent_id(raw_agent_id) if raw_agent_id else None
-            _session_agent_id.set(agent_id)
+            _session_user_id.set(resolution.user_id if resolution else None)
+            _session_agent_id.set(resolution.agent_id if resolution else None)
+            _session_user_bound.set(resolution.user_bound if resolution else False)
 
             # Read optional intention hint for MCP proxy sessions
             intention = request.headers.get("x-intaris-intention", "").strip() or None
@@ -258,11 +268,7 @@ def _match_api_key(token: str, api_keys: dict[str, str]) -> str | None:
     Returns:
         The mapped user_id (or "*" for wildcard), or None if no match.
     """
-    matched_user: str | None = None
-    for key, user_id in api_keys.items():
-        if hmac.compare_digest(token, key):
-            matched_user = user_id
-    return matched_user
+    return match_api_key(token, api_keys)
 
 
 def _set_user_from_header(request: Request) -> None:

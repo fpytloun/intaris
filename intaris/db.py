@@ -995,6 +995,25 @@ CREATE INDEX IF NOT EXISTS idx_audit_decision
 CREATE INDEX IF NOT EXISTS idx_audit_record_type
     ON audit_log(record_type);
 
+CREATE TABLE IF NOT EXISTS event_append_idempotency (
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending', 'completed')),
+    count INTEGER,
+    first_seq INTEGER,
+    last_seq INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, session_id, idempotency_key),
+    FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_append_idempotency_created_at
+    ON event_append_idempotency(created_at);
+
 -- MCP proxy: upstream server configurations (per-user)
 CREATE TABLE IF NOT EXISTS mcp_servers (
     user_id       TEXT NOT NULL,
@@ -1215,6 +1234,25 @@ CREATE INDEX IF NOT EXISTS idx_audit_decision
     ON audit_log(decision);
 CREATE INDEX IF NOT EXISTS idx_audit_record_type
     ON audit_log(record_type);
+
+CREATE TABLE IF NOT EXISTS event_append_idempotency (
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL
+        CHECK (status IN ('pending', 'completed')),
+    count INTEGER,
+    first_seq INTEGER,
+    last_seq INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, session_id, idempotency_key),
+    FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_append_idempotency_created_at
+    ON event_append_idempotency(created_at);
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
     user_id       TEXT NOT NULL,

@@ -249,6 +249,17 @@ function processOpenCode(events) {
       continue;
     }
 
+    if (event.type === 'user_message') {
+      if (!data.content || !data.content.trim()) continue;
+      blocks.push({
+        type: 'user-message',
+        id: 'b' + (blockId++),
+        text: data.content,
+        ts: event.ts,
+      });
+      continue;
+    }
+
     // Assistant message handling — source-dependent.
     // OpenCode sends assistant text via part events; these message events
     // contain only metadata (model, tokens) so we skip them.
@@ -267,6 +278,18 @@ function processOpenCode(events) {
           ts: event.ts,
         });
       }
+      continue;
+    }
+
+    if (event.type === 'assistant_message') {
+      if (!data.content || !data.content.trim()) continue;
+      blocks.push({
+        type: 'assistant-text',
+        id: 'b' + (blockId++),
+        text: data.content,
+        html: renderMarkdown(data.content),
+        ts: event.ts,
+      });
       continue;
     }
 
@@ -447,6 +470,18 @@ function processOpenCode(events) {
       continue;
     }
 
+    if (event.type === 'delegation') {
+      blocks.push({
+        type: 'subtask',
+        id: 'b' + (blockId++),
+        description: data.task || data.result_summary || data.status || 'Delegation',
+        agent: data.mode || '',
+        childSessionId: data.child_session_id || null,
+        ts: event.ts,
+      });
+      continue;
+    }
+
     // ── Reasoning (server-side, from /reasoning endpoint) ──
     if (event.type === 'reasoning') {
       // Skip user message reasoning (already captured as user-message from chat.message hook)
@@ -459,6 +494,17 @@ function processOpenCode(events) {
           ts: event.ts,
         });
       }
+      continue;
+    }
+
+    if (event.type === 'compaction_summary') {
+      if (!data.summary) continue;
+      blocks.push({
+        type: 'reasoning',
+        id: 'b' + (blockId++),
+        text: data.summary,
+        ts: event.ts,
+      });
       continue;
     }
 

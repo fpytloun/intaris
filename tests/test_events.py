@@ -213,6 +213,68 @@ class TestFilesystemEventBackend:
         assert result[0]["seq"] == 6
         assert result[1]["seq"] == 7
 
+    def test_read_tail(self, backend):
+        events = [
+            {"seq": i, "ts": f"t-{i}", "type": "message", "data": {}}
+            for i in range(1, 6)
+        ]
+        backend.append("alice", "sess1", events)
+
+        result = backend.read_tail("alice", "sess1", limit=2)
+        assert [e["seq"] for e in result] == [4, 5]
+
+    def test_read_tail_with_filters(self, backend):
+        backend.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "seq": 1,
+                    "ts": "t-1",
+                    "type": "message",
+                    "source": "client",
+                    "data": {},
+                },
+                {
+                    "seq": 2,
+                    "ts": "t-2",
+                    "type": "evaluation",
+                    "source": "intaris",
+                    "data": {},
+                },
+                {
+                    "seq": 3,
+                    "ts": "t-3",
+                    "type": "message",
+                    "source": "client",
+                    "data": {},
+                },
+                {
+                    "seq": 4,
+                    "ts": "t-4",
+                    "type": "tool_call",
+                    "source": "client",
+                    "data": {},
+                },
+                {
+                    "seq": 5,
+                    "ts": "t-5",
+                    "type": "message",
+                    "source": "client",
+                    "data": {},
+                },
+            ],
+        )
+
+        result = backend.read_tail(
+            "alice",
+            "sess1",
+            limit=2,
+            event_types={"message"},
+            sources={"client"},
+        )
+        assert [e["seq"] for e in result] == [3, 5]
+
     def test_read_across_chunks(self, backend):
         """Reading works across multiple chunk files."""
         chunk1 = [
@@ -738,6 +800,43 @@ class TestEventStore:
         events = store.read("alice", "sess1")
         assert len(events) == 3
 
+    def test_read_tail_from_buffer(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "message", "data": {}} for _ in range(3)],
+        )
+
+        events = store.read_tail("alice", "sess1", limit=2)
+        assert [e["seq"] for e in events] == [2, 3]
+
+    def test_read_tail_combines_backend_and_buffer(self, store):
+        store.append(
+            "alice", "sess1", [{"type": "message", "data": {}} for _ in range(5)]
+        )
+        store.append(
+            "alice", "sess1", [{"type": "tool_call", "data": {}} for _ in range(2)]
+        )
+
+        events = store.read_tail("alice", "sess1", limit=4)
+        assert [e["seq"] for e in events] == [4, 5, 6, 7]
+
+    def test_read_tail_with_filters(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {"type": "message", "data": {}},
+                {"type": "evaluation", "data": {}},
+                {"type": "message", "data": {}},
+                {"type": "tool_call", "data": {}},
+                {"type": "message", "data": {}},
+            ],
+        )
+
+        events = store.read_tail("alice", "sess1", limit=2, event_types={"message"})
+        assert [e["seq"] for e in events] == [3, 5]
+
     def test_read_with_multiple_source_filter(self, store):
         """Multiple sources in filter returns events from any of them."""
         store.append(
@@ -909,9 +1008,13 @@ class TestValidEventTypes:
     def test_expected_types(self):
         expected = {
             "message",
+            "user_message",
+            "assistant_message",
             "tool_call",
             "tool_result",
             "evaluation",
+            "delegation",
+            "compaction_summary",
             "part",
             "lifecycle",
             "checkpoint",

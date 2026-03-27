@@ -1,6 +1,6 @@
 # REST API
 
-All endpoints are mounted under `/api/v1`. Authentication is via `Authorization: Bearer <key>` or `X-API-Key: <key>` header.
+All endpoints are mounted under `/api/v1`. Authentication is via `Authorization: Bearer <key-or-jwt>` or `X-API-Key: <key>` header. When Cognis JWT validation is configured, Intaris accepts ES256 JWTs with `iss="cognis"` and `aud` including `"intaris"`.
 
 OpenAPI documentation is available at `/api/v1/docs` when the server is running.
 
@@ -339,15 +339,15 @@ Get the behavioral risk profile for the authenticated user. Requires a user-boun
 
 Append events to the session recording.
 
+Optional query parameter: `idempotency_key=<session_id>:<turn_number>:<batch_index>`. Replaying the same key returns the original success response without appending duplicate events.
+
 **Request:**
 
 ```json
-{
-  "events": [
-    {"type": "tool_call", "data": {"tool": "bash", "args": {"command": "ls"}}},
-    {"type": "tool_result", "data": {"output": "file1.py\nfile2.py"}}
-  ]
-}
+[
+  {"type": "tool_call", "data": {"tool": "bash", "args": {"command": "ls"}}},
+  {"type": "tool_result", "data": {"output": "file1.py\nfile2.py"}}
+]
 ```
 
 Or a single event:
@@ -379,10 +379,13 @@ Read events with pagination and filtering.
 | Parameter | Default | Description |
 |---|---|---|
 | `after_seq` | `0` | Return events after this sequence number |
-| `limit` | `100` | Max events to return |
+| `limit` | `0` | Max events to return (`0` = all) |
+| `last_n` | `0` | Return the last N matching events in chronological order |
 | `type` | (all) | Filter by event type |
 | `after_ts` | (none) | Return events after this ISO 8601 timestamp |
 | `before_ts` | (none) | Return events before this ISO 8601 timestamp |
+
+`last_n` is mutually exclusive with `after_seq` and `limit`.
 
 **Response:**
 

@@ -71,6 +71,22 @@ class TestConfigValidation:
             with pytest.raises(ValueError, match="could not be parsed"):
                 config.validate()
 
+    def test_jwt_verifier_sources_are_mutually_exclusive(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("LLM_API_KEY", "test-key")
+        public_key = tmp_path / "public.pem"
+        public_key.write_text("test", encoding="utf-8")
+        monkeypatch.setenv("INTARIS_JWT_PUBLIC_KEY", str(public_key))
+        monkeypatch.setenv("INTARIS_JWKS_URL", "https://example.com/jwks.json")
+        with pytest.raises(ValueError, match="Configure only one JWT verifier source"):
+            Config(llm=LLMConfig()).validate()
+
+    def test_missing_jwt_public_key_path_raises(self, monkeypatch):
+        monkeypatch.setenv("LLM_API_KEY", "test-key")
+        monkeypatch.setenv("INTARIS_JWT_PUBLIC_KEY", "/tmp/does-not-exist.pem")
+        monkeypatch.delenv("INTARIS_JWKS_URL", raising=False)
+        with pytest.raises(ValueError, match="does not exist"):
+            Config(llm=LLMConfig()).validate()
+
 
 class TestConfigEnvVars:
     """Test configuration from environment variables."""

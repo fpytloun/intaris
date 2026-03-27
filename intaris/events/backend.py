@@ -83,6 +83,30 @@ def _ndjson_to_events(data: bytes) -> list[dict]:
     return events
 
 
+def _event_matches_filters(
+    event: dict,
+    *,
+    event_types: set[str] | None = None,
+    sources: set[str] | None = None,
+    exclude_sources: set[str] | None = None,
+    after_ts: str | None = None,
+    before_ts: str | None = None,
+) -> bool:
+    """Return True when the event matches the requested read filters."""
+    event_ts = event.get("ts", "")
+    if after_ts and event_ts < after_ts:
+        return False
+    if before_ts and event_ts > before_ts:
+        return False
+    if event_types and event.get("type") not in event_types:
+        return False
+    if sources and event.get("source") not in sources:
+        return False
+    if exclude_sources and event.get("source") in exclude_sources:
+        return False
+    return True
+
+
 class EventBackend(Protocol):
     """Protocol for session event storage backends.
 
@@ -117,6 +141,20 @@ class EventBackend(Protocol):
         Returns:
             List of event dicts ordered by seq.
         """
+        ...
+
+    def read_tail(
+        self,
+        user_id: str,
+        session_id: str,
+        limit: int,
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[dict]:
+        """Read the last matching events in chronological order."""
         ...
 
     def read_stream(
@@ -219,6 +257,43 @@ class FilesystemEventBackend:
                     result.append(event)
                     if limit and len(result) >= limit:
                         return result
+        return result
+
+    def read_tail(
+        self,
+        user_id: str,
+        session_id: str,
+        limit: int,
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[dict]:
+        if limit <= 0:
+            return []
+
+        session_dir = self._session_dir(user_id, session_id)
+        chunks = self._list_chunks(session_dir)
+        result: list[dict] = []
+
+        for _, _, chunk_path in reversed(chunks):
+            events = _ndjson_to_events(chunk_path.read_bytes())
+            for event in reversed(events):
+                if _event_matches_filters(
+                    event,
+                    event_types=event_types,
+                    sources=sources,
+                    exclude_sources=exclude_sources,
+                    after_ts=after_ts,
+                    before_ts=before_ts,
+                ):
+                    result.append(event)
+                    if len(result) >= limit:
+                        result.reverse()
+                        return result
+
+        result.reverse()
         return result
 
     def read_stream(
@@ -373,6 +448,44 @@ class S3EventBackend:
                     result.append(event)
                     if limit and len(result) >= limit:
                         return result
+        return result
+
+    def read_tail(
+        self,
+        user_id: str,
+        session_id: str,
+        limit: int,
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[dict]:
+        if limit <= 0:
+            return []
+
+        chunks = self._list_chunks(user_id, session_id)
+        result: list[dict] = []
+
+        for _, _, key in reversed(chunks):
+            response = self._client.get_object(Bucket=self._bucket, Key=key)
+            data = response["Body"].read()
+            events = _ndjson_to_events(data)
+            for event in reversed(events):
+                if _event_matches_filters(
+                    event,
+                    event_types=event_types,
+                    sources=sources,
+                    exclude_sources=exclude_sources,
+                    after_ts=after_ts,
+                    before_ts=before_ts,
+                ):
+                    result.append(event)
+                    if len(result) >= limit:
+                        result.reverse()
+                        return result
+
+        result.reverse()
         return result
 
     def read_stream(

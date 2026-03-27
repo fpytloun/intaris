@@ -1502,10 +1502,10 @@ def _get_session_events(
 ) -> list[dict[str, Any]]:
     """Fetch and process session events for L2 analysis enrichment.
 
-    Reads ``part`` and ``message`` events from the event store, deduplicates
-    streaming part updates (keeps last by seq per part.id), extracts
-    assistant text and user messages, and returns a sorted list of
-    conversation entries.
+    Reads ``part``, ``message``, ``user_message``, and ``assistant_message``
+    events from the event store, deduplicates streaming part updates (keeps
+    last by seq per part.id), extracts assistant text and user messages, and
+    returns a sorted list of conversation entries.
 
     Returns an empty list on any failure (M5 fix — graceful fallback).
 
@@ -1527,7 +1527,7 @@ def _get_session_events(
         raw_events = event_store.read(
             user_id,
             session_id,
-            event_types={"part", "message"},
+            event_types={"part", "message", "user_message", "assistant_message"},
             after_ts=after_ts,
             before_ts=before_ts,
         )
@@ -1548,7 +1548,8 @@ def _get_session_events(
     # Deduplicate part events by data.part.id — keep last by seq (m1 fix).
     # OpenCode streams part updates; many events per part with the same id.
     parts_by_id: dict[str, dict[str, Any]] = {}
-    message_events: list[dict[str, Any]] = []
+    user_events: list[dict[str, Any]] = []
+    assistant_events: list[dict[str, Any]] = []
 
     for event in raw_events:
         event_type = event.get("type")
@@ -1575,7 +1576,11 @@ def _get_session_events(
         elif event_type == "message":
             role = data.get("role", "")
             if role == "user":
-                message_events.append(event)
+                user_events.append(event)
+        elif event_type == "user_message":
+            user_events.append(event)
+        elif event_type == "assistant_message":
+            assistant_events.append(event)
 
     # Log if transcript events detected (Claude Code — m4, future work)
     transcript_count = sum(1 for e in raw_events if e.get("type") == "transcript")
@@ -1592,9 +1597,9 @@ def _get_session_events(
     conversation: list[dict[str, Any]] = []
 
     # User messages from event store
-    for event in message_events:
+    for event in user_events:
         data = event.get("data") or {}
-        content = data.get("content", "")
+        content = data.get("content") or data.get("text", "")
         # Handle content that may be a list of parts (OpenAI format)
         if isinstance(content, list):
             text_parts = [
@@ -1610,6 +1615,23 @@ def _get_session_events(
                 "ts": event.get("ts", ""),
                 "role": "user",
                 "text": content,
+                "seq": event.get("seq", 0),
+            }
+        )
+
+    for event in assistant_events:
+        data = event.get("data") or {}
+        text = data.get("content", "")
+        if not text:
+            continue
+        text = sanitize_for_prompt(text)
+        text = text.replace("⟨assistant_text⟩", "⟨\u200bassistant_text⟩")
+        text = text.replace("⟨/assistant_text⟩", "⟨\u200b/assistant_text⟩")
+        conversation.append(
+            {
+                "ts": event.get("ts", ""),
+                "role": "assistant",
+                "text": text,
                 "seq": event.get("seq", 0),
             }
         )
