@@ -58,6 +58,13 @@ interface SessionState {
   isIdle: boolean
   // Last assistant response text for intention context
   lastAssistantText: string
+  // Tracks recent message roles so part events can distinguish user vs assistant text.
+  messageRoles: Map<string, string>
+  recentMessageText: Map<string, string>
+  // Pending user message captured from events when chat.message does not fire.
+  pendingUserMessageId: string | null
+  pendingUserText: string
+  reasoningSentForMessageId: string | null
   // Recording buffer
   recordingBuffer: RecordingEvent[]
 }
@@ -278,6 +285,11 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         intentionPending: false,
         isIdle: false,
         lastAssistantText: "",
+        messageRoles: new Map(),
+        recentMessageText: new Map(),
+        pendingUserMessageId: null,
+        pendingUserText: "",
+        reasoningSentForMessageId: null,
         recordingBuffer: [],
       }
       sessions.set(sessionId, state)
@@ -427,6 +439,101 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       `${state.escalatedCount} escalated). ` +
       `Working directory: ${workingDirectory || "unknown"}`
     )
+  }
+
+  function rememberMessageRole(state: SessionState, messageId: string, role: string): void {
+    state.messageRoles.set(messageId, role)
+    if (state.messageRoles.size <= 100) return
+
+    const oldest = state.messageRoles.keys().next().value
+    if (oldest) {
+      state.messageRoles.delete(oldest)
+    }
+  }
+
+  function rememberMessageText(state: SessionState, messageId: string, text: string): void {
+    state.recentMessageText.set(messageId, text)
+    if (state.recentMessageText.size <= 100) return
+
+    const oldest = state.recentMessageText.keys().next().value
+    if (oldest) {
+      state.recentMessageText.delete(oldest)
+    }
+  }
+
+  async function resumeSessionIfIdle(state: SessionState): Promise<void> {
+    if (!state.isIdle || !state.intarisSessionId) return
+    state.isIdle = false
+    await callApi(
+      "PATCH",
+      `/api/v1/session/${encodeURIComponent(state.intarisSessionId)}/status`,
+      { status: "active" },
+      2000,
+    )
+  }
+
+  async function forwardUserReasoning(
+    sessionId: string,
+    state: SessionState,
+    userText: string,
+    messageId?: string,
+    input?: {
+      agent?: string
+      model?: { providerID: string; modelID: string }
+      messageID?: string
+      sessionID?: string
+    },
+  ): Promise<void> {
+    if (!state.intarisSessionId || !userText) return
+
+    const effectiveMessageId = messageId || input?.messageID || null
+    if (effectiveMessageId && state.reasoningSentForMessageId === effectiveMessageId) {
+      state.pendingUserMessageId = null
+      state.pendingUserText = ""
+      return
+    }
+
+    const assistantContext = state.lastAssistantText || undefined
+    state.lastAssistantText = ""
+
+    const reasoningResult = await callApi(
+      "POST",
+      "/api/v1/reasoning",
+      {
+        session_id: state.intarisSessionId,
+        content: `User message: ${userText}`,
+        ...(assistantContext && { context: assistantContext }),
+      },
+      30000,
+    )
+
+    if (reasoningResult.error) {
+      await client.app.log({
+        body: {
+          service: "intaris",
+          level: "error",
+          message: `Intaris: /reasoning failed — ${reasoningResult.error} (status=${reasoningResult.status}, contextLen=${assistantContext ? assistantContext.length : 0})`,
+        },
+      }).catch(() => {})
+      return
+    }
+
+    state.intentionPending = true
+    state.reasoningSentForMessageId = effectiveMessageId
+    state.pendingUserMessageId = null
+    state.pendingUserText = ""
+
+    recordEvent(sessionId, {
+      type: "message",
+      data: {
+        role: "user",
+        text: userText,
+        agent: input?.agent,
+        model: input?.model,
+        messageID: effectiveMessageId,
+        sessionID: input?.sessionID || sessionId,
+      },
+    })
   }
 
   // -- Recording Helpers ---------------------------------------------------
@@ -736,15 +843,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
       // Resume session from idle when user provides new input.
       // This transitions the Intaris session back to active before any
       // tool calls execute, making the UI reflect that work is starting.
-      if (state.isIdle && state.intarisSessionId) {
-        state.isIdle = false
-        callApi(
-          "PATCH",
-          `/api/v1/session/${encodeURIComponent(state.intarisSessionId)}/status`,
-          { status: "active" },
-          2000,
-        ).catch(() => {})
-      }
+      await resumeSessionIfIdle(state).catch(() => {})
 
       // Extract user message text from parts and send as reasoning record.
       // This gives Intaris visibility into what the user is asking the agent
@@ -757,56 +856,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           .trim()
 
         if (userText) {
-          // Include assistant's last response as context for intention
-          // generation. This helps interpret short user replies like
-          // "ok, do it" by providing what the assistant proposed.
-          const assistantContext = state.lastAssistantText || undefined
-          state.lastAssistantText = ""  // Consumed — clear for next turn
-
-          // Await the /reasoning call to ensure it completes before the
-          // LLM starts processing (which may block the event loop and
-          // prevent the fire-and-forget promise from resolving).
-          const reasoningResult = await callApi(
-            "POST",
-            "/api/v1/reasoning",
-            {
-              session_id: state.intarisSessionId,
-              content: `User message: ${userText}`,
-              ...(assistantContext && { context: assistantContext }),
-            },
-            30000, // 30s timeout — large context bodies need time over remote connections
-          )
-          if (reasoningResult.error) {
-            // /reasoning failed — surface error in UI and do NOT set
-            // intentionPending (server would wait for a call that never arrived).
-            await client.app.log({
-              body: {
-                service: "intaris",
-                level: "error",
-                message: `Intaris: /reasoning failed — ${reasoningResult.error} (status=${reasoningResult.status}, contextLen=${assistantContext ? assistantContext.length : 0})`,
-              },
-            }).catch(() => {})
-          } else {
-            // Signal that an intention update is in flight. The next
-            // tool.execute.before will include intention_pending=true in
-            // the evaluate request so the server waits for the /reasoning
-            // call to arrive and the intention to be updated before
-            // evaluating. Cleared after the first evaluate call returns.
-            state.intentionPending = true
-          }
-
-          // Record user message for session recording
-          recordEvent(input.sessionID, {
-            type: "message",
-            data: {
-              role: "user",
-              text: userText,
-              agent: input.agent,
-              model: input.model,
-              messageID: input.messageID,
-              sessionID: input.sessionID,
-            },
-          })
+          await forwardUserReasoning(input.sessionID, state, userText, input.messageID, input)
         }
       }
     },
@@ -871,6 +921,8 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         signalCompletion(state.intarisSessionId, state, sessionId)
         // Also complete any child sessions that are still active
         completeChildSessions(state.intarisSessionId)
+        state.messageRoles.clear()
+        state.recentMessageText.clear()
         sessions.delete(sessionId)
       }
 
@@ -914,14 +966,23 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         const sessionId: string = part.sessionID
         if (!sessionId) return
 
-        // Track last assistant text for intention context.
-        // part.text contains the full accumulated text (not just the delta).
-        // When the user next sends a message, this context helps the
-        // intention generator understand what "ok, do it" refers to.
+        // Track text parts so we can capture assistant context and fall back
+        // to event-driven reasoning when chat.message is not fired (web mode).
         if (part.type === "text" && typeof part.text === "string") {
           const state = sessions.get(sessionId)
           if (state) {
-            state.lastAssistantText = part.text
+            rememberMessageText(state, part.messageID, part.text)
+            const role = state.messageRoles.get(part.messageID)
+            if (role === "user") {
+              if (state.pendingUserMessageId !== part.messageID) {
+                state.pendingUserMessageId = part.messageID
+              }
+              state.pendingUserText = part.text
+            } else if (role === "assistant" || !role) {
+              // Unknown role can happen due to event ordering; keep the
+              // previous behavior so assistant context is not lost.
+              state.lastAssistantText = part.text
+            }
           }
         }
 
@@ -943,6 +1004,20 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
         const sessionId: string = info.sessionID
         if (!sessionId) return
+
+        const state = getOrCreateState(sessionId)
+        rememberMessageRole(state, info.id, info.role)
+
+        if (info.role === "user") {
+          state.pendingUserMessageId = info.id
+          state.pendingUserText = state.recentMessageText.get(info.id) || ""
+          await resumeSessionIfIdle(state).catch(() => {})
+        } else if (info.role === "assistant") {
+          const latestText = state.recentMessageText.get(info.id)
+          if (latestText) {
+            state.lastAssistantText = latestText
+          }
+        }
 
         recordEvent(sessionId, {
           type: "message",
@@ -983,6 +1058,18 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         const detail = state.lastError || "unknown error"
         throw new Error(
           `[intaris] Cannot create session: ${detail}`,
+        )
+      }
+
+      // In web mode, chat.message does not fire. The event stream still
+      // captures the user's message parts, so forward them here before the
+      // first tool call to keep intention tracking and recording intact.
+      if (state.pendingUserText) {
+        await forwardUserReasoning(
+          sessionID,
+          state,
+          state.pendingUserText,
+          state.pendingUserMessageId || undefined,
         )
       }
 
