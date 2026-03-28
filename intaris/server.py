@@ -172,7 +172,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
         # Skip auth for health endpoint, static UI files, and action tokens
         if (
-            request.url.path == "/health"
+            request.url.path in ("/", "/health")
             or request.url.path
             in (
                 "/ui",
@@ -708,6 +708,10 @@ def create_app() -> Starlette:
         async def _ui_redirect(request: Request) -> RedirectResponse:
             return RedirectResponse("/ui/", status_code=301)
 
+        async def _root_redirect(request: Request) -> RedirectResponse:
+            return RedirectResponse("/ui/", status_code=301)
+
+        routes.append(Route("/", _root_redirect))
         routes.append(Route("/ui", _ui_redirect))
         routes.append(Mount("/ui", app=StaticFiles(directory=ui_static_dir, html=True)))
         logger.info("Management UI mounted at /ui")
