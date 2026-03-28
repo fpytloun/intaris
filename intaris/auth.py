@@ -206,14 +206,14 @@ def resolve_auth(
     mapped_user_id = match_api_key(token, api_keys)
     if mapped_user_id is not None:
         if mapped_user_id != "*":
-            logger.info("Auth resolved via mapped API key for user=%s", mapped_user_id)
+            logger.debug("Auth resolved via mapped API key for user=%s", mapped_user_id)
             return AuthResolution(
                 user_id=mapped_user_id,
                 agent_id=header_agent_id,
                 user_bound=True,
                 method="api_key",
             )
-        logger.info("Auth resolved via wildcard API key")
+        logger.debug("Auth resolved via wildcard API key")
         return AuthResolution(
             user_id=header_user_id,
             agent_id=header_agent_id,
@@ -222,7 +222,7 @@ def resolve_auth(
         )
 
     if api_key and hmac.compare_digest(token, api_key):
-        logger.info("Auth resolved via single API key")
+        logger.debug("Auth resolved via single API key")
         return AuthResolution(
             user_id=header_user_id,
             agent_id=header_agent_id,
