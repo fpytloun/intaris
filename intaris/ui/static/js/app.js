@@ -171,8 +171,29 @@ document.addEventListener('alpine:init', () => {
       if (key) {
         await this.verify();
       } else {
-        this.loading = false;
+        // Try cookie-based auth (cross-service SSO from Cognis)
+        await this.tryCookieAuth();
       }
+    },
+
+    async tryCookieAuth() {
+      try {
+        const identity = await IntarisAPI.whoami();
+        if (identity && identity.user_id) {
+          IntarisAPI.cookieAuth = true;
+          this.identity = identity;
+          this.authenticated = true;
+          this.selectedUser = identity.user_id;
+          if (identity.can_switch_user) {
+            await this.loadUsers();
+          }
+          this.loading = false;
+          return;
+        }
+      } catch {
+        // Cookie auth not available — show login form
+      }
+      this.loading = false;
     },
 
     async login(apiKey, userId) {

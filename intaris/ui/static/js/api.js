@@ -39,8 +39,13 @@ const IntarisAPI = {
     }
   },
 
+  /** Whether auth is via cross-service cookie (no explicit key needed) */
+  cookieAuth: false,
+
   /**
    * Build request headers with auth and identity.
+   * When cookieAuth is true, the browser sends the cognis_session cookie
+   * automatically — no explicit key header needed.
    */
   _headers(extra = {}) {
     const headers = {

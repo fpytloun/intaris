@@ -251,12 +251,19 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
 
 def _extract_token(request: Request) -> str:
-    """Extract API token from request headers."""
+    """Extract API token from request headers or cognis_session cookie."""
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
     # Fallback to X-API-Key header
-    return request.headers.get("x-api-key", "").strip() or auth.strip()
+    key = request.headers.get("x-api-key", "").strip()
+    if key:
+        return key
+    # Fallback to cognis_session cookie (cross-service SSO)
+    cookie = request.cookies.get("cognis_session", "")
+    if cookie:
+        return cookie
+    return auth.strip()
 
 
 def _match_api_key(token: str, api_keys: dict[str, str]) -> str | None:
