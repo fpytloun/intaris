@@ -73,6 +73,19 @@ class CognisJWTValidator:
             user_id=user_id, agent_id=claim_agent_id or header_agent_id
         )
 
+    def decode_claims(self, token: str) -> dict:
+        """Decode and validate a JWT, returning all claims.
+
+        Unlike ``validate()``, this returns the raw claims dict including
+        custom claims like ``typ``, ``target``, and ``jti``. Used by the
+        exchange token endpoint which needs access to these claims.
+
+        Raises:
+            InvalidTokenError: If the JWT is invalid, expired, or has
+                wrong issuer/audience.
+        """
+        return self._decode(token)
+
     def _decode(self, token: str) -> dict:
         if self._public_key is not None:
             return self._decode_with_key(token, self._public_key)

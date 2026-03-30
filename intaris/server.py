@@ -170,7 +170,8 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         cfg = _get_config()
 
-        # Skip auth for health endpoint, static UI files, and action tokens
+        # Skip auth for health endpoint, static UI files, action tokens,
+        # and the exchange token endpoint (it validates the token itself).
         if (
             request.url.path in ("/", "/health")
             or request.url.path
@@ -180,6 +181,7 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             )
             or request.url.path.startswith("/ui/")
             or request.url.path.startswith("/api/v1/action/")
+            or request.url.path == "/api/v1/auth/exchange"
         ):
             return await call_next(request)
 
@@ -198,6 +200,31 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             )
 
             if has_auth:
+                # Check exchange session cookie (cross-service SSO via token exchange).
+                # Only checked when auth is configured — prevents stale cookies from
+                # authenticating requests when auth is later disabled.
+                from intaris.api.auth import get_exchange_session
+
+                exchange_cookie = request.cookies.get("intaris_exchange_session", "")
+                if exchange_cookie:
+                    exchange_session = get_exchange_session(exchange_cookie)
+                    if exchange_session:
+                        logger.info(
+                            "Auth resolved via exchange session for user=%s",
+                            exchange_session.user_id,
+                        )
+                        _session_user_id.set(exchange_session.user_id)
+                        _session_agent_id.set(
+                            exchange_session.agent_id or header_agent_id
+                        )
+                        _session_user_bound.set(True)
+                        intention = (
+                            request.headers.get("x-intaris-intention", "").strip()
+                            or None
+                        )
+                        _session_intention.set(intention)
+                        return await call_next(request)
+
                 # Extract token from Authorization header
                 token = _extract_token(request)
                 if not token:
@@ -713,10 +740,14 @@ def create_app() -> Starlette:
     if ui_static_dir.is_dir() and any(ui_static_dir.iterdir()):
 
         async def _ui_redirect(request: Request) -> RedirectResponse:
-            return RedirectResponse("/ui/", status_code=301)
+            qs = str(request.query_params)
+            target = f"/ui/?{qs}" if qs else "/ui/"
+            return RedirectResponse(target, status_code=302)
 
         async def _root_redirect(request: Request) -> RedirectResponse:
-            return RedirectResponse("/ui/", status_code=301)
+            qs = str(request.query_params)
+            target = f"/ui/?{qs}" if qs else "/ui/"
+            return RedirectResponse(target, status_code=302)
 
         routes.append(Route("/", _root_redirect))
         routes.append(Route("/ui", _ui_redirect))

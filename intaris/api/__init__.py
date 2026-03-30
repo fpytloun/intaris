@@ -27,6 +27,7 @@ def create_api_app() -> FastAPI:
 
     from intaris.api.analysis import router as analysis_router
     from intaris.api.audit import router as audit_router
+    from intaris.api.auth import router as auth_router
     from intaris.api.evaluate import router as evaluate_router
     from intaris.api.events import router as events_router
     from intaris.api.info import router as info_router
@@ -34,6 +35,7 @@ def create_api_app() -> FastAPI:
     from intaris.api.mcp import router as mcp_router
     from intaris.api.notifications import router as notifications_router
 
+    app.include_router(auth_router, tags=["auth"])
     app.include_router(evaluate_router, tags=["evaluate"])
     app.include_router(intention_router, tags=["sessions"])
     app.include_router(audit_router, tags=["audit"])
