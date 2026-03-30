@@ -496,16 +496,76 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     const assistantContext = state.lastAssistantText || undefined
     state.lastAssistantText = ""
 
-    const reasoningResult = await callApi(
-      "POST",
-      "/api/v1/reasoning",
-      {
-        session_id: state.intarisSessionId,
-        content: `User message: ${userText}`,
-        ...(assistantContext && { context: assistantContext }),
-      },
-      30000,
-    )
+    let reasoningResult: { error?: string; status?: number }
+
+    if (sessionRecording) {
+      // When session recording is enabled, record the user message
+      // event first, flush synchronously to ensure it's in the event
+      // store, then trigger reasoning with from_events=true to avoid
+      // re-sending the content that's already been recorded.
+      // The flush must complete before the reasoning call so Intaris
+      // can resolve the user message from the event store.
+      recordEvent(sessionId, {
+        type: "message",
+        data: {
+          role: "user",
+          text: userText,
+          agent: input?.agent,
+          model: input?.model,
+          messageID: effectiveMessageId,
+          sessionID: input?.sessionID || sessionId,
+        },
+      })
+
+      // Await the flush directly instead of using the fire-and-forget
+      // flushRecordingBuffer helper — the /reasoning call depends on
+      // the events being persisted server-side.
+      if (state.intarisSessionId && state.recordingBuffer.length > 0) {
+        const events = state.recordingBuffer.splice(0)
+        await callApi(
+          "POST",
+          `/api/v1/session/${encodeURIComponent(state.intarisSessionId)}/events`,
+          events,
+          5000,
+          { "X-Intaris-Source": "opencode" },
+        ).catch(() => {})
+      }
+
+      reasoningResult = await callApi(
+        "POST",
+        "/api/v1/reasoning",
+        {
+          session_id: state.intarisSessionId,
+          content: "",
+          from_events: true,
+        },
+        30000,
+      )
+    } else {
+      // Without recording, send the content directly via /reasoning.
+      reasoningResult = await callApi(
+        "POST",
+        "/api/v1/reasoning",
+        {
+          session_id: state.intarisSessionId,
+          content: `User message: ${userText}`,
+          ...(assistantContext && { context: assistantContext }),
+        },
+        30000,
+      )
+
+      recordEvent(sessionId, {
+        type: "message",
+        data: {
+          role: "user",
+          text: userText,
+          agent: input?.agent,
+          model: input?.model,
+          messageID: effectiveMessageId,
+          sessionID: input?.sessionID || sessionId,
+        },
+      })
+    }
 
     if (reasoningResult.error) {
       await client.app.log({
@@ -522,18 +582,6 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     state.reasoningSentForMessageId = effectiveMessageId
     state.pendingUserMessageId = null
     state.pendingUserText = ""
-
-    recordEvent(sessionId, {
-      type: "message",
-      data: {
-        role: "user",
-        text: userText,
-        agent: input?.agent,
-        model: input?.model,
-        messageID: effectiveMessageId,
-        sessionID: input?.sessionID || sessionId,
-      },
-    })
   }
 
   // -- Recording Helpers ---------------------------------------------------

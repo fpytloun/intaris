@@ -255,9 +255,11 @@ export class IntarisClient {
     content: string,
     agentId?: string,
     context?: string,
+    fromEvents?: boolean,
   ): Promise<ApiResult> {
     const body: Record<string, unknown> = { session_id: sessionId, content };
     if (context) body.context = context;
+    if (fromEvents) body.from_events = true;
     return this.callApi("POST", "/api/v1/reasoning", body, 2000, undefined, agentId);
   }
 

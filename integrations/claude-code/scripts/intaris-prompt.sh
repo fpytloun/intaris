@@ -83,12 +83,21 @@ fi
 
 log "Forwarding user message to /reasoning (session: $INTARIS_SESSION_ID)"
 
-# Build reasoning request body
-REASONING_BODY=$(jq -n \
-    --arg sid "$INTARIS_SESSION_ID" \
-    --arg content "User message: $PROMPT" \
-    --arg context "$LAST_ASSISTANT_TEXT" \
-    '{session_id: $sid, content: $content} + (if $context != "" then {context: $context} else {} end)')
+# Build reasoning request body.
+# When session recording is enabled, the user message event was already
+# recorded above. Use from_events=true so Intaris reads it from the event
+# store instead of re-sending the content in the request body.
+if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
+    REASONING_BODY=$(jq -n \
+        --arg sid "$INTARIS_SESSION_ID" \
+        '{session_id: $sid, content: "", from_events: true}')
+else
+    REASONING_BODY=$(jq -n \
+        --arg sid "$INTARIS_SESSION_ID" \
+        --arg content "User message: $PROMPT" \
+        --arg context "$LAST_ASSISTANT_TEXT" \
+        '{session_id: $sid, content: $content} + (if $context != "" then {context: $context} else {} end)')
+fi
 
 # Send POST /reasoning (5s timeout — endpoint is fast, stores record + triggers async update)
 RESPONSE=$(curl -s --max-time 5 \

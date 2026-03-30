@@ -286,7 +286,11 @@ class ReasoningRequest(BaseModel):
     """Request to submit agent reasoning."""
 
     session_id: str = Field(..., description="Session identifier")
-    content: str = Field(..., max_length=65536, description="Agent reasoning text")
+    content: str = Field(
+        "",
+        max_length=65536,
+        description="Agent reasoning text. Required when from_events is false.",
+    )
     context: str | None = Field(
         None,
         max_length=65536,
@@ -297,6 +301,24 @@ class ReasoningRequest(BaseModel):
             "for judge evaluation context."
         ),
     )
+    from_events: bool = Field(
+        False,
+        description=(
+            "Resolve content and context from the session's event store "
+            "instead of the request body. When true, reads the latest "
+            "user_message as content and the latest assistant_message as "
+            "context. Useful when the client already recorded events and "
+            "wants to trigger intention update without re-sending data."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_from_events(self) -> ReasoningRequest:
+        if self.from_events and self.content:
+            raise ValueError("content must be empty when from_events is true")
+        if not self.from_events and not self.content:
+            raise ValueError("content is required when from_events is false")
+        return self
 
 
 class ReasoningResponse(BaseModel):

@@ -65,7 +65,7 @@ After starting OpenClaw, open the Intaris management UI at `http://localhost:806
 The plugin registers 10 hooks plus an optional tool factory via OpenClaw's `api.on()` system:
 
 1. **`session_start`**: Creates an Intaris session via `POST /api/v1/intention` with session ID format `oc-{uuid}`. Handles 409 conflict (session already exists) by reusing the session.
-2. **`before_agent_start`**: Forwards the user prompt as reasoning context via `POST /api/v1/reasoning`. Includes the last assistant message as context to help interpret short user replies (e.g., "ok, do it").
+2. **`before_agent_start`**: Forwards the user prompt as reasoning context via `POST /api/v1/reasoning`. When session recording is enabled, the user message event is recorded first and `/reasoning` is called with `from_events=true` to avoid re-sending content. Otherwise, includes the last assistant message as context to help interpret short user replies (e.g., "ok, do it").
 3. **`before_tool_call`**: Core guardrail -- evaluates every tool call via `POST /api/v1/evaluate`:
    - **approve**: tool executes normally
    - **deny**: blocks execution with `{ block: true, blockReason: "[intaris] DENIED: ..." }`
@@ -95,7 +95,7 @@ When `mcpTools` is enabled (default), the plugin registers a tool factory that:
 
 The plugin supports Intaris's behavioral analysis pipeline:
 
-- **Intention tracking**: User messages are forwarded as reasoning context. The `intention_pending` flag coordinates with the IntentionBarrier so the server waits for reasoning before evaluating.
+- **Intention tracking**: User messages are forwarded as reasoning context. When session recording is enabled, the plugin uses `from_events=true` on `/reasoning` to avoid duplicate data transmission — Intaris resolves the user message and assistant context from the event store. The `intention_pending` flag coordinates with the IntentionBarrier so the server waits for reasoning before evaluating.
 - **Periodic checkpoints**: Every `checkpointInterval` evaluate calls, sends a checkpoint with call counts, decision breakdown, and recent tool names.
 - **Session completion**: On session end, sends completion status and agent summary with session statistics.
 - **Hierarchical sessions**: Sub-agent sessions are created with `parent_session_id` and depth tracking for chain analysis.

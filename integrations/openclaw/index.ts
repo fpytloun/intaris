@@ -789,31 +789,69 @@ const intarisPlugin = {
       if (stateRef.lastReasoningPrompt === cleanUserText) return;
       stateRef.lastReasoningPrompt = cleanUserText;
 
-      // Forward clean user message as reasoning context
-      client
-        .submitReasoning(
-          stateRef.intarisSessionId!,
-          `User message: ${cleanUserText}`,
-          ctx.agentId,
-          assistantContext,
-        )
-        .catch(() => {});
+      if (cfg.recording) {
+        // When session recording is enabled, record the user message
+        // event first, flush synchronously to ensure it's in the event
+        // store, then trigger reasoning with from_events=true to avoid
+        // re-sending the content that's already been recorded.
+        // The flush must complete before the reasoning call so Intaris
+        // can resolve the user message from the event store.
+        recordEvent(sessionKey, {
+          type: "message",
+          data: {
+            role: "user",
+            text: cleanUserText,
+            sender: userSender,
+            sessionKey,
+          },
+        });
+
+        // Await the flush directly instead of using the fire-and-forget
+        // flushRecordingBuffer helper — the /reasoning call depends on
+        // the events being persisted server-side.
+        const flushState = sessions.get(sessionKey);
+        if (flushState?.intarisSessionId && flushState.recordingBuffer.length > 0) {
+          const events = flushState.recordingBuffer.splice(0);
+          await client.appendEvents(flushState.intarisSessionId, events, ctx.agentId).catch(() => {});
+        }
+
+        client
+          .submitReasoning(
+            stateRef.intarisSessionId!,
+            "",
+            ctx.agentId,
+            undefined,
+            true,
+          )
+          .catch(() => {});
+      } else {
+        // Without recording, send the content directly via /reasoning.
+        client
+          .submitReasoning(
+            stateRef.intarisSessionId!,
+            `User message: ${cleanUserText}`,
+            ctx.agentId,
+            assistantContext,
+          )
+          .catch(() => {});
+
+        // Record clean user message for session recording (no-op when
+        // recording is disabled since recordEvent checks cfg.recording).
+        recordEvent(sessionKey, {
+          type: "message",
+          data: {
+            role: "user",
+            text: cleanUserText,
+            sender: userSender,
+            sessionKey,
+          },
+        });
+      }
 
       // Signal that an intention update is in flight. The next
       // before_tool_call will include intention_pending=true so the
       // server waits for the /reasoning call to arrive before evaluating.
       stateRef.intentionPending = true;
-
-      // Record clean user message for session recording.
-      recordEvent(sessionKey, {
-        type: "message",
-        data: {
-          role: "user",
-          text: cleanUserText,
-          sender: userSender,
-          sessionKey,
-        },
-      });
     });
 
     // -- before_tool_call: Core guardrail ------------------------------------

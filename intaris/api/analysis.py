@@ -95,6 +95,11 @@ async def submit_reasoning(
     Not included in safety evaluation prompts. User messages (prefixed
     with "User message:") may be included in intention refinement
     prompts as they represent the user's own words, not agent text.
+
+    When ``from_events`` is true, the endpoint resolves the reasoning
+    content and context from the session's event store instead of the
+    request body. This avoids re-sending data that the client already
+    recorded via ``POST /session/{id}/events``.
     """
     from intaris.server import _get_db
 
@@ -118,16 +123,48 @@ async def submit_reasoning(
         # Verify session exists and belongs to user
         session_store.get(request.session_id, user_id=ctx.user_id)
 
+        # Resolve content and context from the event store when requested.
+        # The client already recorded the events; we read them back to
+        # populate the audit store and trigger the IntentionBarrier.
+        resolved_from_events = False
+        if request.from_events:
+            from intaris.events.resolve import resolve_last_user_message
+
+            event_store = getattr(http_request.app.state, "event_store", None)
+            if event_store is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="from_events requires an enabled event store",
+                )
+
+            resolved = resolve_last_user_message(
+                event_store, ctx.user_id, request.session_id
+            )
+            if resolved is None:
+                # No user message found — return success as no-op.
+                # The client may have called this before events were flushed,
+                # or no user messages exist yet.
+                return ReasoningResponse(ok=True, call_id="")
+
+            user_content, assistant_context = resolved
+            # Construct the same format as direct callers use
+            content = f"User message: {user_content}"
+            context = assistant_context
+            resolved_from_events = True
+        else:
+            content = request.content
+            context = request.context
+
         # Sanitize and store
-        sanitized = _sanitize_agent_text(request.content)
+        sanitized = _sanitize_agent_text(content)
         call_id = str(uuid.uuid4())
 
         # Store associated context (if provided) in args_redacted.
         # Context is opaque supplementary data (e.g., assistant's last
         # response, structured metadata) — sanitized before storage.
         context_data: dict[str, Any] | None = None
-        if request.context:
-            sanitized_ctx = _sanitize_agent_text(request.context)
+        if context:
+            sanitized_ctx = _sanitize_agent_text(context)
             if sanitized_ctx:
                 context_data = {"context": sanitized_ctx}
 
@@ -157,10 +194,11 @@ async def submit_reasoning(
         # Only triggers for user messages, not agent reasoning.
         if sanitized.startswith("User message:"):
             logger.info(
-                "Received user message for %s/%s (context_len=%d)",
+                "Received user message for %s/%s (from_events=%s, context_len=%d)",
                 ctx.user_id,
                 request.session_id,
-                len(request.context or ""),
+                resolved_from_events,
+                len(context or ""),
             )
             barrier = getattr(http_request.app.state, "intention_barrier", None)
             if barrier is not None:
@@ -168,7 +206,7 @@ async def submit_reasoning(
                     await barrier.trigger(
                         ctx.user_id,
                         request.session_id,
-                        context=request.context,
+                        context=context,
                     )
                 except Exception:
                     logger.debug(
@@ -176,29 +214,34 @@ async def submit_reasoning(
                         exc_info=True,
                     )
 
-        # Auto-append to event store (session recording)
-        event_store = getattr(http_request.app.state, "event_store", None)
-        if event_store is not None:
-            try:
-                event_store.append(
-                    ctx.user_id,
-                    request.session_id,
-                    [
-                        {
-                            "type": "reasoning",
-                            "data": {
-                                "call_id": call_id,
-                                "content": sanitized,
-                                "record_type": "reasoning",
-                            },
-                        }
-                    ],
-                    source="intaris",
-                )
-            except Exception:
-                logger.debug("Failed to auto-append reasoning event", exc_info=True)
+        # Auto-append to event store (session recording).
+        # Skip when content was resolved from events — the data is
+        # already in the event store and appending would duplicate it.
+        if not resolved_from_events:
+            event_store = getattr(http_request.app.state, "event_store", None)
+            if event_store is not None:
+                try:
+                    event_store.append(
+                        ctx.user_id,
+                        request.session_id,
+                        [
+                            {
+                                "type": "reasoning",
+                                "data": {
+                                    "call_id": call_id,
+                                    "content": sanitized,
+                                    "record_type": "reasoning",
+                                },
+                            }
+                        ],
+                        source="intaris",
+                    )
+                except Exception:
+                    logger.debug("Failed to auto-append reasoning event", exc_info=True)
 
         return ReasoningResponse(ok=True, call_id=call_id)
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except Exception:
