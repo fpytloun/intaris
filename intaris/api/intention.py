@@ -66,6 +66,7 @@ async def declare_intention(
             user_id=ctx.user_id,
             session_id=request.session_id,
             intention=request.intention,
+            title=request.title,
             details=request.details,
             policy=request.policy,
             parent_session_id=request.parent_session_id,

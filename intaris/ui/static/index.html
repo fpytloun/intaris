@@ -456,7 +456,7 @@
                         :title="'Created: ' + formatTime(session.created_at)"></span>
                 </div>
               </div>
-              <div class="mt-2 text-sm text-secondary" x-html="highlightMatch(truncate(session.intention, 120))"></div>
+              <div class="mt-2 text-sm text-secondary" x-html="highlightMatch(truncate(session.title || session.intention, 120))"></div>
 
               <!-- Expanded Detail -->
               <div x-show="expandedId === session.session_id" x-cloak @click.stop class="mt-4 pt-4 border-t border-brand-border">
@@ -491,7 +491,13 @@
                   <span>User: <span class="font-mono" x-text="session.user_id"></span></span>
                 </div>
 
-                <!-- Intention -->
+                <!-- Title + Intention -->
+                <template x-if="session.title">
+                  <div class="mb-3">
+                    <div class="text-xs text-muted mb-1">Title</div>
+                    <div class="text-sm font-medium" x-text="session.title"></div>
+                  </div>
+                </template>
                 <div class="mb-3">
                   <div class="text-xs text-muted mb-1">Intention</div>
                   <div class="text-sm" x-text="session.intention"></div>

@@ -36,6 +36,7 @@ class SessionStore:
         policy: dict[str, Any] | None = None,
         parent_session_id: str | None = None,
         agent_id: str | None = None,
+        title: str | None = None,
     ) -> dict[str, Any]:
         """Create a new session.
 
@@ -46,9 +47,10 @@ class SessionStore:
             details: Optional JSON-serializable session details
                      (repo, branch, constraints, etc.).
             policy: Optional JSON-serializable session policy
-                    (custom classifier rules, risk overrides).
+                     (custom classifier rules, risk overrides).
             parent_session_id: Optional parent session for continuation chains.
             agent_id: Optional agent identifier (from X-Agent-Id header).
+            title: Optional short topic label for the session.
 
         Returns:
             The created session as a dict.
@@ -67,8 +69,8 @@ class SessionStore:
                     INSERT INTO sessions
                         (session_id, user_id, intention, details, policy,
                          last_activity_at, parent_session_id, agent_id,
-                         created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         title, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session_id,
@@ -79,6 +81,7 @@ class SessionStore:
                         now,
                         parent_session_id,
                         agent_id,
+                        title,
                         now,
                         now,
                     ),
@@ -170,8 +173,9 @@ class SessionStore:
         intention: str | None = None,
         details: dict[str, Any] | None = None,
         intention_source: str | None = None,
+        title: str | None = None,
     ) -> dict[str, Any]:
-        """Update session intention and/or details.
+        """Update session intention, title, and/or details.
 
         Only updates fields that are provided (not None).
 
@@ -183,6 +187,7 @@ class SessionStore:
             intention_source: How the intention was set: "initial",
                 "user" (from user message), or "bootstrap" (one-time
                 refinement from tool patterns). Optional.
+            title: Short topic label for the session (optional).
 
         Returns:
             Updated session as a dict.
@@ -190,7 +195,12 @@ class SessionStore:
         Raises:
             ValueError: If session not found.
         """
-        if intention is None and details is None and intention_source is None:
+        if (
+            intention is None
+            and details is None
+            and intention_source is None
+            and title is None
+        ):
             return self.get(session_id, user_id=user_id)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -206,6 +216,9 @@ class SessionStore:
         if intention_source is not None:
             sets.append("intention_source = ?")
             params.append(intention_source)
+        if title is not None:
+            sets.append("title = ?")
+            params.append(title)
 
         params.extend([session_id, user_id])
 

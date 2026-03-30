@@ -90,6 +90,7 @@ function sessionsTab() {
           this.sessions.unshift({
             session_id: data.session_id,
             user_id: data.user_id,
+            title: data.title || null,
             intention: data.intention || '',
             status: data.status || 'active',
             total_calls: 0,
@@ -122,6 +123,7 @@ function sessionsTab() {
       if (data.type === 'session_updated') {
         const session = this.sessions.find(s => s.session_id === data.session_id);
         if (session) {
+          if (data.title !== undefined) session.title = data.title;
           if (data.intention) session.intention = data.intention;
           if (data.details) session.details = data.details;
           session.last_activity_at = new Date().toISOString();
@@ -129,6 +131,7 @@ function sessionsTab() {
         }
         // Also update the expanded session if it's the same one
         if (this.expandedSession && this.expandedSession.session_id === data.session_id) {
+          if (data.title !== undefined) this.expandedSession.title = data.title;
           if (data.intention) this.expandedSession.intention = data.intention;
           if (data.details) this.expandedSession.details = data.details;
           this.expandedSession.last_activity_at = new Date().toISOString();

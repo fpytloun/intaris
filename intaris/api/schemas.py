@@ -117,6 +117,11 @@ class IntentionRequest(BaseModel):
 
     session_id: str = Field(..., description="Session identifier")
     intention: str = Field(..., max_length=500, description="Declared session purpose")
+    title: str | None = Field(
+        None,
+        max_length=120,
+        description="Short topic label for the session (≤50 chars recommended)",
+    )
     details: dict[str, Any] | None = Field(
         None, description="Session details (repo, branch, constraints)"
     )
@@ -156,6 +161,7 @@ class SessionResponse(BaseModel):
     session_id: str
     user_id: str
     agent_id: str | None = None
+    title: str | None = None
     intention: str
     details: dict[str, Any] | None = None
     policy: dict[str, Any] | None = None

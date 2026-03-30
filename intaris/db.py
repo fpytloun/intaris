@@ -413,6 +413,10 @@ class Database:
             conn.execute("ALTER TABLE audit_log ADD COLUMN judge_reasoning TEXT")
             logger.info("Migration: added judge_reasoning column to audit_log")
 
+        if not self._sqlite_column_exists(conn, "sessions", "title"):
+            conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
+            logger.info("Migration: added title column to sessions")
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
             "ON sessions(status, last_activity_at)"
@@ -1196,6 +1200,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     agent_id TEXT,
     alignment_overridden BOOLEAN DEFAULT FALSE,
     last_alignment TEXT,
+    title TEXT,
     PRIMARY KEY (user_id, session_id)
 );
 

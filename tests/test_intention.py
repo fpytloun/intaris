@@ -17,7 +17,11 @@ import pytest
 
 from intaris.config import DBConfig
 from intaris.db import Database
-from intaris.intention import IntentionBarrier, generate_intention
+from intaris.intention import (
+    IntentionBarrier,
+    _parse_title_intention,
+    generate_intention,
+)
 from intaris.session import SessionStore
 
 
@@ -1041,3 +1045,85 @@ class TestEvaluatorRecordTypeFilter:
         # Verify get_recent was called with record_type="tool_call"
         assert len(calls) >= 1
         assert calls[0].get("record_type") == "tool_call"
+
+
+# ── _parse_title_intention tests ──────────────────────────────────────
+
+
+class TestParseTitleIntention:
+    """Tests for _parse_title_intention JSON parsing helper."""
+
+    def test_valid_json(self):
+        raw = '{"title": "Fix login bug", "intention": "User is debugging a login issue."}'
+        title, intention = _parse_title_intention(raw)
+        assert title == "Fix login bug"
+        assert intention == "User is debugging a login issue."
+
+    def test_valid_json_with_whitespace(self):
+        raw = '  \n  {"title": "Deploy app", "intention": "Deploying the application to production."}\n  '
+        title, intention = _parse_title_intention(raw)
+        assert title == "Deploy app"
+        assert intention == "Deploying the application to production."
+
+    def test_json_with_markdown_fences(self):
+        raw = '```json\n{"title": "Setup CI", "intention": "Configuring CI pipeline."}\n```'
+        title, intention = _parse_title_intention(raw)
+        assert title == "Setup CI"
+        assert intention == "Configuring CI pipeline."
+
+    def test_markdown_fences_no_lang(self):
+        raw = '```\n{"title": "Auth flow", "intention": "Implementing OAuth2 authentication."}\n```'
+        title, intention = _parse_title_intention(raw)
+        assert title == "Auth flow"
+        assert intention == "Implementing OAuth2 authentication."
+
+    def test_fallback_plain_text(self):
+        raw = "User is debugging a login issue in the Flask application."
+        title, intention = _parse_title_intention(raw, current_title="Old Title")
+        assert title == "Old Title"
+        assert intention == raw
+
+    def test_fallback_preserves_none_title(self):
+        raw = "User is working on the project."
+        title, intention = _parse_title_intention(raw)
+        assert title is None
+        assert intention == raw
+
+    def test_empty_title_becomes_none(self):
+        raw = '{"title": "", "intention": "User is doing something."}'
+        title, intention = _parse_title_intention(raw)
+        assert title is None
+        assert intention == "User is doing something."
+
+    def test_missing_title_key(self):
+        raw = '{"intention": "User is doing something."}'
+        title, intention = _parse_title_intention(raw)
+        assert title is None
+        assert intention == "User is doing something."
+
+    def test_too_short_intention_falls_back(self):
+        raw = '{"title": "Test", "intention": "Hi"}'
+        title, intention = _parse_title_intention(raw, current_title="Old")
+        # intention < 5 chars triggers fallback to plain text
+        assert title == "Old"
+        assert "Hi" in intention  # entire raw JSON becomes intention
+
+    def test_title_truncated_to_120(self):
+        long_title = "A" * 200
+        raw = f'{{"title": "{long_title}", "intention": "User is doing something."}}'
+        title, intention = _parse_title_intention(raw)
+        assert title is not None
+        assert len(title) == 120
+        assert intention == "User is doing something."
+
+    def test_quoted_plain_text_stripped(self):
+        raw = '"User is debugging an issue."'
+        title, intention = _parse_title_intention(raw)
+        assert title is None
+        assert intention == "User is debugging an issue."
+
+    def test_invalid_json(self):
+        raw = '{"title": "Broken'
+        title, intention = _parse_title_intention(raw, current_title="Keep This")
+        assert title == "Keep This"
+        assert '{"title": "Broken' in intention

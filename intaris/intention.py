@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import time
 from typing import Any
@@ -34,6 +35,61 @@ from intaris.sanitize import (
 from intaris.session import SessionStore
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_title_intention(
+    raw: str, current_title: str | None = None
+) -> tuple[str | None, str]:
+    """Parse structured JSON output from the intention LLM.
+
+    Expected format::
+
+        {"title": "short topic label", "intention": "2-3 sentence description"}
+
+    Falls back to treating the entire output as plain-text intention if
+    JSON parsing fails. This ensures intention generation is never broken
+    by the title addition — the intention is always extracted.
+
+    Args:
+        raw: Raw LLM output string.
+        current_title: Current session title (preserved on parse failure).
+
+    Returns:
+        A ``(title, intention)`` tuple. Title may be ``None`` if the LLM
+        didn't provide one or if parsing failed.
+    """
+    stripped = raw.strip()
+
+    # Strip markdown code fences if the LLM wraps JSON in them
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        # Remove first line (```json or ```) and last line (```)
+        inner_lines = []
+        for line in lines[1:]:
+            if line.strip() == "```":
+                break
+            inner_lines.append(line)
+        stripped = "\n".join(inner_lines).strip()
+
+    try:
+        data = json.loads(stripped)
+        if isinstance(data, dict):
+            title = (data.get("title") or "").strip()[:120] or None
+            intention = (data.get("intention") or "").strip()
+            if intention and len(intention) >= 5:
+                return title, intention
+            # intention too short — fall through to plaintext
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    # Fallback: treat entire output as intention, preserve current title
+    intention = stripped.strip('"').strip("'")
+    logger.debug(
+        "Intention LLM returned non-JSON output (%d chars), falling back to plain text",
+        len(intention),
+    )
+    return current_title, intention
+
 
 # Default barrier timeout in milliseconds.
 # Budget (hooks): 5s barrier + 4s LLM eval = 9s max.
@@ -138,7 +194,9 @@ def generate_intention(
     details = session.get("details") or {}
     wd = details.get("working_directory", "unknown")
 
+    current_title = session.get("title")
     prompt_parts = [
+        f"Current title: {sanitize_for_prompt(current_title or 'none')}",
         f"Current intention: {sanitize_for_prompt(session.get('intention', 'unknown'))}",
         f"Working directory: {wd}",
     ]
@@ -183,25 +241,39 @@ def generate_intention(
         prompt_parts.append(
             f"Recent tool calls:\n{wrap_with_boundary(safe_tools, 'tool_summary')}"
         )
-    prompt_parts.append("Generate a concise session description:")
+    prompt_parts.append("Generate the updated title and intention:")
 
     messages = [
         {
             "role": "system",
             "content": (
-                "You update a session's intention description. "
+                "You update a session's title and intention description. "
                 "Sessions are long-lived and cover multiple topics over time.\n\n"
-                "Rules:\n"
+                "Output a JSON object with exactly two fields:\n"
+                '{"title": "short topic label", '
+                '"intention": "updated intention description"}\n\n'
+                "Title rules:\n"
+                "- 50 characters or less, single line\n"
+                "- Describe what the user is working on, not tools used\n"
+                "- Keep technical terms, filenames, error codes exact\n"
+                "- Remove articles (the, this, my, a, an) to save space\n"
+                "- Keep the existing title unless the topic has "
+                "fundamentally shifted\n"
+                "- If the session covers multiple topics, focus on the "
+                "most recent active topic\n"
+                "- Write in English regardless of user message language\n\n"
+                "Intention rules:\n"
                 "- Always write the intention in English, regardless of the "
                 "language of user messages or existing intention text\n"
-                "- Retain goals from the current intention that are still relevant\n"
+                "- Retain goals from the current intention that are still "
+                "relevant\n"
                 "- Add new goals introduced in recent user messages\n"
                 "- Remove goals only when clearly completed or abandoned\n"
                 "- When in doubt, keep a topic\n"
                 "- User messages are the primary signal — focus on goals, "
                 "not tools used\n"
                 "- Keep the result to 2-3 sentences\n\n"
-                "Output only the updated intention text, nothing else.\n\n"
+                "Output only the JSON object, nothing else.\n\n"
                 f"{ANTI_INJECTION_PREAMBLE}"
             ),
         },
@@ -213,7 +285,7 @@ def generate_intention(
 
     try:
         raw = llm.generate(messages, max_tokens=500)
-        intention = raw.strip().strip('"').strip("'")
+        title, intention = _parse_title_intention(raw, current_title)
         if not intention or len(intention) < 5:
             logger.info(
                 "LLM returned too-short intention (%d chars) for session=%s",
@@ -227,6 +299,7 @@ def generate_intention(
             user_id=user_id,
             intention=intention,
             intention_source=intention_source,
+            title=title,
         )
 
         # Publish event
@@ -237,6 +310,7 @@ def generate_intention(
                     "session_id": session_id,
                     "user_id": user_id,
                     "intention": intention,
+                    "title": title,
                 }
             )
 
