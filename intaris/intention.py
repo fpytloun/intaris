@@ -78,7 +78,14 @@ def _parse_title_intention(
             intention = (data.get("intention") or "").strip()
             if intention and len(intention) >= 5:
                 return title, intention
-            # intention too short — fall through to plaintext
+            # JSON parsed but intention too short — return empty intention
+            # so generate_intention() returns None (skips the update)
+            # rather than storing raw JSON as the intention text.
+            logger.debug(
+                "Intention LLM returned JSON with too-short intention (%d chars)",
+                len(intention),
+            )
+            return current_title, ""
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
@@ -302,17 +309,18 @@ def generate_intention(
             title=title,
         )
 
-        # Publish event
+        # Publish event (omit title when None to prevent overwriting
+        # a previously-set title in the UI via WebSocket)
         if event_bus is not None:
-            event_bus.publish(
-                {
-                    "type": "session_updated",
-                    "session_id": session_id,
-                    "user_id": user_id,
-                    "intention": intention,
-                    "title": title,
-                }
-            )
+            event: dict = {
+                "type": "session_updated",
+                "session_id": session_id,
+                "user_id": user_id,
+                "intention": intention,
+            }
+            if title is not None:
+                event["title"] = title
+            event_bus.publish(event)
 
         return intention
     except Exception as e:

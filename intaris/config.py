@@ -149,6 +149,13 @@ class ServerConfig:
     # Max evaluations per session per minute (0 = no limit).
     rate_limit: int = field(default_factory=lambda: _env_int("RATE_LIMIT", 60))
 
+    # Whether to set the Secure flag on cookies (exchange session SSO).
+    # Defaults to True for production safety. Set COOKIE_SECURE=false
+    # for local development over plain HTTP.
+    cookie_secure: bool = field(
+        default_factory=lambda: _env_bool("COOKIE_SECURE", True)
+    )
+
 
 @dataclass
 class WebhookConfig:

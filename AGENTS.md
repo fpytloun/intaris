@@ -175,6 +175,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `INTARIS_API_KEY` | Single shared API key (auth only, no user binding) |
 | `INTARIS_API_KEYS` | JSON dict mapping API keys to user_ids (`{"key": "user", "key2": "*"}`) |
 | `RATE_LIMIT` | Max evaluations per session per minute (default 60, 0 = no limit) |
+| `COOKIE_SECURE` | Set the Secure flag on SSO cookies (default `true`). Set to `false` for local development over plain HTTP. |
 | `WEBHOOK_URL` | Cognis webhook URL for escalation callbacks (optional) |
 | `WEBHOOK_SECRET` | HMAC-SHA256 secret for signing webhook payloads (required if WEBHOOK_URL is set) |
 | `WEBHOOK_TIMEOUT_MS` | Webhook HTTP timeout in milliseconds (default 3000) |

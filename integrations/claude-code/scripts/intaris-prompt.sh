@@ -64,19 +64,28 @@ build_headers
 
 # -- Record user message event FIRST (before the slow /reasoning call) -------
 # This ensures the event is recorded even if the hook times out during
-# the /reasoning POST. Recording is fire-and-forget (2s timeout).
+# the /reasoning POST. We capture the HTTP status to decide whether
+# from_events=true is safe — if the event POST failed, we fall back to
+# sending content directly in the reasoning request body.
 
+EVENT_RECORDED=false
 if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
     RECORD_BODY=$(jq -n \
         --arg prompt "$PROMPT" \
         '[{type: "message", data: {role: "user", text: $prompt}}]')
 
-    curl -s --max-time 2 \
+    EVENT_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 \
         -X POST \
         "${HEADERS[@]}" \
         -H "X-Intaris-Source: claude-code" \
         -d "$RECORD_BODY" \
-        "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
+        "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" 2>/dev/null || echo "000")
+
+    if [ "$EVENT_STATUS" = "200" ]; then
+        EVENT_RECORDED=true
+    else
+        log "Event recording failed (HTTP $EVENT_STATUS), will send content directly"
+    fi
 fi
 
 # -- Forward user message to /reasoning for intention tracking ---------------
@@ -84,10 +93,11 @@ fi
 log "Forwarding user message to /reasoning (session: $INTARIS_SESSION_ID)"
 
 # Build reasoning request body.
-# When session recording is enabled, the user message event was already
-# recorded above. Use from_events=true so Intaris reads it from the event
-# store instead of re-sending the content in the request body.
-if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
+# When event recording succeeded, the user message is already in the event
+# store. Use from_events=true so Intaris reads it back instead of
+# re-sending the content. If recording failed or is disabled, send the
+# content directly in the request body.
+if [ "$EVENT_RECORDED" = "true" ]; then
     REASONING_BODY=$(jq -n \
         --arg sid "$INTARIS_SESSION_ID" \
         '{session_id: $sid, content: "", from_events: true}')

@@ -203,9 +203,9 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 # Check exchange session cookie (cross-service SSO via token exchange).
                 # Only checked when auth is configured — prevents stale cookies from
                 # authenticating requests when auth is later disabled.
-                from intaris.api.auth import get_exchange_session
+                from intaris.api.auth import _COOKIE_NAME, get_exchange_session
 
-                exchange_cookie = request.cookies.get("intaris_exchange_session", "")
+                exchange_cookie = request.cookies.get(_COOKIE_NAME, "")
                 if exchange_cookie:
                     exchange_session = get_exchange_session(exchange_cookie)
                     if exchange_session:

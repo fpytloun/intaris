@@ -1101,12 +1101,13 @@ class TestParseTitleIntention:
         assert title is None
         assert intention == "User is doing something."
 
-    def test_too_short_intention_falls_back(self):
+    def test_too_short_intention_returns_empty(self):
         raw = '{"title": "Test", "intention": "Hi"}'
         title, intention = _parse_title_intention(raw, current_title="Old")
-        # intention < 5 chars triggers fallback to plain text
+        # intention < 5 chars returns empty string (causes generate_intention
+        # to return None and skip the update) instead of storing raw JSON
         assert title == "Old"
-        assert "Hi" in intention  # entire raw JSON becomes intention
+        assert intention == ""
 
     def test_title_truncated_to_120(self):
         long_title = "A" * 200

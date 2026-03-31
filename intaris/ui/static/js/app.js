@@ -183,6 +183,11 @@ document.addEventListener('alpine:init', () => {
             // Cookie set by response — proceed with cookie auth
             await this.tryCookieAuth();
             if (this.authenticated) return;
+            // Exchange succeeded (cookie set) but session verification
+            // failed. The token is single-use, so retrying the link
+            // won't work. Show an actionable error.
+            this.error = 'SSO session created but verification failed. Please reload the page or use an API key.';
+            return;
           }
         } catch (e) { console.warn('Exchange token auth failed, falling back:', e); }
       }

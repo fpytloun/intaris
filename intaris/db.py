@@ -1173,6 +1173,26 @@ CREATE TABLE IF NOT EXISTS notification_channels (
 
 CREATE INDEX IF NOT EXISTS idx_notification_channels_user
     ON notification_channels(user_id, enabled);
+
+-- Exchange token SSO: server-side sessions (multi-worker safe)
+CREATE TABLE IF NOT EXISTS exchange_sessions (
+    token       TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    agent_id    TEXT,
+    expires_at  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_sessions_expires
+    ON exchange_sessions(expires_at);
+
+-- Exchange token SSO: consumed JTIs for single-use enforcement
+CREATE TABLE IF NOT EXISTS consumed_jtis (
+    jti         TEXT PRIMARY KEY,
+    expires_at  REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_consumed_jtis_expires
+    ON consumed_jtis(expires_at);
 """
 
 
@@ -1407,4 +1427,24 @@ CREATE TABLE IF NOT EXISTS notification_channels (
 
 CREATE INDEX IF NOT EXISTS idx_notification_channels_user
     ON notification_channels(user_id, enabled);
+
+-- Exchange token SSO: server-side sessions (multi-worker safe)
+CREATE TABLE IF NOT EXISTS exchange_sessions (
+    token       TEXT PRIMARY KEY,
+    user_id     TEXT NOT NULL,
+    agent_id    TEXT,
+    expires_at  DOUBLE PRECISION NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_exchange_sessions_expires
+    ON exchange_sessions(expires_at);
+
+-- Exchange token SSO: consumed JTIs for single-use enforcement
+CREATE TABLE IF NOT EXISTS consumed_jtis (
+    jti         TEXT PRIMARY KEY,
+    expires_at  DOUBLE PRECISION NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_consumed_jtis_expires
+    ON consumed_jtis(expires_at);
 """
