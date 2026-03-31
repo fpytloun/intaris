@@ -756,6 +756,7 @@ class Database:
                 ("session_summaries", "summary_type", "TEXT NOT NULL DEFAULT 'window'"),
                 ("audit_log", "resolved_by", "TEXT"),
                 ("audit_log", "judge_reasoning", "TEXT"),
+                ("sessions", "title", "TEXT"),
             ]
             for table, column, col_type in migrations:
                 cur.execute(
