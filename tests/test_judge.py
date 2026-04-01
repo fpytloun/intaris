@@ -654,6 +654,165 @@ class TestJudgeReviewer:
 
         asyncio.run(_test())
 
+    def test_advisory_high_confidence_deny_stays_deny(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """In advisory mode, high-confidence deny stays as deny (obvious threat)."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "deny",
+                    "reasoning": "Destructive rm -rf / command, clearly malicious",
+                    "confidence": "high",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] == "deny"
+            assert record["resolved_by"] == "judge"
+            assert mock_metrics.judge_denials_total == 1
+
+        asyncio.run(_test())
+
+    def test_advisory_medium_confidence_deny_becomes_defer(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """In advisory mode, medium-confidence deny is converted to defer."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "deny",
+                    "reasoning": "Might be outside scope but not certain",
+                    "confidence": "medium",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] is None  # Not resolved — deferred
+            assert "original_decision=deny" in record["judge_reasoning"]
+            assert mock_metrics.judge_deferrals_total == 1
+
+        asyncio.run(_test())
+
+    def test_advisory_low_confidence_deny_becomes_defer(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """In advisory mode, low-confidence deny is converted to defer."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "deny",
+                    "reasoning": "Uncertain about this operation",
+                    "confidence": "low",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] is None  # Not resolved — deferred
+            assert "original_decision=deny" in record["judge_reasoning"]
+            assert mock_metrics.judge_deferrals_total == 1
+
+        asyncio.run(_test())
+
+    def test_advisory_mode_prompt_contains_advisory_rules(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """Advisory mode injects advisory-specific decision rules into prompt."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "approve",
+                    "reasoning": "Safe",
+                    "confidence": "high",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            # Verify the system prompt contains advisory-specific language
+            call_args = mock_llm.generate.call_args
+            messages = call_args[0][0]
+            system_content = messages[0]["content"]
+            assert "Advisory Mode" in system_content
+            assert "Defer is your default" in system_content
+            assert "unambiguously dangerous" in system_content
+
+        asyncio.run(_test())
+
     def test_llm_failure_leaves_unresolved(
         self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
     ):
@@ -1096,10 +1255,13 @@ class TestJudgePrompt:
         assert "sub-session" in prompt.lower()
 
     def test_system_prompt_has_anti_injection(self):
-        from intaris.judge import JUDGE_SYSTEM_PROMPT
+        from intaris.judge import _DECISION_RULES_AUTO, JUDGE_SYSTEM_PROMPT
         from intaris.sanitize import ANTI_INJECTION_PREAMBLE
 
-        formatted = JUDGE_SYSTEM_PROMPT.format(anti_injection=ANTI_INJECTION_PREAMBLE)
+        formatted = JUDGE_SYSTEM_PROMPT.format(
+            decision_rules=_DECISION_RULES_AUTO,
+            anti_injection=ANTI_INJECTION_PREAMBLE,
+        )
         assert "boundary tags" in formatted.lower() or "BOUNDARY" in formatted
 
     def test_reasoning_not_truncated_at_200(self):
@@ -1341,10 +1503,13 @@ class TestJudgePrompt:
 
     def test_system_prompt_has_subsession_trust_model(self):
         """System prompt includes sub-session trust model guidance."""
-        from intaris.judge import JUDGE_SYSTEM_PROMPT
+        from intaris.judge import _DECISION_RULES_AUTO, JUDGE_SYSTEM_PROMPT
         from intaris.sanitize import ANTI_INJECTION_PREAMBLE
 
-        formatted = JUDGE_SYSTEM_PROMPT.format(anti_injection=ANTI_INJECTION_PREAMBLE)
+        formatted = JUDGE_SYSTEM_PROMPT.format(
+            decision_rules=_DECISION_RULES_AUTO,
+            anti_injection=ANTI_INJECTION_PREAMBLE,
+        )
         assert "Sub-Session Trust Model" in formatted
         assert "parent agent" in formatted
         assert "human user" in formatted

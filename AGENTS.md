@@ -144,7 +144,7 @@ intaris/
 
 9. **User-driven intention model**: Session intention is immutable except by user action. Agent tool calls never redefine intention. The `IntentionBarrier` pattern ensures the evaluator sees the freshest user-stated intention by coordinating between `/reasoning` (trigger) and `/evaluate` (wait). See [Intention Model](#intention-model) below.
 
-10. **Judge auto-resolution**: Escalated tool calls can be automatically reviewed by a more capable LLM (judge). Fail-open design — judge LLM failure leaves escalation for human review. Deny-if-uncertain in auto mode. Shared `resolve_with_side_effects()` handler ensures human and judge resolution paths have identical side effects. Human users can override any judge decision (deny→approve or approve→deny) via the UI; human decisions are final. See [Judge Auto-Resolution](#judge-auto-resolution) below.
+10. **Judge auto-resolution**: Escalated tool calls can be automatically reviewed by a more capable LLM (judge). Fail-open design — judge LLM failure leaves escalation for human review. Deny-if-uncertain in auto mode. Defer-preferring in advisory mode — only unambiguously dangerous calls are denied; everything borderline goes to the human. Shared `resolve_with_side_effects()` handler ensures human and judge resolution paths have identical side effects. Human users can override any judge decision (deny→approve or approve→deny) via the UI; human decisions are final. See [Judge Auto-Resolution](#judge-auto-resolution) below.
 
 ## Multi-tenancy
 
@@ -681,7 +681,7 @@ When a tool call is escalated, the judge — a more capable LLM (default gpt-5.4
 |---|---|
 | `disabled` (default) | No judge. Escalations require human resolution. |
 | `auto` | Judge auto-resolves: approve or deny. Deny if uncertain (low confidence or defer). |
-| `advisory` | Judge reviews: approve, deny, or defer to human. Deferred escalations remain unresolved with judge reasoning visible in the UI. |
+| `advisory` | Judge reviews with a defer-preferring prompt. Denies only unambiguously dangerous/malicious calls (high confidence). Low/medium confidence denials are converted to deferrals. Deferred escalations remain unresolved with judge reasoning visible in the UI. |
 
 ### Notification modes (`JUDGE_NOTIFY_MODE`)
 
