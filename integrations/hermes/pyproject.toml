@@ -1,0 +1,43 @@
+[project]
+name = "hermes-intaris"
+version = "0.1.0"
+description = "Hermes Agent plugin for Intaris — tool call safety guardrails with session management and MCP proxy"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Filip Pytloun", email = "filip@pytloun.cz" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = [
+    "hermes",
+    "hermes-agent",
+    "plugin",
+    "guardrails",
+    "intaris",
+    "safety",
+    "tool-evaluation",
+]
+
+[project.urls]
+Homepage = "https://github.com/fpytloun/intaris/tree/main/integrations/hermes"
+Repository = "https://github.com/fpytloun/intaris.git"
+Issues = "https://github.com/fpytloun/intaris/issues"
+
+[project.entry-points."hermes_agent.plugins"]
+intaris = "hermes_intaris"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["hermes_intaris"]

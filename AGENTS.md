@@ -1118,6 +1118,15 @@ Client integrations live in `integrations/` and provide two approaches for each 
 - **Behavioral analysis**: Tracks per-session statistics (call count, approve/deny/escalate breakdown, recent tools). Forwards user messages as reasoning context. Sends periodic checkpoints via `POST /checkpoint`. Signals completion via `PATCH /session/{id}/status` + `POST /session/{id}/agent-summary` on session end.
 - **MCP tool proxy**: When `INTARIS_MCP_TOOLS=true`, registers upstream MCP tools as native OpenClaw `AgentTool` objects. Tool calls proxied through `POST /api/v1/mcp/call`. Skips `before_tool_call` evaluation for MCP tools to avoid double evaluation.
 
+### Hermes Agent
+
+- **Plugin**: `hermes-intaris` — Python plugin distributed via PyPI ([`hermes-intaris`](https://pypi.org/project/hermes-intaris/)). Uses Hermes's `register(ctx)` plugin system with 6 hooks (`on_session_start`, `on_session_end`, `pre_llm_call`, `post_llm_call`, `pre_tool_call`, `post_tool_call`) plus **tool registry wrapping** for full blocking capability and an optional MCP tool factory.
+- **Tool wrapping**: Since Hermes `pre_tool_call` hooks cannot block tool execution (return value is ignored), the plugin wraps every tool handler in the Hermes tool registry with an Intaris evaluation guard. Plugins load after built-in tools, so the plugin captures original handlers and re-registers with guarded wrappers that call `POST /api/v1/evaluate` before dispatching.
+- **Env vars**: `INTARIS_URL`, `INTARIS_API_KEY`, `INTARIS_USER_ID`, `INTARIS_FAIL_OPEN` (default: `false`), `INTARIS_ALLOW_PATHS`, `INTARIS_ESCALATION_TIMEOUT` (default: `0`), `INTARIS_CHECKPOINT_INTERVAL` (default: `25`), `INTARIS_SESSION_RECORDING` (default: `false`), `INTARIS_MCP_TOOLS` (default: `true`), `INTARIS_MCP_TOOLS_CACHE_TTL_S` (default: `900`).
+- **Install**: `pip install hermes-intaris` (auto-discovered via `hermes_agent.plugins` entry point). Or copy `hermes_intaris/` to `~/.hermes/plugins/intaris/`.
+- **Behavioral analysis**: Tracks per-session statistics (call count, approve/deny/escalate breakdown, recent tools). Forwards user messages as reasoning context via `pre_llm_call`. Sends periodic checkpoints via `POST /checkpoint`. Signals completion via `PATCH /session/{id}/status` + `POST /session/{id}/agent-summary` on session end.
+- **MCP tool proxy**: When `INTARIS_MCP_TOOLS=true`, registers upstream MCP tools as native Hermes tools via `ctx.register_tool()`. Tool calls proxied through `POST /api/v1/mcp/call`. MCP tools are not wrapped by the registry guard to avoid double evaluation.
+
 ### Tool name conventions
 
 Different clients use different tool naming conventions:
@@ -1127,6 +1136,7 @@ Different clients use different tool naming conventions:
 | **OpenCode** | `read`, `edit`, `write`, `bash` | `server_tool` (single underscore, e.g., `mnemory_add_memory`) |
 | **Claude Code** | `Read`, `Edit`, `Write`, `Bash` (capitalized) | `mcp__server__tool` (double underscore, e.g., `mcp__mnemory__add_memory`) |
 | **OpenClaw** | Native tool names | `server_tool` (single underscore via tool factory, e.g., `mnemory_add_memory`) |
+| **Hermes Agent** | `terminal`, `read_file`, `write_file`, `search_files` | `server_tool` (single underscore via plugin, e.g., `mnemory_add_memory`) |
 | **Intaris MCP proxy** | N/A | `server_name:tool_name` (colon, e.g., `mnemory:add_memory`) |
 
 Session policies (fnmatch patterns) must use the naming convention of the integration approach being used.

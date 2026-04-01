@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-04-02
+
+### Added
+
+- **Hermes Agent integration** -- Full `hermes-intaris` Python plugin with tool registry wrapping, session management, escalation polling, MCP tool proxy, session recording, and reasoning context forwarding. Published via PyPI with `hermes_agent.plugins` entry point. Includes CI workflow for automated publishing on tag.
+- **Cross-service SSO** -- Exchange token endpoint (`POST /api/v1/auth/exchange`) for Cognis-to-Intaris single sign-on. Cookie-based session auth with `cognis_session` cookie support.
+- **Session titles** -- Auto-generated session titles alongside intention updates for better session identification in the UI.
+- **Event store reasoning resolution** -- `from_events` flag on `/reasoning` endpoint to resolve user message content from the event store, avoiding duplicate content when session recording is enabled.
+- **Advisory mode defer-preferring** -- Judge advisory mode now defers borderline cases to human review instead of denying, only auto-denying unambiguously dangerous calls.
+
+### Fixed
+
+- **Decision matrix** -- Low/medium risk LLM denials are now escalated instead of denied, matching the documented decision matrix behavior.
+- **PostgreSQL migration** -- Add missing `title` column migration for PostgreSQL deployments.
+- **Auth hardening** -- Fix review findings in exchange token SSO flow.
+
+### Changed
+
+- **OpenCode plugin** -- When session recording is enabled, user messages are recorded to the event store first and `/reasoning` is called with `from_events=true` to avoid duplicate content.
+- **OpenClaw plugin** -- Same `from_events` recording flow as OpenCode for consistency.
+
 ## [0.3.2] - 2026-03-28
 
 ### Added
@@ -100,6 +121,8 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.4.0]: https://github.com/fpytloun/intaris/compare/v0.3.2...v0.4.0
+[0.3.2]: https://github.com/fpytloun/intaris/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/fpytloun/intaris/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/fpytloun/intaris/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/fpytloun/intaris/compare/v0.1.0...v0.2.0
