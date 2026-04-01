@@ -5,12 +5,17 @@ results to final decisions. Also handles standalone escalation behavior
 (deny with message when no Cognis controller is available).
 
 Decision priority (first match wins):
-1. critical risk (any alignment) → AUTO-DENY
-2. LLM returned "deny"          → DENY
-3. aligned + low risk            → APPROVE
-4. aligned + medium risk         → APPROVE
-5. aligned + high risk           → ESCALATE
-6. not aligned + any risk        → ESCALATE
+1. critical risk (any alignment)          → AUTO-DENY
+2. LLM returned "deny" + high risk       → DENY
+3. LLM returned "deny" + low/medium risk → ESCALATE
+4. aligned + low risk                     → APPROVE
+5. aligned + medium risk                  → APPROVE
+6. aligned + high risk                    → ESCALATE
+7. not aligned + any risk                 → ESCALATE
+
+The first-level LLM should never deny low/medium risk calls when
+escalation is available. Low/medium risk denials are converted to
+escalations so the judge or human can make the final call.
 
 Standalone escalation behavior:
 When Intaris runs without Cognis, escalations cannot be routed to a
@@ -81,17 +86,35 @@ def apply_decision_matrix(evaluation: EvaluationResult) -> Decision:
             path="llm",
         )
 
-    # Priority 6 (checked early): LLM explicitly said deny
+    # Priority 2-3: LLM explicitly said deny
+    # Only honor deny for high/critical risk. Low/medium risk denials
+    # are escalated — let the judge or human make the final call.
     if evaluation.decision == "deny":
-        logger.info("Decision: DENY (LLM recommended deny)")
-        return Decision(
-            decision="deny",
-            risk=risk,
-            reasoning=evaluation.reasoning,
-            path="llm",
-        )
+        if risk in ("high", "critical"):
+            logger.info("Decision: DENY (LLM recommended deny, %s risk)", risk)
+            return Decision(
+                decision="deny",
+                risk=risk,
+                reasoning=evaluation.reasoning,
+                path="llm",
+            )
+        else:
+            logger.info(
+                "Decision: ESCALATE (LLM recommended deny but %s risk "
+                "— escalating instead)",
+                risk,
+            )
+            return Decision(
+                decision="escalate",
+                risk=risk,
+                reasoning=(
+                    f"LLM recommended deny but risk is {risk} "
+                    f"— escalating for review. {evaluation.reasoning}"
+                ),
+                path="llm",
+            )
 
-    # Priority 2-3: Aligned + low/medium risk → approve
+    # Priority 4-5: Aligned + low/medium risk → approve
     if aligned and risk in ("low", "medium"):
         logger.info("Decision: APPROVE (aligned, %s risk)", risk)
         return Decision(
@@ -101,7 +124,7 @@ def apply_decision_matrix(evaluation: EvaluationResult) -> Decision:
             path="llm",
         )
 
-    # Priority 4: Aligned + high risk → escalate
+    # Priority 6: Aligned + high risk → escalate
     if aligned and risk == "high":
         logger.info("Decision: ESCALATE (aligned but high risk)")
         return Decision(
@@ -111,7 +134,7 @@ def apply_decision_matrix(evaluation: EvaluationResult) -> Decision:
             path="llm",
         )
 
-    # Priority 5: Not aligned → escalate
+    # Priority 7: Not aligned → escalate
     if not aligned:
         logger.info("Decision: ESCALATE (not aligned, %s risk)", risk)
         return Decision(

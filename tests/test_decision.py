@@ -40,7 +40,7 @@ class TestDecisionMatrix:
         assert result.decision == "deny"
 
     def test_aligned_low_risk_approve(self):
-        """Priority 2: Aligned + low risk → approve."""
+        """Aligned + low risk → approve."""
         result = apply_decision_matrix(
             EvaluationResult(
                 aligned=True,
@@ -52,7 +52,7 @@ class TestDecisionMatrix:
         assert result.decision == "approve"
 
     def test_aligned_medium_risk_approve(self):
-        """Priority 3: Aligned + medium risk → approve."""
+        """Aligned + medium risk → approve."""
         result = apply_decision_matrix(
             EvaluationResult(
                 aligned=True,
@@ -64,7 +64,7 @@ class TestDecisionMatrix:
         assert result.decision == "approve"
 
     def test_aligned_high_risk_escalate(self):
-        """Priority 4: Aligned + high risk → escalate."""
+        """Aligned + high risk → escalate."""
         result = apply_decision_matrix(
             EvaluationResult(
                 aligned=True,
@@ -76,7 +76,7 @@ class TestDecisionMatrix:
         assert result.decision == "escalate"
 
     def test_not_aligned_escalate(self):
-        """Priority 5: Not aligned → escalate regardless of risk."""
+        """Not aligned → escalate regardless of risk."""
         for risk in ("low", "medium", "high"):
             result = apply_decision_matrix(
                 EvaluationResult(
@@ -88,8 +88,20 @@ class TestDecisionMatrix:
             )
             assert result.decision == "escalate", f"Expected escalate for risk={risk}"
 
-    def test_llm_deny_respected(self):
-        """Priority 6: LLM explicitly said deny → deny."""
+    def test_llm_deny_high_risk_respected(self):
+        """LLM deny + high risk → deny (honored)."""
+        result = apply_decision_matrix(
+            EvaluationResult(
+                aligned=True,
+                risk="high",
+                reasoning="Dangerous operation",
+                decision="deny",
+            )
+        )
+        assert result.decision == "deny"
+
+    def test_llm_deny_low_risk_escalates(self):
+        """LLM deny + low risk → escalate (not deny)."""
         result = apply_decision_matrix(
             EvaluationResult(
                 aligned=True,
@@ -98,7 +110,21 @@ class TestDecisionMatrix:
                 decision="deny",
             )
         )
-        assert result.decision == "deny"
+        assert result.decision == "escalate"
+        assert "escalating for review" in result.reasoning.lower()
+
+    def test_llm_deny_medium_risk_escalates(self):
+        """LLM deny + medium risk → escalate (not deny)."""
+        result = apply_decision_matrix(
+            EvaluationResult(
+                aligned=False,
+                risk="medium",
+                reasoning="Not aligned but medium risk",
+                decision="deny",
+            )
+        )
+        assert result.decision == "escalate"
+        assert "escalating for review" in result.reasoning.lower()
 
     def test_reasoning_preserved(self):
         result = apply_decision_matrix(

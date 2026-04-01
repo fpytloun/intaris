@@ -126,7 +126,7 @@ intaris/
 
 1. **Default-deny classifier**: Explicit read-only allowlist. Everything not allowlisted goes through LLM evaluation. Unknown tools and third-party MCP tools are always classified as WRITE.
 
-2. **Priority-ordered decision matrix**: Critical risk → deny (always). Aligned + low/medium → approve. Aligned + high → escalate. Not aligned → escalate. LLM deny → deny.
+2. **Priority-ordered decision matrix**: Critical risk → deny (always). LLM deny + high risk → deny. LLM deny + low/medium risk → escalate (first-level LLM never denies low/medium risk). Aligned + low/medium → approve. Aligned + high → escalate. Not aligned → escalate.
 
 3. **Standalone escalation**: Without Cognis, escalations are denied with message directing user to Intaris UI. With Cognis, escalations go through webhook callback to approval queue.
 
