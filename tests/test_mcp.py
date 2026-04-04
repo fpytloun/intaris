@@ -959,14 +959,25 @@ class TestSafePathComponent:
             MCPConnectionManager._is_safe_path_component("user+test@example.com")
             is True
         )
+        assert (
+            MCPConnectionManager._is_safe_path_component(
+                "customer/department=shipping@example.com"
+            )
+            is True
+        )
         assert MCPConnectionManager._is_safe_path_component("User_Name") is True
+
+    def test_encode_cache_component(self):
+        assert (
+            MCPConnectionManager._encode_cache_component(
+                "customer/department=shipping+ops@example.com"
+            )
+            == "customer%2Fdepartment%3Dshipping%2Bops%40example.com"
+        )
 
     def test_invalid_components(self):
         assert MCPConnectionManager._is_safe_path_component("") is False
         assert MCPConnectionManager._is_safe_path_component("..") is False
         assert MCPConnectionManager._is_safe_path_component("../etc") is False
         assert MCPConnectionManager._is_safe_path_component("a" * 257) is False
-        assert (
-            MCPConnectionManager._is_safe_path_component("-starts-with-dash") is False
-        )
-        assert MCPConnectionManager._is_safe_path_component("has spaces") is False
+        assert MCPConnectionManager._is_safe_path_component("user\x00id") is False

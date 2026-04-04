@@ -32,7 +32,6 @@ import asyncio
 import io
 import logging
 import os
-import re
 import shutil
 import threading
 import time
@@ -40,6 +39,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, TextIO, cast
+from urllib.parse import quote
 
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
@@ -92,10 +92,6 @@ _MAX_CONNECTIONS_PER_USER = 10
 
 # Background sweep interval for idle connection cleanup.
 _SWEEP_INTERVAL_SECONDS = 60
-
-# Safe path component pattern (prevents path traversal in cache dirs while
-# allowing email-style plus addressing in user IDs).
-_SAFE_PATH_COMPONENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@+-]*$")
 
 
 @dataclass
@@ -606,8 +602,10 @@ class MCPConnectionManager:
         if basename not in ("npx", "npx.cmd", "uvx"):
             return ""
 
-        # Sanitize user_id to prevent path traversal.
-        if not self._is_safe_path_component(user_id):
+        # Encode user_id to prevent path traversal while supporting full email
+        # local-part syntax and other identifier characters.
+        encoded_user_id = self._encode_cache_component(user_id)
+        if not encoded_user_id:
             logger.warning(
                 "Skipping cache isolation for server '%s': "
                 "user_id %r contains unsafe characters",
@@ -616,22 +614,32 @@ class MCPConnectionManager:
             )
             return ""
 
-        # server_name is already validated by MCPServerStore._validate_name()
-        # but double-check for defense-in-depth.
-        if not self._is_safe_path_component(server_name):
+        encoded_server_name = self._encode_cache_component(server_name)
+        if not encoded_server_name:
             return ""
 
         subdir = "npm" if basename in ("npx", "npx.cmd") else "uv"
-        return os.path.join(self._cache_dir, user_id, server_name, subdir)
+        return os.path.join(
+            self._cache_dir, encoded_user_id, encoded_server_name, subdir
+        )
 
     @staticmethod
     def _is_safe_path_component(value: str) -> bool:
-        """Check if a value is safe to use as a filesystem path component."""
+        """Return True when a value can be encoded into a cache path component."""
         if not value or len(value) > 256:
             return False
         if ".." in value:
             return False
-        return bool(_SAFE_PATH_COMPONENT.match(value))
+        if "\x00" in value:
+            return False
+        return True
+
+    @staticmethod
+    def _encode_cache_component(value: str) -> str:
+        """Encode an identifier into a safe single cache path component."""
+        if not MCPConnectionManager._is_safe_path_component(value):
+            return ""
+        return quote(value, safe="")
 
     # ── Connection lifecycle ──────────────────────────────────────
 

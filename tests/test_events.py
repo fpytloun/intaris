@@ -10,6 +10,7 @@ Tests cover:
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -135,6 +136,8 @@ class TestPathValidation:
         _validate_path_component("sess-123", "session_id")
         _validate_path_component("user@example.com", "user_id")
         _validate_path_component("user+test@example.com", "user_id")
+        _validate_path_component("customer/department=shipping@example.com", "user_id")
+        _validate_path_component("o'hara!#$%&'*+=?^_`{|}~@example.com", "user_id")
         _validate_path_component("a.b.c", "user_id")
         _validate_path_component("user:agent", "user_id")
 
@@ -150,9 +153,7 @@ class TestPathValidation:
         with pytest.raises(ValueError, match="must not contain"):
             _validate_path_component("../etc/passwd", "user_id")
 
-    def test_invalid_chars_raises(self):
-        with pytest.raises(ValueError, match="invalid characters"):
-            _validate_path_component("user id", "user_id")  # space
+    def test_null_byte_raises(self):
         with pytest.raises(ValueError, match="invalid characters"):
             _validate_path_component("user\x00id", "user_id")  # null byte
 
@@ -174,6 +175,21 @@ class TestFilesystemEventBackend:
         assert len(result) == 2
         assert result[0]["seq"] == 1
         assert result[1]["seq"] == 2
+
+    def test_append_and_read_with_full_email_characters(self, backend, fs_config):
+        events = [
+            {"seq": 1, "ts": "2026-01-01T00:00:00Z", "type": "message", "data": {}}
+        ]
+        user_id = "customer/department=shipping+ops@example.com"
+        session_id = "sess:weird/part"
+
+        backend.append(user_id, session_id, events)
+
+        assert backend.read(user_id, session_id) == events
+        base_path = Path(fs_config.filesystem_path)
+        encoded_user = "customer%2Fdepartment%3Dshipping%2Bops%40example.com"
+        encoded_session = "sess%3Aweird%2Fpart"
+        assert (base_path / encoded_user / encoded_session).exists()
 
     def test_read_empty_session(self, backend):
         result = backend.read("alice", "nonexistent")

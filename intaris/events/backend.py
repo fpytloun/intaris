@@ -19,34 +19,48 @@ import re
 import shutil
 from pathlib import Path
 from typing import Any, Iterator, Protocol
+from urllib.parse import quote
 
 from intaris.config import EventStoreConfig
 
 logger = logging.getLogger(__name__)
 
 # Pattern for validating path components (user_id, session_id).
-# Allows common user/session identifiers such as emails with plus-addressing,
-# while still rejecting path traversal and path separators.
-_SAFE_PATH_COMPONENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@+-]*$")
+# Legacy raw path component pattern kept for backward compatibility with
+# existing on-disk directories and S3 object prefixes created before opaque
+# identifier encoding was introduced.
+_LEGACY_SAFE_PATH_COMPONENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@+-]*$")
 
 # Pattern for parsing chunk filenames: seq_000001_000100.ndjson
 _CHUNK_FILENAME = re.compile(r"^seq_(\d{6,})_(\d{6,})\.ndjson$")
 
 
 def _validate_path_component(value: str, name: str) -> None:
-    """Validate a path component to prevent path traversal attacks."""
+    """Validate an identifier before encoding it into a storage-safe path."""
     if not value:
         raise ValueError(f"{name} must not be empty")
     if len(value) > 256:
         raise ValueError(f"{name} too long (max 256 chars)")
     if ".." in value:
         raise ValueError(f"{name} must not contain '..'")
-    if not _SAFE_PATH_COMPONENT.match(value):
+    if "\x00" in value:
         raise ValueError(
             f"{name} contains invalid characters: {value!r}. "
-            "Only alphanumeric, hyphens, underscores, dots, colons, "
-            "at signs, and plus signs are allowed."
+            "Null bytes are not allowed."
         )
+
+
+def _encode_path_component(value: str, name: str) -> str:
+    """Encode an arbitrary identifier into a safe single path component."""
+    _validate_path_component(value, name)
+    return quote(value, safe="")
+
+
+def _legacy_path_component(value: str) -> str | None:
+    """Return the legacy raw component when it was previously supported."""
+    if _LEGACY_SAFE_PATH_COMPONENT.match(value) and ".." not in value:
+        return value
+    return None
 
 
 def _chunk_filename(start_seq: int, end_seq: int) -> str:
@@ -197,16 +211,52 @@ class FilesystemEventBackend:
         self._base_path = Path(config.filesystem_path)
         self._base_path.mkdir(parents=True, exist_ok=True)
 
-    def _session_dir(self, user_id: str, session_id: str) -> Path:
-        """Resolve and validate the session directory path."""
-        _validate_path_component(user_id, "user_id")
-        _validate_path_component(session_id, "session_id")
-        path = (self._base_path / user_id / session_id).resolve()
+    def _resolve_under_base(self, *parts: str) -> Path:
+        """Resolve a path under the backend base directory."""
+        path = (self._base_path.joinpath(*parts)).resolve()
         if not path.is_relative_to(self._base_path.resolve()):
             raise ValueError(
                 "Invalid path components: resolved path escapes base directory"
             )
         return path
+
+    def _session_dir_candidates(self, user_id: str, session_id: str) -> list[Path]:
+        """Return encoded and legacy session directories, without duplicates."""
+        encoded = self._resolve_under_base(
+            _encode_path_component(user_id, "user_id"),
+            _encode_path_component(session_id, "session_id"),
+        )
+        candidates = [encoded]
+        legacy_user = _legacy_path_component(user_id)
+        legacy_session = _legacy_path_component(session_id)
+        if legacy_user and legacy_session:
+            legacy = self._resolve_under_base(legacy_user, legacy_session)
+            if legacy != encoded:
+                candidates.append(legacy)
+        return candidates
+
+    def _session_dir_for_write(self, user_id: str, session_id: str) -> Path:
+        """Return the session directory to write to, preserving legacy paths."""
+        candidates = self._session_dir_candidates(user_id, session_id)
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
+
+    def _user_dir_candidates(self, user_id: str) -> list[Path]:
+        """Return encoded and legacy user directories, without duplicates."""
+        encoded = self._resolve_under_base(_encode_path_component(user_id, "user_id"))
+        candidates = [encoded]
+        legacy_user = _legacy_path_component(user_id)
+        if legacy_user:
+            legacy = self._resolve_under_base(legacy_user)
+            if legacy != encoded:
+                candidates.append(legacy)
+        return candidates
+
+    def _session_dir(self, user_id: str, session_id: str) -> Path:
+        """Resolve and validate the session directory path."""
+        return self._session_dir_for_write(user_id, session_id)
 
     def _list_chunks(self, session_dir: Path) -> list[tuple[int, int, Path]]:
         """List chunk files sorted by start sequence.
@@ -226,7 +276,7 @@ class FilesystemEventBackend:
     def append(self, user_id: str, session_id: str, events: list[dict]) -> None:
         if not events:
             return
-        session_dir = self._session_dir(user_id, session_id)
+        session_dir = self._session_dir_for_write(user_id, session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
 
         start_seq = events[0]["seq"]
@@ -243,8 +293,10 @@ class FilesystemEventBackend:
         after_seq: int = 0,
         limit: int = 0,
     ) -> list[dict]:
-        session_dir = self._session_dir(user_id, session_id)
-        chunks = self._list_chunks(session_dir)
+        chunks: list[tuple[int, int, Path]] = []
+        for session_dir in self._session_dir_candidates(user_id, session_id):
+            chunks.extend(self._list_chunks(session_dir))
+        chunks.sort(key=lambda c: c[0])
 
         result: list[dict] = []
         for start_seq, end_seq, chunk_path in chunks:
@@ -273,8 +325,10 @@ class FilesystemEventBackend:
         if limit <= 0:
             return []
 
-        session_dir = self._session_dir(user_id, session_id)
-        chunks = self._list_chunks(session_dir)
+        chunks: list[tuple[int, int, Path]] = []
+        for session_dir in self._session_dir_candidates(user_id, session_id):
+            chunks.extend(self._list_chunks(session_dir))
+        chunks.sort(key=lambda c: c[0])
         result: list[dict] = []
 
         for _, _, chunk_path in reversed(chunks):
@@ -302,8 +356,10 @@ class FilesystemEventBackend:
         session_id: str,
         after_seq: int = 0,
     ) -> Iterator[dict]:
-        session_dir = self._session_dir(user_id, session_id)
-        chunks = self._list_chunks(session_dir)
+        chunks: list[tuple[int, int, Path]] = []
+        for session_dir in self._session_dir_candidates(user_id, session_id):
+            chunks.extend(self._list_chunks(session_dir))
+        chunks.sort(key=lambda c: c[0])
 
         for start_seq, end_seq, chunk_path in chunks:
             if end_seq <= after_seq:
@@ -314,32 +370,29 @@ class FilesystemEventBackend:
                     yield event
 
     def last_seq(self, user_id: str, session_id: str) -> int:
-        session_dir = self._session_dir(user_id, session_id)
-        chunks = self._list_chunks(session_dir)
+        chunks: list[tuple[int, int, Path]] = []
+        for session_dir in self._session_dir_candidates(user_id, session_id):
+            chunks.extend(self._list_chunks(session_dir))
+        chunks.sort(key=lambda c: c[0])
         if not chunks:
             return 0
         return chunks[-1][1]  # end_seq of last chunk
 
     def delete_session(self, user_id: str, session_id: str) -> None:
-        session_dir = self._session_dir(user_id, session_id)
-        if session_dir.exists():
-            shutil.rmtree(session_dir)
+        for session_dir in self._session_dir_candidates(user_id, session_id):
+            if session_dir.exists():
+                shutil.rmtree(session_dir)
 
     def delete_all_for_user(self, user_id: str) -> None:
-        _validate_path_component(user_id, "user_id")
-        user_dir = (self._base_path / user_id).resolve()
-        if not user_dir.is_relative_to(self._base_path.resolve()):
-            raise ValueError(
-                "Invalid path components: resolved path escapes base directory"
-            )
-        if user_dir.exists():
-            shutil.rmtree(user_dir)
+        for user_dir in self._user_dir_candidates(user_id):
+            if user_dir.exists():
+                shutil.rmtree(user_dir)
 
     def exists(self, user_id: str, session_id: str) -> bool:
-        session_dir = self._session_dir(user_id, session_id)
-        if not session_dir.exists():
-            return False
-        return bool(self._list_chunks(session_dir))
+        for session_dir in self._session_dir_candidates(user_id, session_id):
+            if session_dir.exists() and self._list_chunks(session_dir):
+                return True
+        return False
 
 
 class S3EventBackend:
@@ -378,35 +431,59 @@ class S3EventBackend:
                 logger.warning("Could not create bucket %s: %s", self._bucket, e)
 
     def _prefix(self, user_id: str, session_id: str) -> str:
-        _validate_path_component(user_id, "user_id")
-        _validate_path_component(session_id, "session_id")
-        return f"events/{user_id}/{session_id}/"
+        return (
+            f"events/{_encode_path_component(user_id, 'user_id')}/"
+            f"{_encode_path_component(session_id, 'session_id')}/"
+        )
+
+    def _prefix_candidates(self, user_id: str, session_id: str) -> list[str]:
+        """Return encoded and legacy session prefixes, without duplicates."""
+        encoded = self._prefix(user_id, session_id)
+        candidates = [encoded]
+        legacy_user = _legacy_path_component(user_id)
+        legacy_session = _legacy_path_component(session_id)
+        if legacy_user and legacy_session:
+            legacy = f"events/{legacy_user}/{legacy_session}/"
+            if legacy != encoded:
+                candidates.append(legacy)
+        return candidates
+
+    def _user_prefix_candidates(self, user_id: str) -> list[str]:
+        """Return encoded and legacy user prefixes, without duplicates."""
+        encoded = f"events/{_encode_path_component(user_id, 'user_id')}/"
+        candidates = [encoded]
+        legacy_user = _legacy_path_component(user_id)
+        if legacy_user:
+            legacy = f"events/{legacy_user}/"
+            if legacy != encoded:
+                candidates.append(legacy)
+        return candidates
 
     def _list_chunks(self, user_id: str, session_id: str) -> list[tuple[int, int, str]]:
         """List chunk objects sorted by start sequence.
 
         Returns list of (start_seq, end_seq, key) tuples.
         """
-        prefix = self._prefix(user_id, session_id)
         chunks: list[tuple[int, int, str]] = []
-        continuation_token = None
+        for prefix in self._prefix_candidates(user_id, session_id):
+            continuation_token = None
 
-        while True:
-            kwargs: dict[str, Any] = {"Bucket": self._bucket, "Prefix": prefix}
-            if continuation_token:
-                kwargs["ContinuationToken"] = continuation_token
-            response = self._client.list_objects_v2(**kwargs)
+            while True:
+                kwargs: dict[str, Any] = {"Bucket": self._bucket, "Prefix": prefix}
+                if continuation_token:
+                    kwargs["ContinuationToken"] = continuation_token
+                response = self._client.list_objects_v2(**kwargs)
 
-            for obj in response.get("Contents", []):
-                key = obj["Key"]
-                filename = key.rsplit("/", 1)[-1]
-                parsed = _parse_chunk_filename(filename)
-                if parsed:
-                    chunks.append((parsed[0], parsed[1], key))
+                for obj in response.get("Contents", []):
+                    key = obj["Key"]
+                    filename = key.rsplit("/", 1)[-1]
+                    parsed = _parse_chunk_filename(filename)
+                    if parsed:
+                        chunks.append((parsed[0], parsed[1], key))
 
-            if not response.get("IsTruncated"):
-                break
-            continuation_token = response.get("NextContinuationToken")
+                if not response.get("IsTruncated"):
+                    break
+                continuation_token = response.get("NextContinuationToken")
 
         chunks.sort(key=lambda c: c[0])
         return chunks
@@ -414,7 +491,15 @@ class S3EventBackend:
     def append(self, user_id: str, session_id: str, events: list[dict]) -> None:
         if not events:
             return
-        prefix = self._prefix(user_id, session_id)
+        prefixes = self._prefix_candidates(user_id, session_id)
+        prefix = prefixes[0]
+        for candidate in prefixes:
+            response = self._client.list_objects_v2(
+                Bucket=self._bucket, Prefix=candidate, MaxKeys=1
+            )
+            if response.get("Contents"):
+                prefix = candidate
+                break
         start_seq = events[0]["seq"]
         end_seq = events[-1]["seq"]
         filename = _chunk_filename(start_seq, end_seq)
@@ -513,13 +598,12 @@ class S3EventBackend:
         return chunks[-1][1]  # end_seq of last chunk
 
     def delete_session(self, user_id: str, session_id: str) -> None:
-        prefix = self._prefix(user_id, session_id)
-        self._delete_by_prefix(prefix)
+        for prefix in self._prefix_candidates(user_id, session_id):
+            self._delete_by_prefix(prefix)
 
     def delete_all_for_user(self, user_id: str) -> None:
-        _validate_path_component(user_id, "user_id")
-        prefix = f"events/{user_id}/"
-        self._delete_by_prefix(prefix)
+        for prefix in self._user_prefix_candidates(user_id):
+            self._delete_by_prefix(prefix)
 
     def _delete_by_prefix(self, prefix: str) -> None:
         """Delete all S3 objects under a prefix, respecting the 1000-object batch limit."""
@@ -544,8 +628,10 @@ class S3EventBackend:
             continuation_token = response.get("NextContinuationToken")
 
     def exists(self, user_id: str, session_id: str) -> bool:
-        prefix = self._prefix(user_id, session_id)
-        response = self._client.list_objects_v2(
-            Bucket=self._bucket, Prefix=prefix, MaxKeys=1
-        )
-        return bool(response.get("Contents"))
+        for prefix in self._prefix_candidates(user_id, session_id):
+            response = self._client.list_objects_v2(
+                Bucket=self._bucket, Prefix=prefix, MaxKeys=1
+            )
+            if response.get("Contents"):
+                return True
+        return False
