@@ -134,6 +134,7 @@ class TestPathValidation:
         _validate_path_component("alice", "user_id")
         _validate_path_component("sess-123", "session_id")
         _validate_path_component("user@example.com", "user_id")
+        _validate_path_component("user+test@example.com", "user_id")
         _validate_path_component("a.b.c", "user_id")
         _validate_path_component("user:agent", "user_id")
 

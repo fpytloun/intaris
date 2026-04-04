@@ -93,8 +93,9 @@ _MAX_CONNECTIONS_PER_USER = 10
 # Background sweep interval for idle connection cleanup.
 _SWEEP_INTERVAL_SECONDS = 60
 
-# Safe path component pattern (prevents path traversal in cache dirs).
-_SAFE_PATH_COMPONENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@-]*$")
+# Safe path component pattern (prevents path traversal in cache dirs while
+# allowing email-style plus addressing in user IDs).
+_SAFE_PATH_COMPONENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@+-]*$")
 
 
 @dataclass

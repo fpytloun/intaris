@@ -955,6 +955,10 @@ class TestSafePathComponent:
         assert MCPConnectionManager._is_safe_path_component("user-name") is True
         assert MCPConnectionManager._is_safe_path_component("user.name") is True
         assert MCPConnectionManager._is_safe_path_component("user@example.com") is True
+        assert (
+            MCPConnectionManager._is_safe_path_component("user+test@example.com")
+            is True
+        )
         assert MCPConnectionManager._is_safe_path_component("User_Name") is True
 
     def test_invalid_components(self):

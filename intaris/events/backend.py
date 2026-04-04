@@ -25,9 +25,9 @@ from intaris.config import EventStoreConfig
 logger = logging.getLogger(__name__)
 
 # Pattern for validating path components (user_id, session_id).
-# Same pattern as mnemory — allows alphanumeric, hyphens, underscores,
-# dots, colons, at signs, and forward slashes. Rejects path traversal.
-_SAFE_PATH_COMPONENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@-]*$")
+# Allows common user/session identifiers such as emails with plus-addressing,
+# while still rejecting path traversal and path separators.
+_SAFE_PATH_COMPONENT = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:@+-]*$")
 
 # Pattern for parsing chunk filenames: seq_000001_000100.ndjson
 _CHUNK_FILENAME = re.compile(r"^seq_(\d{6,})_(\d{6,})\.ndjson$")
@@ -45,7 +45,7 @@ def _validate_path_component(value: str, name: str) -> None:
         raise ValueError(
             f"{name} contains invalid characters: {value!r}. "
             "Only alphanumeric, hyphens, underscores, dots, colons, "
-            "at signs, and forward slashes are allowed."
+            "at signs, and plus signs are allowed."
         )
 
 
