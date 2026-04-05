@@ -1081,6 +1081,44 @@ class TestAnalysisEndpoints:
         )
         assert resp.status_code == 404
 
+    def test_submit_reasoning_can_wait_for_intention(self, client_no_auth):
+        """POST /reasoning can return refreshed session fields for bootstrap callers."""
+        headers = {"X-User-Id": "user-reason-wait"}
+        _create_session(client_no_auth, "sess-reason-wait", headers)
+
+        class _Barrier:
+            async def trigger(self, user_id, session_id, *, context=None):
+                del user_id, session_id, context
+
+            async def wait(
+                self,
+                user_id,
+                session_id,
+                *,
+                intention_pending=False,
+                timeout_override=None,
+            ):
+                del user_id, session_id, intention_pending, timeout_override
+                return True
+
+        client_no_auth.app.state.intention_barrier = _Barrier()
+        resp = client_no_auth.post(
+            "/api/v1/reasoning",
+            json={
+                "session_id": "sess-reason-wait",
+                "content": "User message: plan the work",
+                "wait_for_intention": True,
+                "wait_timeout_ms": 500,
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["intention"] == "Test session for unit tests"
+        assert data["updated_at"]
+
     def test_submit_checkpoint(self, client_no_auth):
         """POST /checkpoint stores checkpoint in audit log."""
         headers = {"X-User-Id": "user-chk"}

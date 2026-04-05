@@ -208,6 +208,15 @@ async def submit_reasoning(
                         request.session_id,
                         context=context,
                     )
+                    if request.wait_for_intention:
+                        timeout_override = None
+                        if request.wait_timeout_ms is not None:
+                            timeout_override = request.wait_timeout_ms / 1000.0
+                        await barrier.wait(
+                            ctx.user_id,
+                            request.session_id,
+                            timeout_override=timeout_override,
+                        )
                 except Exception:
                     logger.debug(
                         "Failed to trigger intention barrier",
@@ -239,7 +248,14 @@ async def submit_reasoning(
                 except Exception:
                     logger.debug("Failed to auto-append reasoning event", exc_info=True)
 
-        return ReasoningResponse(ok=True, call_id=call_id)
+        response = ReasoningResponse(ok=True, call_id=call_id)
+        if request.wait_for_intention:
+            refreshed = session_store.get(request.session_id, user_id=ctx.user_id)
+            response.intention = refreshed.get("intention")
+            response.title = refreshed.get("title")
+            response.updated_at = refreshed.get("updated_at")
+
+        return response
     except HTTPException:
         raise
     except ValueError as e:

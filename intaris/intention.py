@@ -482,6 +482,7 @@ class IntentionBarrier:
         session_id: str,
         *,
         intention_pending: bool = False,
+        timeout_override: float | None = None,
     ) -> bool:
         """Wait for a pending intention update to complete.
 
@@ -536,14 +537,16 @@ class IntentionBarrier:
             session_id,
         )
 
+        timeout = timeout_override if timeout_override is not None else self._timeout
+
         try:
-            await asyncio.wait_for(event.wait(), timeout=self._timeout)
+            await asyncio.wait_for(event.wait(), timeout=timeout)
             return True
         except asyncio.TimeoutError:
             self.timeout_count += 1
             logger.warning(
                 "Intention barrier timeout (%.1fs) for user=%s session=%s",
-                self._timeout,
+                timeout,
                 user_id,
                 session_id,
             )

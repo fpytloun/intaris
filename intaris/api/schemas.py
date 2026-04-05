@@ -317,6 +317,19 @@ class ReasoningRequest(BaseModel):
             "wants to trigger intention update without re-sending data."
         ),
     )
+    wait_for_intention: bool = Field(
+        False,
+        description=(
+            "When true, wait briefly for the async intention update triggered by a user "
+            "message before returning. Intended for bootstrap flows only."
+        ),
+    )
+    wait_timeout_ms: int | None = Field(
+        None,
+        ge=1,
+        le=10000,
+        description="Optional timeout override for wait_for_intention in milliseconds.",
+    )
 
     @model_validator(mode="after")
     def _validate_from_events(self) -> ReasoningRequest:
@@ -332,6 +345,15 @@ class ReasoningResponse(BaseModel):
 
     ok: bool = True
     call_id: str = Field(..., description="Audit record call_id")
+    intention: str | None = Field(
+        None, description="Latest generated session intention, if available."
+    )
+    title: str | None = Field(
+        None, description="Latest generated session title, if available."
+    )
+    updated_at: str | None = Field(
+        None, description="Session updated_at timestamp for freshness checks."
+    )
 
 
 class CheckpointRequest(BaseModel):
