@@ -305,7 +305,12 @@ async def update_session_status(
 
     try:
         store = SessionStore(_get_db())
-        store.update_status(session_id, request.status, user_id=ctx.user_id)
+        store.update_status(
+            session_id,
+            request.status,
+            user_id=ctx.user_id,
+            status_reason=request.status_reason,
+        )
 
         # Publish session_status_changed event
         event_bus = getattr(http_request.app.state, "event_bus", None)
@@ -316,6 +321,7 @@ async def update_session_status(
                     "session_id": session_id,
                     "user_id": ctx.user_id,
                     "status": request.status,
+                    "status_reason": request.status_reason,
                 }
             )
 
@@ -332,6 +338,7 @@ async def update_session_status(
                             "data": {
                                 "event": "session_status_changed",
                                 "status": request.status,
+                                "status_reason": request.status_reason,
                             },
                         }
                     ],

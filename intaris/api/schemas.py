@@ -260,6 +260,11 @@ class StatusUpdateRequest(BaseModel):
     status: Literal["active", "idle", "completed", "suspended", "terminated"] = Field(
         ..., description="New session status"
     )
+    status_reason: str | None = Field(
+        None,
+        max_length=500,
+        description="Machine-readable reason for the status change (e.g. source_status=failed).",
+    )
 
 
 class StatusUpdateResponse(BaseModel):

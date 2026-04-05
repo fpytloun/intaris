@@ -81,6 +81,9 @@ function sessionsTab() {
         if (this.page === 1 && (!this.statusFilter || this.statusFilter === 'active')) {
           // Skip if search is active and doesn't match
           if (this.searchQuery) return;
+          // Skip if agent filter is active and doesn't match
+          const selectedAgent = Alpine.store('nav')?.selectedAgent;
+          if (selectedAgent && data.agent_id && data.agent_id !== selectedAgent) return;
           // Deduplicate
           if (this.sessions.some(s => s.session_id === data.session_id)) return;
           const isChild = !!data.parent_session_id;
@@ -90,6 +93,7 @@ function sessionsTab() {
           this.sessions.unshift({
             session_id: data.session_id,
             user_id: data.user_id,
+            agent_id: data.agent_id || null,
             title: data.title || null,
             intention: data.intention || '',
             status: data.status || 'active',

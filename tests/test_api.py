@@ -1535,6 +1535,24 @@ class TestEvaluatorBehavioral:
         assert "status_reason" in data
         assert data["status_reason"] is None
 
+    def test_status_update_with_status_reason_from_request(self, client_no_auth):
+        """PATCH status with status_reason stores and returns the reason."""
+        headers = {"X-User-Id": "user-sr-req"}
+        _create_session(client_no_auth, "sess-sr-req", headers)
+
+        resp = client_no_auth.patch(
+            "/api/v1/session/sess-sr-req/status",
+            json={"status": "terminated", "status_reason": "source_status=failed"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+
+        resp = client_no_auth.get("/api/v1/session/sess-sr-req", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "terminated"
+        assert data["status_reason"] == "source_status=failed"
+
     def test_status_reason_cleared_on_reactivation(self, client_no_auth):
         """Reactivating a session clears status_reason."""
         headers = {"X-User-Id": "user-sr-clear"}
