@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -70,6 +71,9 @@ class Metrics:
         self.judge_overrides_total: int = 0
         # Denial override metrics (ex-post approval of L1 denials)
         self.denial_overrides_total: int = 0
+        self.stale_task_resets_total: int = 0
+        self.task_heartbeat_updates_total: int = 0
+        self.runtime_cache_sweeps_total: int = 0
         # Gauges
         self.sessions_needing_summaries: int = 0
         # Liveness timestamps (ISO 8601)
@@ -104,6 +108,9 @@ class Metrics:
             "judge_errors_total": self.judge_errors_total,
             "judge_overrides_total": self.judge_overrides_total,
             "denial_overrides_total": self.denial_overrides_total,
+            "stale_task_resets_total": self.stale_task_resets_total,
+            "task_heartbeat_updates_total": self.task_heartbeat_updates_total,
+            "runtime_cache_sweeps_total": self.runtime_cache_sweeps_total,
             "sessions_needing_summaries": self.sessions_needing_summaries,
             "last_worker_poll": self.last_worker_poll,
             "last_idle_sweep": self.last_idle_sweep,
@@ -188,7 +195,10 @@ class TaskQueue:
             cur.execute(
                 """
                 UPDATE analysis_tasks
-                SET status = 'running'
+                SET status = 'running',
+                    started_at = ?,
+                    heartbeat_at = ?,
+                    completed_at = NULL
                 WHERE id = (
                     SELECT id FROM analysis_tasks
                     WHERE status = 'pending'
@@ -198,7 +208,7 @@ class TaskQueue:
                 )
                 RETURNING *
                 """,
-                (now,),
+                (now, now, now),
             )
             row = cur.fetchone()
 
@@ -220,11 +230,26 @@ class TaskQueue:
                 UPDATE analysis_tasks
                 SET status = 'completed',
                     result = ?,
-                    completed_at = ?
+                    completed_at = ?,
+                    heartbeat_at = ?
                 WHERE id = ?
                 """,
-                (json.dumps(result) if result else None, now, task_id),
+                (json.dumps(result) if result else None, now, now, task_id),
             )
+
+    def touch_heartbeat(self, task_id: str) -> bool:
+        """Update the heartbeat timestamp for a running task."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE analysis_tasks
+                SET heartbeat_at = ?
+                WHERE id = ? AND status = 'running'
+                """,
+                (now, task_id),
+            )
+            return cur.rowcount > 0
 
     def fail(self, task_id: str, error: str) -> None:
         """Record a task failure with retry logic.
@@ -259,12 +284,14 @@ class TaskQueue:
                     SET status = 'failed',
                         retry_count = ?,
                         result = ?,
-                        completed_at = ?
+                        completed_at = ?,
+                        heartbeat_at = ?
                     WHERE id = ?
                     """,
                     (
                         retry_count,
                         json.dumps({"error": error}),
+                        now.isoformat(),
                         now.isoformat(),
                         task_id,
                     ),
@@ -287,7 +314,10 @@ class TaskQueue:
                     SET status = 'pending',
                         retry_count = ?,
                         result = ?,
-                        next_attempt_at = ?
+                        next_attempt_at = ?,
+                        started_at = NULL,
+                        heartbeat_at = NULL,
+                        completed_at = NULL
                     WHERE id = ?
                     """,
                     (
@@ -314,9 +344,9 @@ class TaskQueue:
         longer than the threshold).
 
         Args:
-            max_age_minutes: Only reset tasks whose next_attempt_at is
-                older than this many minutes. 0 = reset all running tasks
-                (startup behavior).
+            max_age_minutes: Only reset tasks whose heartbeat (or initial
+                started_at fallback) is older than this many minutes.
+                0 = reset all running tasks (startup behavior).
 
         Returns:
             Number of tasks reset.
@@ -329,10 +359,27 @@ class TaskQueue:
             with self._db.cursor() as cur:
                 cur.execute(
                     """
-                    UPDATE analysis_tasks
-                    SET status = 'pending', next_attempt_at = ?
+                    SELECT id, task_type, user_id, session_id, retry_count,
+                           started_at, heartbeat_at
+                    FROM analysis_tasks
                     WHERE status = 'running'
-                      AND next_attempt_at < ?
+                      AND COALESCE(heartbeat_at, started_at, next_attempt_at) < ?
+                    ORDER BY COALESCE(heartbeat_at, started_at, next_attempt_at) ASC
+                    LIMIT 5
+                    """,
+                    (cutoff,),
+                )
+                sample_rows = [dict(row) for row in cur.fetchall()]
+                cur.execute(
+                    """
+                    UPDATE analysis_tasks
+                    SET status = 'pending',
+                        next_attempt_at = ?,
+                        started_at = NULL,
+                        heartbeat_at = NULL,
+                        completed_at = NULL
+                    WHERE status = 'running'
+                      AND COALESCE(heartbeat_at, started_at, next_attempt_at) < ?
                     """,
                     (now, cutoff),
                 )
@@ -341,18 +388,34 @@ class TaskQueue:
             with self._db.cursor() as cur:
                 cur.execute(
                     """
+                    SELECT id, task_type, user_id, session_id, retry_count,
+                           started_at, heartbeat_at
+                    FROM analysis_tasks
+                    WHERE status = 'running'
+                    ORDER BY COALESCE(heartbeat_at, started_at, next_attempt_at) ASC
+                    LIMIT 5
+                    """
+                )
+                sample_rows = [dict(row) for row in cur.fetchall()]
+                cur.execute(
+                    """
                     UPDATE analysis_tasks
-                    SET status = 'pending', next_attempt_at = ?
+                    SET status = 'pending',
+                        next_attempt_at = ?,
+                        started_at = NULL,
+                        heartbeat_at = NULL,
+                        completed_at = NULL
                     WHERE status = 'running'
                     """,
                     (now,),
                 )
                 count = cur.rowcount
         if count > 0:
-            logger.info(
-                "Reset %d stale running tasks to pending (max_age=%dm)",
+            logger.warning(
+                "Reset %d stale running tasks to pending (max_age=%dm, sample=%s)",
                 count,
                 max_age_minutes,
+                sample_rows,
             )
         return count
 
@@ -502,6 +565,8 @@ class BackgroundWorker:
         self.analyzer_ready = config.enabled
         self._event_bus = None
         self._event_store = None
+        self._evaluator = None
+        self._alignment_barrier = None
         self._notification_dispatcher = None
 
     def set_event_bus(self, event_bus) -> None:
@@ -519,6 +584,14 @@ class BackgroundWorker:
         """
         self._event_store = event_store
 
+    def set_evaluator(self, evaluator) -> None:
+        """Set the Evaluator reference for runtime cache sweeping."""
+        self._evaluator = evaluator
+
+    def set_alignment_barrier(self, alignment_barrier) -> None:
+        """Set the AlignmentBarrier reference for runtime cache sweeping."""
+        self._alignment_barrier = alignment_barrier
+
     def set_notification_dispatcher(self, dispatcher) -> None:
         """Set the NotificationDispatcher for behavioral analysis alerts.
 
@@ -535,36 +608,48 @@ class BackgroundWorker:
         catchup — catchup runs in the first worker loop iteration so the
         server can accept requests immediately.
         """
-        if not self._config.enabled:
-            logger.info("Behavioral analysis disabled — background worker not started")
-            return
-
         self._running = True
         self._catchup_event = asyncio.Event()
+        loop_count = 0
 
-        # Launch parallel worker loops (atomic claim prevents double-processing)
-        worker_count = self._config.worker_count
-        for i in range(worker_count):
+        worker_count = 0
+        if self._config.enabled:
+            # Launch parallel worker loops (atomic claim prevents double-processing)
+            worker_count = self._config.worker_count
+            for i in range(worker_count):
+                self._tasks.append(
+                    asyncio.create_task(
+                        self._resilient_loop(f"worker-{i}", self._worker_loop)
+                    )
+                )
+            loop_count += worker_count
+
+            # Launch idle sweeper and periodic scheduler
             self._tasks.append(
                 asyncio.create_task(
-                    self._resilient_loop(f"worker-{i}", self._worker_loop)
+                    self._resilient_loop("idle_sweeper", self._idle_sweeper)
                 )
             )
-
-        # Launch idle sweeper and periodic scheduler
-        self._tasks.append(
-            asyncio.create_task(
-                self._resilient_loop("idle_sweeper", self._idle_sweeper)
+            self._tasks.append(
+                asyncio.create_task(
+                    self._resilient_loop("scheduler", self._periodic_scheduler)
+                )
             )
-        )
-        self._tasks.append(
-            asyncio.create_task(
-                self._resilient_loop("scheduler", self._periodic_scheduler)
+            loop_count += 2
+        else:
+            # Keep lightweight runtime maintenance active even when
+            # behavioral analysis is disabled so session-scoped caches
+            # do not grow without bound.
+            self._tasks.append(
+                asyncio.create_task(
+                    self._resilient_loop(
+                        "runtime_maintenance", self._runtime_maintenance_loop
+                    )
+                )
             )
-        )
+            loop_count += 1
 
         # Add event store flush loop if event store is configured
-        loop_count = worker_count + 2  # workers + sweeper + scheduler
         if self._event_store is not None:
             self._tasks.append(
                 asyncio.create_task(
@@ -575,11 +660,18 @@ class BackgroundWorker:
             )
             loop_count += 1
 
+        if loop_count == 0:
+            self._running = False
+            logger.info("Background worker not started (no active loops configured)")
+            return
+
         logger.info(
-            "Background worker started (%d loops: %d workers, idle_sweeper, "
-            "scheduler%s)",
+            "Background worker started (%d loops: %d workers%s%s)",
             loop_count,
             worker_count,
+            ", idle_sweeper, scheduler"
+            if self._config.enabled
+            else ", runtime_maintenance",
             ", event_store_flusher" if self._event_store is not None else "",
         )
 
@@ -666,7 +758,8 @@ class BackgroundWorker:
             stale_check_counter += 1
             if stale_check_counter >= 50:
                 stale_check_counter = 0
-                self._task_queue.reset_stale_running(max_age_minutes=10)
+                reset_count = self._task_queue.reset_stale_running(max_age_minutes=10)
+                self.metrics.stale_task_resets_total += reset_count
 
             task = self._task_queue.claim_next()
             if task is None:
@@ -679,11 +772,16 @@ class BackgroundWorker:
             task_id = task["id"]
             task_type = task["task_type"]
             logger.info(
-                "Executing %s task %s (attempt %d)",
+                "Executing %s task %s (attempt %d, user=%s, session=%s)",
                 task_type,
                 task_id,
                 task.get("retry_count", 0) + 1,
+                task.get("user_id"),
+                task.get("session_id"),
             )
+
+            start_monotonic = time.monotonic()
+            heartbeat_task = asyncio.create_task(self._task_heartbeat_loop(task_id))
 
             try:
                 if task_type == "summary":
@@ -768,6 +866,17 @@ class BackgroundWorker:
                     raise RuntimeError(f"Task skipped (transient): {skip_reason}")
 
                 self._task_queue.complete(task_id, result)
+                runtime_s = time.monotonic() - start_monotonic
+                logger.info(
+                    "Completed %s task %s in %.2fs (status=%s, session=%s, windows=%s, event_enriched=%s)",
+                    task_type,
+                    task_id,
+                    runtime_s,
+                    result.get("status", "completed"),
+                    task.get("session_id"),
+                    result.get("windows_generated"),
+                    result.get("event_enriched"),
+                )
 
                 # Publish task completion event for real-time UI updates
                 if self._event_bus is not None:
@@ -781,7 +890,16 @@ class BackgroundWorker:
                         }
                     )
             except Exception as e:
-                logger.exception("Task %s failed: %s", task_id, e)
+                runtime_s = time.monotonic() - start_monotonic
+                logger.exception(
+                    "Failed %s task %s after %.2fs (user=%s, session=%s): %s",
+                    task_type,
+                    task_id,
+                    runtime_s,
+                    task.get("user_id"),
+                    task.get("session_id"),
+                    e,
+                )
                 self._task_queue.fail(task_id, str(e))
                 if task_type == "summary":
                     self.metrics.summaries_failed_total += 1
@@ -799,6 +917,29 @@ class BackgroundWorker:
                             "session_id": task.get("session_id"),
                         }
                     )
+            finally:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+
+    async def _task_heartbeat_loop(self, task_id: str) -> None:
+        """Keep a running task alive while it executes.
+
+        Long analysis tasks can legitimately run for many minutes. This
+        periodic heartbeat prevents the stale-task reaper from resetting
+        a live task back to pending mid-execution.
+        """
+        try:
+            while self._running:
+                await asyncio.sleep(60)
+                if self._task_queue.touch_heartbeat(task_id):
+                    self.metrics.task_heartbeat_updates_total += 1
+                else:
+                    return
+        except asyncio.CancelledError:
+            raise
 
     async def _execute_summary_task(self, task: dict[str, Any]) -> dict[str, Any]:
         """Execute a summary generation task.
@@ -1150,6 +1291,13 @@ class BackgroundWorker:
             except Exception:
                 logger.exception("Event store periodic flush failed")
 
+    async def _runtime_maintenance_loop(self) -> None:
+        """Run lightweight cache maintenance when analysis is disabled."""
+        while self._running:
+            await asyncio.sleep(300)
+            self.metrics.last_idle_sweep = datetime.now(timezone.utc).isoformat()
+            self._sweep_runtime_caches()
+
     async def _idle_sweeper(self) -> None:
         """Periodically transition inactive sessions to idle.
 
@@ -1260,6 +1408,8 @@ class BackgroundWorker:
                                 session_id,
                             )
 
+            self._sweep_runtime_caches()
+
     async def _periodic_scheduler(self) -> None:
         """Periodically enqueue analysis for users with new data.
 
@@ -1349,6 +1499,7 @@ class BackgroundWorker:
         """
         # Reset tasks stuck in running state
         reset_count = self._task_queue.reset_stale_running()
+        self.metrics.stale_task_resets_total += reset_count
         if reset_count:
             logger.info("Startup catch-up: reset %d stale tasks", reset_count)
 
@@ -1471,6 +1622,43 @@ class BackgroundWorker:
                     self.metrics.profile_staleness_max_seconds = 0.0
         except Exception:
             logger.debug("Failed to update staleness metric", exc_info=True)
+
+    def _sweep_runtime_caches(self) -> None:
+        """Sweep session-scoped in-memory caches for non-active sessions."""
+        if (
+            self._event_store is None
+            and self._evaluator is None
+            and self._alignment_barrier is None
+        ):
+            return
+
+        try:
+            with self._db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT user_id, session_id FROM sessions
+                    WHERE status IN ('active', 'idle')
+                    """
+                )
+                active_sessions = {(row[0], row[1]) for row in cur.fetchall()}
+
+            removed = 0
+            if self._event_store is not None:
+                removed += self._event_store.sweep_seq_counters(active_sessions)
+            if self._evaluator is not None:
+                removed += self._evaluator.sweep_approved_paths(active_sessions)
+            if self._alignment_barrier is not None:
+                removed += self._alignment_barrier.sweep(active_sessions)
+
+            self.metrics.runtime_cache_sweeps_total += 1
+            if removed:
+                logger.info(
+                    "Swept %d stale runtime cache entries (active_sessions=%d)",
+                    removed,
+                    len(active_sessions),
+                )
+        except Exception:
+            logger.debug("Failed to sweep runtime caches", exc_info=True)
 
 
 def _task_row_to_dict(row: Any) -> dict[str, Any]:

@@ -508,11 +508,13 @@ async def lifespan(app):
     app.state.background_worker = background_worker
     background_worker.set_event_bus(app.state.event_bus)
     background_worker.set_event_store(app.state.event_store)
-    if cfg.analysis.enabled:
-        await background_worker.start()
-        logger.info("Background worker started (analysis enabled)")
-    else:
-        logger.info("Background worker not started (analysis disabled)")
+    background_worker.set_evaluator(_get_evaluator())
+    background_worker.set_alignment_barrier(app.state.alignment_barrier)
+    await background_worker.start()
+    logger.info(
+        "Background worker initialized (analysis_enabled=%s)",
+        cfg.analysis.enabled,
+    )
 
     # Initialize notification dispatcher
     from intaris.notifications.dispatcher import NotificationDispatcher

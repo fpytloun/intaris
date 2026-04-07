@@ -417,6 +417,14 @@ class Database:
             conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
             logger.info("Migration: added title column to sessions")
 
+        if not self._sqlite_column_exists(conn, "analysis_tasks", "started_at"):
+            conn.execute("ALTER TABLE analysis_tasks ADD COLUMN started_at TEXT")
+            logger.info("Migration: added started_at column to analysis_tasks")
+
+        if not self._sqlite_column_exists(conn, "analysis_tasks", "heartbeat_at"):
+            conn.execute("ALTER TABLE analysis_tasks ADD COLUMN heartbeat_at TEXT")
+            logger.info("Migration: added heartbeat_at column to analysis_tasks")
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
             "ON sessions(status, last_activity_at)"
@@ -609,11 +617,21 @@ class Database:
                 max_retries     INTEGER NOT NULL DEFAULT 3,
                 next_attempt_at TEXT NOT NULL,
                 created_at      TEXT NOT NULL,
+                started_at      TEXT,
+                heartbeat_at    TEXT,
                 completed_at    TEXT
             )
             """
         )
-        conn.execute("INSERT INTO analysis_tasks_new SELECT * FROM analysis_tasks")
+        conn.execute(
+            "INSERT INTO analysis_tasks_new "
+            "(id, task_type, user_id, session_id, status, priority, payload, result, "
+            "retry_count, max_retries, next_attempt_at, created_at, started_at, "
+            "heartbeat_at, completed_at) "
+            "SELECT id, task_type, user_id, session_id, status, priority, payload, "
+            "result, retry_count, max_retries, next_attempt_at, created_at, NULL, "
+            "NULL, completed_at FROM analysis_tasks"
+        )
         conn.execute("DROP TABLE analysis_tasks")
         conn.execute("ALTER TABLE analysis_tasks_new RENAME TO analysis_tasks")
         conn.execute(
@@ -757,6 +775,8 @@ class Database:
                 ("audit_log", "resolved_by", "TEXT"),
                 ("audit_log", "judge_reasoning", "TEXT"),
                 ("sessions", "title", "TEXT"),
+                ("analysis_tasks", "started_at", "TIMESTAMPTZ"),
+                ("analysis_tasks", "heartbeat_at", "TIMESTAMPTZ"),
             ]
             for table, column, col_type in migrations:
                 cur.execute(
@@ -1149,6 +1169,8 @@ CREATE TABLE IF NOT EXISTS analysis_tasks (
     max_retries     INTEGER NOT NULL DEFAULT 3,
     next_attempt_at TEXT NOT NULL,
     created_at      TEXT NOT NULL,
+    started_at      TEXT,
+    heartbeat_at    TEXT,
     completed_at    TEXT
 );
 
@@ -1404,6 +1426,8 @@ CREATE TABLE IF NOT EXISTS analysis_tasks (
     max_retries     INTEGER NOT NULL DEFAULT 3,
     next_attempt_at TIMESTAMPTZ NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL,
+    started_at      TIMESTAMPTZ,
+    heartbeat_at    TIMESTAMPTZ,
     completed_at    TIMESTAMPTZ
 );
 

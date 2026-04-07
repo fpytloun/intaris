@@ -59,6 +59,16 @@ class TestTaskQueue:
         assert task["session_id"] == "sess-1"
         assert task["status"] == "running"
 
+        with task_queue._db.cursor() as cur:
+            cur.execute(
+                "SELECT started_at, heartbeat_at FROM analysis_tasks WHERE id = ?",
+                (task["id"],),
+            )
+            row = cur.fetchone()
+
+        assert row[0]
+        assert row[1]
+
     def test_claim_next_returns_none_when_empty(self, task_queue):
         task = task_queue.claim_next()
         assert task is None
@@ -126,6 +136,57 @@ class TestTaskQueue:
         stats = task_queue.get_queue_stats()
         assert stats.get("pending", 0) == 1
         assert stats.get("running", 0) == 0
+
+    def test_reset_stale_running_uses_heartbeat_not_next_attempt(self, task_queue):
+        from datetime import datetime, timedelta, timezone
+
+        task_queue.enqueue("summary", "user-1", session_id="sess-1")
+        task = task_queue.claim_next()
+        old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        recent = datetime.now(timezone.utc).isoformat()
+
+        with task_queue._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE analysis_tasks
+                SET next_attempt_at = ?,
+                    started_at = ?,
+                    heartbeat_at = ?
+                WHERE id = ?
+                """,
+                (old, old, recent, task["id"]),
+            )
+
+        count = task_queue.reset_stale_running(max_age_minutes=10)
+        assert count == 0
+
+        stats = task_queue.get_queue_stats()
+        assert stats.get("running", 0) == 1
+
+    def test_touch_heartbeat_updates_running_task(self, task_queue):
+        from datetime import datetime, timedelta, timezone
+
+        task_queue.enqueue("summary", "user-1", session_id="sess-1")
+        task = task_queue.claim_next()
+        old = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+
+        with task_queue._db.cursor() as cur:
+            cur.execute(
+                "UPDATE analysis_tasks SET heartbeat_at = ? WHERE id = ?",
+                (old, task["id"]),
+            )
+
+        assert task_queue.touch_heartbeat(task["id"]) is True
+
+        with task_queue._db.cursor() as cur:
+            cur.execute(
+                "SELECT heartbeat_at FROM analysis_tasks WHERE id = ?",
+                (task["id"],),
+            )
+            row = cur.fetchone()
+
+        assert row[0] is not None
+        assert row[0] != old
 
     def test_cancel_duplicate_detects_pending(self, task_queue):
         task_queue.enqueue("summary", "user-1", session_id="sess-1")
@@ -205,6 +266,78 @@ class TestSessionSweep:
         # Verify session is now idle
         session = session_store.get("sess-active", user_id="user-1")
         assert session["status"] == "idle"
+
+
+class TestRuntimeCacheSweep:
+    """Test background-worker runtime cache sweeping."""
+
+    def test_sweep_runtime_caches_uses_active_and_idle_sessions_only(
+        self, db, session_store
+    ):
+        from intaris.background import BackgroundWorker
+
+        cfg = AnalysisConfig(enabled=True)
+        worker = BackgroundWorker(db, cfg)
+
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-active",
+            intention="active",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-idle",
+            intention="idle",
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-done",
+            intention="done",
+        )
+        session_store.update_status("sess-idle", "idle", user_id="user-1")
+        session_store.update_status("sess-done", "completed", user_id="user-1")
+
+        class _Recorder:
+            def __init__(self, ret):
+                self.ret = ret
+                self.calls = []
+
+            def sweep(self, active_sessions):
+                self.calls.append(active_sessions)
+                return self.ret
+
+        class _EventStoreRecorder:
+            def __init__(self, ret):
+                self.ret = ret
+                self.calls = []
+
+            def sweep_seq_counters(self, active_sessions):
+                self.calls.append(active_sessions)
+                return self.ret
+
+        class _EvaluatorRecorder:
+            def __init__(self, ret):
+                self.ret = ret
+                self.calls = []
+
+            def sweep_approved_paths(self, active_sessions):
+                self.calls.append(active_sessions)
+                return self.ret
+
+        event_store = _EventStoreRecorder(1)
+        evaluator = _EvaluatorRecorder(2)
+        alignment = _Recorder(3)
+        worker.set_event_store(event_store)
+        worker.set_evaluator(evaluator)
+        worker.set_alignment_barrier(alignment)
+
+        worker._sweep_runtime_caches()
+
+        expected = {("user-1", "sess-active"), ("user-1", "sess-idle")}
+        assert event_store.calls == [expected]
+        assert evaluator.calls == [expected]
+        assert alignment.calls == [expected]
+        assert worker.metrics.runtime_cache_sweeps_total == 1
 
     def test_sweep_skips_recently_active_sessions(self, session_store):
         from datetime import datetime, timedelta, timezone
