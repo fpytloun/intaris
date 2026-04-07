@@ -476,6 +476,187 @@ class TestRuntimeCacheSweep:
         assert len(transitioned) == 0
 
 
+class TestBackgroundWorkerLLMCache:
+    """Test cached analysis LLM client lifecycle in BackgroundWorker."""
+
+    def _make_worker(self, db):
+        from intaris.background import BackgroundWorker
+
+        cfg = AnalysisConfig(enabled=True)
+        return BackgroundWorker(db, cfg)
+
+    def test_get_analysis_llm_caches_on_success(self, db):
+        """L2 client is created once and reused on subsequent calls."""
+        worker = self._make_worker(db)
+        created = []
+        sentinel = object()
+
+        def _fake_create(role):
+            created.append(role)
+            return sentinel
+
+        worker._create_llm_client = _fake_create
+
+        c1 = worker._get_analysis_llm()
+        c2 = worker._get_analysis_llm()
+
+        assert c1 is sentinel
+        assert c1 is c2
+        assert created == ["analysis"]
+
+    def test_get_l3_analysis_llm_caches_on_success(self, db):
+        """L3 client is created once and reused on subsequent calls."""
+        worker = self._make_worker(db)
+        created = []
+        sentinel = object()
+
+        def _fake_create(role):
+            created.append(role)
+            return sentinel
+
+        worker._create_llm_client = _fake_create
+
+        c1 = worker._get_l3_analysis_llm()
+        c2 = worker._get_l3_analysis_llm()
+
+        assert c1 is sentinel
+        assert c1 is c2
+        assert created == ["l3_analysis"]
+
+    def test_l2_and_l3_are_separate_clients(self, db):
+        """L2 and L3 caches are independent."""
+        worker = self._make_worker(db)
+        l2_sentinel = object()
+        l3_sentinel = object()
+
+        def _fake_create(role):
+            return l2_sentinel if role == "analysis" else l3_sentinel
+
+        worker._create_llm_client = _fake_create
+
+        l2 = worker._get_analysis_llm()
+        l3 = worker._get_l3_analysis_llm()
+
+        assert l2 is l2_sentinel
+        assert l3 is l3_sentinel
+        assert l2 is not l3
+
+    def test_failed_init_not_cached(self, db):
+        """If client creation fails, the failure is not cached."""
+        worker = self._make_worker(db)
+        call_count = 0
+        sentinel = object()
+
+        def _fake_create(role):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("LLM init failed")
+            return sentinel
+
+        worker._create_llm_client = _fake_create
+
+        # First call fails
+        result1 = worker._get_analysis_llm()
+        assert result1 is None
+
+        # Second call succeeds (failure was not cached)
+        result2 = worker._get_analysis_llm()
+        assert result2 is sentinel
+        assert call_count == 2
+
+    def test_stop_closes_cached_clients(self, db):
+        """stop() closes all cached clients after tasks are joined."""
+        import asyncio
+
+        worker = self._make_worker(db)
+        closed = []
+
+        class _FakeClient:
+            def __init__(self, name):
+                self.name = name
+
+            def close(self):
+                closed.append(self.name)
+
+        worker._analysis_llm = _FakeClient("l2")
+        worker._l3_analysis_llm = _FakeClient("l3")
+
+        asyncio.run(worker.stop())
+
+        assert sorted(closed) == ["l2", "l3"]
+        assert worker._analysis_llm is None
+        assert worker._l3_analysis_llm is None
+
+    def test_stop_without_cached_clients_is_safe(self, db):
+        """stop() works fine when no clients were ever created."""
+        import asyncio
+
+        worker = self._make_worker(db)
+        asyncio.run(worker.stop())  # Should not raise
+
+    def test_intention_update_skips_when_no_llm(self, db, session_store):
+        """Intention update returns skipped when LLM client is unavailable."""
+        import asyncio
+
+        worker = self._make_worker(db)
+
+        def _failing_create(role):
+            raise RuntimeError("No LLM configured")
+
+        worker._create_llm_client = _failing_create
+
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-1",
+            intention="test",
+        )
+
+        task = {
+            "user_id": "user-1",
+            "session_id": "sess-1",
+            "payload": {"trigger": "bootstrap"},
+        }
+        result = asyncio.run(worker._execute_intention_update_task(task))
+        assert result["status"] == "skipped"
+        assert "No LLM" in result["reason"]
+
+
+class TestLLMClientClose:
+    """Test LLMClient.close() lifecycle behavior."""
+
+    def test_close_is_idempotent(self):
+        """Calling close() multiple times does not raise."""
+        from unittest.mock import MagicMock
+
+        from intaris.llm import LLMClient
+
+        client = MagicMock(spec=LLMClient)
+        client._closed = False
+        client._client = MagicMock()
+        # Call the real close method
+        LLMClient.close(client)
+        LLMClient.close(client)
+        assert client._client.close.call_count == 1
+
+    def test_close_propagates_exceptions(self):
+        """close() propagates exceptions from the underlying client."""
+        from unittest.mock import MagicMock
+
+        from intaris.llm import LLMClient
+
+        client = MagicMock(spec=LLMClient)
+        client._closed = False
+        client._client = MagicMock()
+        client._client.close.side_effect = RuntimeError("connection error")
+
+        with pytest.raises(RuntimeError, match="connection error"):
+            LLMClient.close(client)
+
+        # _closed should NOT be set since close() failed
+        assert client._closed is False
+
+
 class TestSessionActivity:
     """Test session activity tracking."""
 

@@ -568,6 +568,15 @@ class BackgroundWorker:
         self._evaluator = None
         self._alignment_barrier = None
         self._notification_dispatcher = None
+        # Cached analysis LLM clients — created lazily on first use,
+        # reused across all tasks to avoid per-task OpenAI/httpx client
+        # churn that causes RSS ratcheting from pymalloc fragmentation.
+        # Thread-safety note: LLMClient mutable fields (_supports_structured,
+        # _param_fixes) are write-once convergent — they stabilize to the
+        # same idempotent value after the first few calls regardless of
+        # which thread writes first. httpx.Client is explicitly thread-safe.
+        self._analysis_llm: Any | None = None  # L2 (summary + intention)
+        self._l3_analysis_llm: Any | None = None  # L3 (cross-session)
 
     def set_event_bus(self, event_bus) -> None:
         """Set the EventBus reference for publishing events.
@@ -693,6 +702,24 @@ class BackgroundWorker:
             except asyncio.TimeoutError:
                 logger.warning("Background tasks did not stop within 5s timeout")
         self._tasks.clear()
+
+        # Close cached analysis LLM clients after all tasks have stopped.
+        # Note: asyncio.to_thread() work may still be running if the 5s
+        # timeout fired. httpx.Client.close() is safe in this case — it
+        # lets in-flight requests complete and only prevents new ones.
+        closed = 0
+        for client in (self._analysis_llm, self._l3_analysis_llm):
+            if client is not None:
+                try:
+                    client.close()
+                    closed += 1
+                except Exception:
+                    logger.debug("Failed to close cached LLM client", exc_info=True)
+        self._analysis_llm = None
+        self._l3_analysis_llm = None
+        if closed:
+            logger.info("Closed %d cached analysis LLM client(s)", closed)
+
         logger.info("Background worker stopped")
 
     async def _resilient_loop(
@@ -1185,38 +1212,70 @@ class BackgroundWorker:
             logger.warning("Failed to send analysis alert notification", exc_info=True)
 
     def _get_analysis_llm(self) -> Any | None:
-        """Create an L2 analysis LLM client from config.
+        """Get or create the cached L2 analysis LLM client.
+
+        Lazily creates the client on first use and caches it for all
+        subsequent summary and intention-update tasks. Failed creation
+        is NOT cached — the next call will retry.
 
         Returns None if the analysis LLM is not configured.
         """
+        if self._analysis_llm is not None:
+            return self._analysis_llm
         try:
-            from intaris.config import load_config
-            from intaris.llm import LLMClient
-
-            cfg = load_config()
-            return LLMClient(cfg.llm_analysis)
+            client = self._create_llm_client("analysis")
+            self._analysis_llm = client
+            return client
         except Exception:
             logger.warning("Failed to create analysis LLM client", exc_info=True)
             return None
 
     def _get_l3_analysis_llm(self) -> Any | None:
-        """Create an L3 analysis LLM client from config.
+        """Get or create the cached L3 analysis LLM client.
 
-        Uses the dedicated L3 model (more capable) for cross-session
-        behavioral analysis. Falls back to the L2 analysis LLM if the
-        L3-specific config is not set.
+        Lazily creates the client on first use and caches it for all
+        subsequent cross-session analysis tasks. Failed creation is
+        NOT cached — the next call will retry.
 
         Returns None if the LLM is not configured.
         """
+        if self._l3_analysis_llm is not None:
+            return self._l3_analysis_llm
         try:
-            from intaris.config import load_config
-            from intaris.llm import LLMClient
-
-            cfg = load_config()
-            return LLMClient(cfg.llm_l3_analysis)
+            client = self._create_llm_client("l3_analysis")
+            self._l3_analysis_llm = client
+            return client
         except Exception:
             logger.warning("Failed to create L3 analysis LLM client", exc_info=True)
             return None
+
+    def _create_llm_client(self, role: str) -> Any:
+        """Create an LLM client for the given analysis role.
+
+        Args:
+            role: "analysis" for L2 or "l3_analysis" for L3.
+
+        Returns:
+            A new LLMClient instance.
+
+        Raises:
+            Exception: If client creation fails (propagated to caller).
+        """
+        from intaris.config import load_config
+        from intaris.llm import LLMClient
+
+        cfg = load_config()
+        if role == "l3_analysis":
+            llm_cfg = cfg.llm_l3_analysis
+        else:
+            llm_cfg = cfg.llm_analysis
+        client = LLMClient(llm_cfg)
+        logger.info(
+            "Created cached %s LLM client (model=%s)",
+            role,
+            llm_cfg.model,
+        )
+        return client
 
     async def _execute_intention_update_task(
         self, task: dict[str, Any]
@@ -1227,9 +1286,7 @@ class BackgroundWorker:
         messages (Claude Code, MCP proxy). User-message-triggered updates
         go through the IntentionBarrier instead.
         """
-        from intaris.config import load_config
         from intaris.intention import generate_intention
-        from intaris.llm import LLMClient
 
         user_id = task.get("user_id", "")
         session_id = task.get("session_id", "")
@@ -1239,8 +1296,9 @@ class BackgroundWorker:
         payload = task.get("payload") or {}
         trigger = payload.get("trigger", "unknown")
 
-        cfg = load_config()
-        analysis_llm = LLMClient(cfg.llm_analysis)
+        analysis_llm = self._get_analysis_llm()
+        if analysis_llm is None:
+            return {"status": "skipped", "reason": "No LLM client available"}
 
         # Pass intention_source directly so the update is atomic —
         # no double-update race between generate_intention and here.

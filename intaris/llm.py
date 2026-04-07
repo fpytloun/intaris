@@ -42,6 +42,19 @@ class LLMClient:
         # Tracks unsupported parameters for this model/provider.
         # Maps param name -> fix action. Populated on first BadRequestError.
         self._param_fixes: dict[str, str] = {}
+        self._closed = False
+
+    def close(self) -> None:
+        """Close the underlying HTTP client.
+
+        Idempotent — safe to call multiple times. Releases connection
+        pool resources held by the OpenAI/httpx client. Propagates
+        exceptions so callers can log cleanup failures.
+        """
+        if self._closed:
+            return
+        self._client.close()
+        self._closed = True
 
     def generate(
         self,
