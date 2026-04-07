@@ -316,6 +316,49 @@ class AuditStore:
 
         return [_row_to_dict(row) for row in rows]
 
+    def get_user_decisions(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """Get recent final human decisions for a session.
+
+        Only final human resolutions are returned. Judge-authored decisions
+        are excluded so this data can be treated as authoritative human
+        guidance in evaluator, judge, and intention prompts.
+
+        Args:
+            session_id: Session to query.
+            user_id: Tenant identifier.
+            limit: Max decision records to return.
+
+        Returns:
+            List of recent human decision records, newest first.
+        """
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                SELECT call_id, session_id, tool, args_redacted, decision,
+                       user_decision, user_note, resolved_at, resolved_by,
+                       risk, reasoning, evaluation_path, intention, args_hash,
+                       timestamp
+                FROM audit_log
+                WHERE user_id = ? AND session_id = ?
+                  AND record_type = 'tool_call'
+                  AND user_decision IS NOT NULL
+                  AND resolved_by = 'user'
+                  AND COALESCE(user_note, '') != 'Resolved via notification action link'
+                ORDER BY COALESCE(resolved_at, timestamp) DESC
+                LIMIT ?
+                """,
+                (user_id, session_id, limit),
+            )
+            rows = cur.fetchall()
+
+        return [_row_to_dict(row) for row in rows]
+
     def find_approved_escalation(
         self,
         *,

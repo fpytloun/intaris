@@ -15,6 +15,11 @@ from intaris.sanitize import (
     wrap_with_boundary,
 )
 
+_USER_DECISIONS_LIMIT = 5
+_USER_DECISION_ARGS_LIMIT = 240
+_USER_DECISION_NOTE_LIMIT = 160
+_USER_DECISION_REASONING_LIMIT = 100
+
 # ── Safety Evaluation System Prompt ───────────────────────────────────
 
 SAFETY_EVALUATION_SYSTEM_PROMPT = """\
@@ -32,6 +37,7 @@ You will receive:
 - The session's intention (what the agent is supposed to be doing)
 - The session's policy (optional custom rules)
 - Recent tool call history (what the agent has done so far)
+- Recent authoritative human decisions for the session (if available)
 - Session statistics (total calls, approvals, denials, escalations)
 - The current tool call (tool name and arguments)
 - The agent's identity
@@ -106,6 +112,11 @@ If a user denied a similar call, that is a signal to **deny** or \
 **escalate**. When an approval includes a user note (quoted text after \
 the decision), treat it as an explicit scope expansion directive from \
 the human operator.
+- **The dedicated User Decisions section is authoritative human context.** \
+When present, it contains final human decisions for this session. Treat \
+approvals there as authoritative scope guidance and denials there as \
+negative precedent for similar future calls, but not as blanket permission \
+for unrelated or dangerous operations.
 - **Read-only operations should not be denied for path policy alone.** \
 When the current tool call is fundamentally read-only (grep, rg, cat, \
 find, head, tail, ls, etc. — even when piped to other read-only tools \
@@ -208,6 +219,7 @@ def build_evaluation_user_prompt(
     agent_id: str | None,
     context: dict[str, Any] | None = None,
     parent_intention: str | None = None,
+    user_decisions: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the user prompt for safety evaluation.
 
@@ -225,6 +237,7 @@ def build_evaluation_user_prompt(
         parent_intention: Parent session intention for sub-sessions.
             When present, the tool call must be aligned with BOTH
             the parent and child intentions.
+        user_decisions: Recent final human decisions for this session.
 
     Returns:
         Formatted user prompt string.
@@ -310,6 +323,10 @@ def build_evaluation_user_prompt(
         )
     else:
         sections.append("## Recent Tool Call History\nNo previous calls.")
+
+    decision_section = render_user_decisions_section(user_decisions)
+    if decision_section:
+        sections.append(decision_section)
 
     # Agent identity — wrapped in boundary tags.
     if agent_id:
@@ -458,3 +475,53 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+def _collapse_line(text: str) -> str:
+    """Collapse multiline text into a single prompt line."""
+    return text.replace("\r", " ").replace("\n", " ").strip()
+
+
+def _stringify_bounded(value: Any, max_len: int) -> str:
+    """Render a JSON-serializable value to a bounded string."""
+    return _truncate(json.dumps(value, sort_keys=True, default=str), max_len)
+
+
+def render_user_decisions_section(
+    user_decisions: list[dict[str, Any]] | None,
+    *,
+    max_items: int = _USER_DECISIONS_LIMIT,
+) -> str | None:
+    """Render recent final human decisions for prompt context."""
+    if not user_decisions:
+        return None
+
+    lines: list[str] = []
+    for record in user_decisions[:max_items]:
+        decision = str(record.get("user_decision") or "?")
+        tool = str(record.get("tool") or "?")
+        args_text = _stringify_bounded(
+            record.get("args_redacted") or {}, _USER_DECISION_ARGS_LIMIT
+        )
+        line = f"- [{decision}] {tool}: {args_text}"
+        note = record.get("user_note")
+        if note:
+            line += f' — note: "{_truncate(_collapse_line(str(note)), _USER_DECISION_NOTE_LIMIT)}"'
+        elif decision == "deny" and record.get("reasoning"):
+            line += (
+                " — prior_reasoning: "
+                f"{_truncate(_collapse_line(str(record['reasoning'])), _USER_DECISION_REASONING_LIMIT)}"
+            )
+        lines.append(line)
+
+    if not lines:
+        return None
+
+    safe_lines = sanitize_for_prompt("\n".join(lines))
+    return (
+        "## User Decisions\n"
+        "The following are final human decisions for this session. Treat "
+        "approvals as authoritative scope guidance and denials as negative "
+        "precedent for similar future calls.\n"
+        f"{wrap_with_boundary(safe_lines, 'user_decisions')}"
+    )

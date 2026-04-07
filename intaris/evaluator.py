@@ -880,11 +880,15 @@ class Evaluator:
         recent_history = self._audit.get_recent(
             session_id, user_id=user_id, limit=10, record_type="tool_call"
         )
+        user_decisions = self._audit.get_user_decisions(
+            session_id, user_id=user_id, limit=5
+        )
 
         user_prompt = build_evaluation_user_prompt(
             intention=session["intention"],
             policy=session.get("policy"),
             recent_history=recent_history,
+            user_decisions=user_decisions,
             session_stats={
                 "total_calls": session.get("total_calls", 0),
                 "approved_count": session.get("approved_count", 0),

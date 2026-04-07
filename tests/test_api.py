@@ -575,6 +575,77 @@ class TestDecision:
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
 
+    def test_resolve_approval_note_triggers_intention_barrier(self, client_no_auth):
+        headers = self._create_escalated_record(client_no_auth, "user-note")
+
+        class _Barrier:
+            def __init__(self):
+                self.calls = []
+
+            async def trigger_from_decision(
+                self, user_id, session_id, *, tool, args_redacted, user_note
+            ):
+                self.calls.append(
+                    {
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "tool": tool,
+                        "args_redacted": args_redacted,
+                        "user_note": user_note,
+                    }
+                )
+
+        barrier = _Barrier()
+        client_no_auth.app.state.intention_barrier = barrier
+        api_app = getattr(client_no_auth.app.state, "_api_app", None)
+        if api_app is not None:
+            api_app.state.intention_barrier = barrier
+
+        resp = client_no_auth.post(
+            "/api/v1/decision",
+            json={
+                "call_id": "esc-call-1",
+                "decision": "approve",
+                "note": "web research is fine for this session",
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        assert len(barrier.calls) == 1
+        assert barrier.calls[0]["tool"] == "bash"
+        assert barrier.calls[0]["user_note"] == "web research is fine for this session"
+
+    def test_resolve_approval_note_refresh_failure_does_not_fail_request(
+        self, client_no_auth
+    ):
+        headers = self._create_escalated_record(client_no_auth, "user-note-fail")
+
+        class _Barrier:
+            async def trigger_from_decision(
+                self, user_id, session_id, *, tool, args_redacted, user_note
+            ):
+                del user_id, session_id, tool, args_redacted, user_note
+                raise RuntimeError("boom")
+
+        client_no_auth.app.state.intention_barrier = _Barrier()
+        api_app = getattr(client_no_auth.app.state, "_api_app", None)
+        if api_app is not None:
+            api_app.state.intention_barrier = client_no_auth.app.state.intention_barrier
+
+        resp = client_no_auth.post(
+            "/api/v1/decision",
+            json={
+                "call_id": "esc-call-1",
+                "decision": "approve",
+                "note": "still allow this",
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
     def test_resolve_not_escalated(self, client_no_auth):
         """Cannot resolve a non-escalated record."""
         headers = {"X-User-Id": "user-ne"}

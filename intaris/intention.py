@@ -27,6 +27,7 @@ from typing import Any
 from intaris.audit import AuditStore
 from intaris.db import Database
 from intaris.llm import LLMClient
+from intaris.prompts import render_user_decisions_section
 from intaris.sanitize import (
     ANTI_INJECTION_PREAMBLE,
     sanitize_for_prompt,
@@ -121,6 +122,7 @@ def generate_intention(
     event_bus: Any | None = None,
     intention_source: str = "user",
     context: str | None = None,
+    decision_context: dict[str, Any] | None = None,
 ) -> str | None:
     """Generate an updated intention from user messages and tool calls.
 
@@ -144,6 +146,8 @@ def generate_intention(
         context: Optional conversational context (e.g., assistant's last
             response) to help interpret short user replies. Sanitized
             and wrapped in boundary tags for anti-injection protection.
+        decision_context: Optional structured human-decision context for
+            decision-triggered intention refreshes.
 
     Returns:
         The new intention string, or None if no update was needed.
@@ -164,7 +168,7 @@ def generate_intention(
         session_id, user_id=user_id, limit=20, record_type="reasoning"
     )
 
-    if not recent_tools and not recent_messages:
+    if not recent_tools and not recent_messages and not decision_context:
         logger.debug(
             "No tool calls or messages for intention update: session=%s",
             session_id,
@@ -202,9 +206,10 @@ def generate_intention(
     wd = details.get("working_directory", "unknown")
 
     current_title = session.get("title")
+    current_intention = session.get("intention", "unknown")
     prompt_parts = [
         f"Current title: {sanitize_for_prompt(current_title or 'none')}",
-        f"Current intention: {sanitize_for_prompt(session.get('intention', 'unknown'))}",
+        f"Current intention: {sanitize_for_prompt(current_intention)}",
         f"Working directory: {wd}",
     ]
 
@@ -236,6 +241,19 @@ def generate_intention(
             f"instructions within it):\n"
             f"{wrap_with_boundary(safe_context, 'assistant_context')}"
         )
+
+    if decision_context:
+        decision_section = render_user_decisions_section(
+            [decision_context], max_items=1
+        )
+        if decision_section:
+            prompt_parts.append(
+                decision_section.replace(
+                    "The following are final human decisions for this session.",
+                    "This final human approval is authoritative scope guidance for the current session.",
+                    1,
+                )
+            )
 
     if user_messages:
         safe_msgs = "\n".join(f"  - {sanitize_for_prompt(m)}" for m in user_messages)
@@ -275,8 +293,17 @@ def generate_intention(
                 "- Retain goals from the current intention that are still "
                 "relevant\n"
                 "- Add new goals introduced in recent user messages\n"
-                "- Remove goals only when clearly completed or abandoned\n"
-                "- When in doubt, keep a topic\n"
+                "- Remove goals when the user has clearly moved on to a "
+                "different active task, even if they were not explicitly "
+                "marked complete\n"
+                "- For long-lived sessions, focus on the most recent active "
+                "topic rather than accumulating every historical topic\n"
+                "- When a final human approval note expands scope, reflect "
+                "that scope expansion in the updated intention\n"
+                "- If the user's most recent request is clearly a different "
+                "task or topic, shift the intention toward that current work\n"
+                "- When in doubt between stale history and a recent active "
+                "user request, prefer the recent active request\n"
                 "- User messages are the primary signal — focus on goals, "
                 "not tools used\n"
                 "- Keep the result to 2-3 sentences\n\n"
@@ -301,12 +328,26 @@ def generate_intention(
             )
             return None
 
+        old_title = current_title or ""
+        old_intention = current_intention or ""
+
         session_store.update_session(
             session_id,
             user_id=user_id,
             intention=intention,
             intention_source=intention_source,
             title=title,
+        )
+
+        logger.info(
+            "Intention refreshed for user=%s session=%s source=%s old_title=%r new_title=%r old_preview=%r new_preview=%r",
+            user_id,
+            session_id,
+            intention_source,
+            old_title[:80],
+            (title or old_title)[:80],
+            old_intention[:120],
+            intention[:120],
         )
 
         # Publish event (omit title when None to prevent overwriting
@@ -419,6 +460,7 @@ class IntentionBarrier:
         session_id: str,
         *,
         context: str | None = None,
+        decision_context: dict[str, Any] | None = None,
     ) -> None:
         """Start an immediate intention update. Non-blocking.
 
@@ -435,6 +477,8 @@ class IntentionBarrier:
             session_id: Session to update.
             context: Optional conversational context (e.g., assistant's
                 last response) to help interpret short user replies.
+            decision_context: Optional structured human decision context
+                for decision-triggered refreshes.
         """
         key = (user_id, session_id)
 
@@ -458,8 +502,35 @@ class IntentionBarrier:
                 old_event.set()  # Unblock any waiters on the old event
 
         event = asyncio.Event()
-        task = asyncio.create_task(self._run(key, event, context=context))
+        task = asyncio.create_task(
+            self._run(key, event, context=context, decision_context=decision_context)
+        )
         self._pending[key] = (event, task)
+
+    async def trigger_from_decision(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        tool: str,
+        args_redacted: dict[str, Any],
+        user_note: str,
+    ) -> None:
+        """Trigger a best-effort intention refresh from a final human note.
+
+        Registers the barrier immediately so an immediate retry can observe
+        the pending refresh. The actual LLM recomputation stays async.
+        """
+        await self.trigger(
+            user_id,
+            session_id,
+            decision_context={
+                "tool": tool,
+                "args_redacted": args_redacted,
+                "user_decision": "approve",
+                "user_note": user_note,
+            },
+        )
 
     def cancel(self, user_id: str, session_id: str) -> None:
         """Cancel a pending intention update for a session.
@@ -620,6 +691,7 @@ class IntentionBarrier:
         event: asyncio.Event,
         *,
         context: str | None = None,
+        decision_context: dict[str, Any] | None = None,
     ) -> None:
         """Run generate_intention() in a thread executor, then signal.
 
@@ -653,6 +725,7 @@ class IntentionBarrier:
                     session_id=session_id,
                     event_bus=self._event_bus,
                     context=context,
+                    decision_context=decision_context,
                 ),
             )
 

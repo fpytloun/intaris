@@ -539,6 +539,7 @@ async def lifespan(app):
             audit_store=_AuditStore(_get_db()),
             session_store=_SessionStore(_get_db()),
             evaluator=_get_evaluator(),
+            intention_barrier=app.state.intention_barrier,
             alignment_barrier=app.state.alignment_barrier,
             event_bus=app.state.event_bus,
             notification_dispatcher=notification_dispatcher,

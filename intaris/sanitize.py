@@ -40,6 +40,7 @@ _BOUNDARY_TAGS = {
     "assistant_text": ("⟨assistant_text⟩", "⟨/assistant_text⟩"),
     "assistant_context": ("⟨assistant_context⟩", "⟨/assistant_context⟩"),
     "parent_context": ("⟨parent_context⟩", "⟨/parent_context⟩"),
+    "user_decisions": ("⟨user_decisions⟩", "⟨/user_decisions⟩"),
 }
 
 

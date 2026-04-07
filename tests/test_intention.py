@@ -17,6 +17,7 @@ import pytest
 
 from intaris.config import DBConfig
 from intaris.db import Database
+from intaris.evaluator import Evaluator
 from intaris.intention import (
     IntentionBarrier,
     _parse_title_intention,
@@ -287,6 +288,108 @@ class TestGenerateIntention:
         assert "Refactoring the auth module" in user_prompt
         assert "sub-session" in user_prompt
 
+    def test_includes_decision_context_in_prompt(self, db, session_store, mock_llm):
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+
+        generate_intention(
+            llm=mock_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+            decision_context={
+                "tool": "web_search",
+                "args_redacted": {"query": "daily brief"},
+                "user_decision": "approve",
+                "user_note": "this is fine and aligned",
+            },
+        )
+
+        messages = mock_llm.generate.call_args[0][0]
+        user_prompt = messages[1]["content"]
+        system_prompt = messages[0]["content"]
+        assert "## User Decisions" in user_prompt
+        assert "this is fine and aligned" in user_prompt
+        assert "focus on the most recent active topic" in system_prompt
+
+    def test_decision_context_skips_empty_history_guard(
+        self, db, session_store, mock_llm
+    ):
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+
+        result = generate_intention(
+            llm=mock_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+            decision_context={
+                "tool": "web_search",
+                "args_redacted": {"query": "daily brief"},
+                "user_decision": "approve",
+                "user_note": "approved for research",
+            },
+        )
+
+        assert result is not None
+        mock_llm.generate.assert_called_once()
+
+
+class TestEvaluatorDecisionContext:
+    def test_llm_evaluate_passes_user_decisions_to_prompt(self, db, session_store):
+        from intaris.audit import AuditStore
+
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        audit = AuditStore(db)
+        audit.insert(
+            call_id="call-1",
+            user_id="user-1",
+            session_id="sess-1",
+            agent_id=None,
+            tool="web_search",
+            args_redacted={"query": "daily brief"},
+            classification="write",
+            evaluation_path="llm",
+            decision="escalate",
+            risk="high",
+            reasoning="Needs review",
+            latency_ms=10,
+        )
+        audit.resolve_escalation(
+            "call-1",
+            "approve",
+            user_note="this is fine and aligned",
+            user_id="user-1",
+            resolved_by="user",
+        )
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Allowed", "decision": "approve"}'
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=audit,
+            db=db,
+        )
+
+        with patch("intaris.evaluator.build_evaluation_user_prompt") as build_prompt:
+            build_prompt.return_value = "prompt"
+            session = session_store.get("sess-1", user_id="user-1")
+            evaluator._llm_evaluate(
+                session=session,
+                tool="web_search",
+                args_redacted={"query": "weather"},
+                agent_id=None,
+            )
+
+        assert build_prompt.call_args.kwargs["user_decisions"]
+        assert build_prompt.call_args.kwargs["user_decisions"][0]["user_note"] == (
+            "this is fine and aligned"
+        )
+
     def test_strips_quotes_from_llm_response(self, db, session_store):
         """generate_intention strips surrounding quotes from LLM output."""
         llm = MagicMock()
@@ -462,6 +565,26 @@ class TestIntentionBarrier:
         async def _test():
             await barrier.trigger("user-1", "sess-1")
             await barrier.trigger("user-1", "sess-1")
+            result = await barrier.wait("user-1", "sess-1")
+            assert result is True
+
+        asyncio.run(_test())
+
+    def test_trigger_from_decision_registers_pending_refresh(
+        self, db, session_store, mock_llm
+    ):
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        barrier = _make_barrier(db, mock_llm)
+
+        async def _test():
+            await barrier.trigger_from_decision(
+                "user-1",
+                "sess-1",
+                tool="web_search",
+                args_redacted={"query": "daily brief"},
+                user_note="approved for this session",
+            )
+            assert ("user-1", "sess-1") in barrier._pending
             result = await barrier.wait("user-1", "sess-1")
             assert result is True
 

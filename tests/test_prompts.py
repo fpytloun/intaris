@@ -15,6 +15,8 @@ from intaris.prompts import (
     ALIGNMENT_CHECK_SYSTEM_PROMPT,
     SAFETY_EVALUATION_SCHEMA,
     SAFETY_EVALUATION_SYSTEM_PROMPT,
+    build_evaluation_user_prompt,
+    render_user_decisions_section,
 )
 from intaris.prompts_analysis import (
     BEHAVIORAL_ANALYSIS_SCHEMA,
@@ -100,3 +102,84 @@ class TestEnglishEnforcementInSchemas:
             "description"
         ]
         assert "in English" in desc
+
+
+class TestUserDecisionsPromptRendering:
+    def test_render_user_decisions_section_wraps_and_truncates(self):
+        section = render_user_decisions_section(
+            [
+                {
+                    "tool": "web_search",
+                    "args_redacted": {"query": "x" * 500},
+                    "user_decision": "approve",
+                    "user_note": "allow this\nfor research",
+                }
+            ]
+        )
+
+        assert section is not None
+        assert "## User Decisions" in section
+        assert "⟨user_decisions⟩" in section
+        assert "allow this for research" in section
+        assert len(section) < 900
+
+    def test_build_prompt_includes_user_decisions_section(self):
+        prompt = build_evaluation_user_prompt(
+            intention="Research a bug",
+            policy=None,
+            recent_history=[],
+            user_decisions=[
+                {
+                    "tool": "web_search",
+                    "args_redacted": {"query": "daily brief"},
+                    "user_decision": "approve",
+                    "user_note": "this is fine and aligned",
+                }
+            ],
+            session_stats={
+                "total_calls": 1,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 1,
+            },
+            tool="web_search",
+            args={"query": "weather"},
+            agent_id="agent-1",
+        )
+
+        assert "## User Decisions" in prompt
+        assert "this is fine and aligned" in prompt
+
+    def test_build_prompt_omits_user_decisions_when_empty(self):
+        prompt = build_evaluation_user_prompt(
+            intention="Research a bug",
+            policy=None,
+            recent_history=[],
+            user_decisions=[],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="web_search",
+            args={"query": "weather"},
+            agent_id=None,
+        )
+
+        assert "## User Decisions" not in prompt
+
+    def test_approval_without_note_does_not_render_prior_reasoning(self):
+        section = render_user_decisions_section(
+            [
+                {
+                    "tool": "web_search",
+                    "args_redacted": {"query": "daily brief"},
+                    "user_decision": "approve",
+                    "reasoning": "Original evaluator said not aligned",
+                }
+            ]
+        )
+
+        assert section is not None
+        assert "prior_reasoning" not in section

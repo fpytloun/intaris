@@ -119,6 +119,9 @@ async def resolve_decision(
             resolved_by="user",
             audit_store=store,
             evaluator=_get_evaluator(),
+            intention_barrier=getattr(
+                http_request.app.state, "intention_barrier", None
+            ),
             alignment_barrier=getattr(
                 http_request.app.state, "alignment_barrier", None
             ),

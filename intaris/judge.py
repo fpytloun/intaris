@@ -31,6 +31,7 @@ from typing import Any
 
 from intaris.config import JudgeConfig
 from intaris.llm import LLMClient, parse_json_response
+from intaris.prompts import render_user_decisions_section
 from intaris.sanitize import (
     ANTI_INJECTION_PREAMBLE,
     sanitize_for_prompt,
@@ -79,6 +80,10 @@ at the time the sub-session was spawned)
 may be perfectly reasonable given the session's history and intention.
 - User-approved similar calls in the history (marked [escalate→user:approve]) \
 are strong precedent — respect them.
+- When a dedicated `User Decisions` section is present, it contains final \
+human decisions for this session. Treat approvals there as authoritative \
+scope guidance and denials there as negative precedent for similar calls, \
+but not as blanket permission for unrelated or dangerous operations.
 - Read-only operations outside the project scope should generally be \
 approved if they serve a plausible development purpose (research, \
 reference, debugging).
@@ -245,6 +250,7 @@ def _build_judge_prompt(
     parent_intention: str | None = None,
     parent_recent_messages: list[dict[str, Any]] | None = None,
     behavioral_context: dict[str, Any] | None = None,
+    user_decisions: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the user prompt for judge evaluation.
 
@@ -268,6 +274,7 @@ def _build_judge_prompt(
             give the judge visibility into the human user's messages that
             led to the sub-session being spawned.
         behavioral_context: Behavioral profile data (risk_level, alerts).
+        user_decisions: Recent final human decisions for this session.
 
     Returns:
         Formatted user prompt string.
@@ -392,6 +399,10 @@ def _build_judge_prompt(
     else:
         sections.append("## Recent Tool Call History\nNo previous calls.")
 
+    decision_section = render_user_decisions_section(user_decisions)
+    if decision_section:
+        sections.append(decision_section)
+
     # Agent identity
     if agent_id:
         safe_agent = sanitize_for_prompt(agent_id)
@@ -460,6 +471,7 @@ async def resolve_with_side_effects(
     judge_reasoning: str | None = None,
     audit_store: Any,
     evaluator: Any | None = None,
+    intention_barrier: Any | None = None,
     alignment_barrier: Any | None = None,
     event_bus: Any | None = None,
     notification_dispatcher: Any | None = None,
@@ -490,6 +502,7 @@ async def resolve_with_side_effects(
         judge_reasoning: Judge's reasoning (when resolved_by="judge").
         audit_store: AuditStore instance.
         evaluator: Evaluator instance (for path learning).
+        intention_barrier: IntentionBarrier for note-triggered scope refresh.
         alignment_barrier: AlignmentBarrier instance.
         event_bus: EventBus instance.
         notification_dispatcher: NotificationDispatcher instance.
@@ -576,6 +589,36 @@ async def resolve_with_side_effects(
         except Exception:
             logger.debug("Could not learn path prefix from approval", exc_info=True)
 
+    # Step 3.5: Best-effort intention refresh from final human approval notes.
+    if (
+        record is not None
+        and resolved_by == "user"
+        and user_decision == "approve"
+        and user_note
+        and intention_barrier is not None
+    ):
+        try:
+            session_id = record.get("session_id")
+            if session_id:
+                logger.info(
+                    "Triggering decision-based intention refresh for call_id=%s session=%s",
+                    call_id,
+                    session_id,
+                )
+                await intention_barrier.trigger_from_decision(
+                    user_id,
+                    session_id,
+                    tool=record.get("tool", ""),
+                    args_redacted=record.get("args_redacted") or {},
+                    user_note=user_note,
+                )
+        except Exception:
+            logger.warning(
+                "Decision-based intention refresh failed for call_id=%s",
+                call_id,
+                exc_info=True,
+            )
+
     # Step 4: EventBus publish
     if event_bus is not None and record is not None:
         event_bus.publish(
@@ -652,6 +695,7 @@ class JudgeReviewer:
         audit_store: AuditStore for reading/resolving records.
         session_store: SessionStore for session lookups.
         evaluator: Evaluator for path learning and behavioral context.
+        intention_barrier: IntentionBarrier for decision-based scope refresh.
         alignment_barrier: AlignmentBarrier for alignment acknowledgment.
         event_bus: EventBus for WebSocket streaming.
         notification_dispatcher: NotificationDispatcher for notifications.
@@ -666,6 +710,7 @@ class JudgeReviewer:
         audit_store: Any,
         session_store: Any,
         evaluator: Any,
+        intention_barrier: Any | None = None,
         alignment_barrier: Any | None = None,
         event_bus: Any | None = None,
         notification_dispatcher: Any | None = None,
@@ -676,6 +721,7 @@ class JudgeReviewer:
         self._audit = audit_store
         self._sessions = session_store
         self._evaluator = evaluator
+        self._intention_barrier = intention_barrier
         self._alignment_barrier = alignment_barrier
         self._event_bus = event_bus
         self._notification_dispatcher = notification_dispatcher
@@ -811,6 +857,12 @@ class JudgeReviewer:
             user_id=user_id,
             limit=_JUDGE_CONTEXT_LIMIT,
         )
+        user_decisions = await asyncio.to_thread(
+            self._audit.get_user_decisions,
+            session_id,
+            user_id=user_id,
+            limit=5,
+        )
 
         # Load parent intention and context for sub-sessions
         parent_intention: str | None = None
@@ -873,6 +925,7 @@ class JudgeReviewer:
             parent_intention=parent_intention,
             parent_recent_messages=parent_recent_messages,
             behavioral_context=behavioral_context,
+            user_decisions=user_decisions,
         )
 
         # Select mode-specific decision rules for the system prompt
@@ -936,6 +989,7 @@ class JudgeReviewer:
                 judge_reasoning=reasoning,
                 audit_store=self._audit,
                 evaluator=self._evaluator,
+                intention_barrier=self._intention_barrier,
                 alignment_barrier=self._alignment_barrier,
                 event_bus=self._event_bus,
                 notification_dispatcher=(
@@ -1021,6 +1075,7 @@ class JudgeReviewer:
                     judge_reasoning=reasoning,
                     audit_store=self._audit,
                     evaluator=self._evaluator,
+                    intention_barrier=self._intention_barrier,
                     alignment_barrier=self._alignment_barrier,
                     event_bus=self._event_bus,
                     notification_dispatcher=(

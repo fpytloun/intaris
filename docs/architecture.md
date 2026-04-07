@@ -170,6 +170,11 @@ Coordinates real-time intention updates between user messages and tool evaluatio
 2. `POST /evaluate` calls `await barrier.wait()` -> blocks up to 1s if an update is pending
 3. New user messages cancel and restart the update (only the latest runs to completion)
 
+Human approval notes can also trigger a best-effort intention refresh after
+`POST /decision` succeeds. This path is restricted to final human approvals
+with non-empty notes, so explicit scope expansions from the user can update the
+session intention without relying on exact tool-argument retries.
+
 ### AlignmentBarrier
 
 Enforces parent/child session intention compatibility:

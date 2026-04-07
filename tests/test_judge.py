@@ -220,6 +220,58 @@ class TestAuditStoreJudge:
         record = audit_store.get_by_call_id("test-call", user_id="test-user")
         assert record["judge_reasoning"] is None  # Not set (already resolved)
 
+    def test_get_user_decisions_filters_to_final_humans(
+        self, audit_store, session_store
+    ):
+        _create_session(session_store)
+        _create_escalated_record(audit_store, call_id="human-call", user_id="test-user")
+        _create_escalated_record(audit_store, call_id="judge-call", user_id="test-user")
+
+        audit_store.resolve_escalation(
+            "human-call",
+            "approve",
+            user_note="Human approved this",
+            user_id="test-user",
+            resolved_by="user",
+        )
+        audit_store.resolve_escalation(
+            "judge-call",
+            "approve",
+            user_note="Judge approved this",
+            user_id="test-user",
+            resolved_by="judge",
+            judge_reasoning="safe",
+        )
+
+        records = audit_store.get_user_decisions(
+            "test-session", user_id="test-user", limit=10
+        )
+
+        assert len(records) == 1
+        assert records[0]["call_id"] == "human-call"
+
+    def test_get_user_decisions_ignores_notification_action_note(
+        self, audit_store, session_store
+    ):
+        _create_session(session_store)
+        _create_escalated_record(
+            audit_store, call_id="action-call", user_id="test-user"
+        )
+
+        audit_store.resolve_escalation(
+            "action-call",
+            "approve",
+            user_note="Resolved via notification action link",
+            user_id="test-user",
+            resolved_by="user",
+        )
+
+        records = audit_store.get_user_decisions(
+            "test-session", user_id="test-user", limit=10
+        )
+
+        assert records == []
+
     def test_resolve_already_resolved_raises(self, audit_store, session_store):
         _create_session(session_store)
         _create_escalated_record(audit_store)
@@ -951,6 +1003,61 @@ class TestResolveWithSideEffects:
 
         asyncio.run(_test())
 
+    def test_human_approval_note_triggers_intention_refresh(
+        self, audit_store, session_store
+    ):
+        async def _test():
+            from intaris.judge import resolve_with_side_effects
+
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            barrier = MagicMock()
+            barrier.trigger_from_decision = AsyncMock()
+
+            await resolve_with_side_effects(
+                call_id="test-call",
+                user_id="test-user",
+                user_decision="approve",
+                user_note="Allow web research in this session",
+                resolved_by="user",
+                audit_store=audit_store,
+                evaluator=MagicMock(),
+                intention_barrier=barrier,
+            )
+
+            barrier.trigger_from_decision.assert_awaited_once()
+
+        asyncio.run(_test())
+
+    def test_judge_note_does_not_trigger_intention_refresh(
+        self, audit_store, session_store
+    ):
+        async def _test():
+            from intaris.judge import resolve_with_side_effects
+
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            barrier = MagicMock()
+            barrier.trigger_from_decision = AsyncMock()
+
+            await resolve_with_side_effects(
+                call_id="test-call",
+                user_id="test-user",
+                user_decision="approve",
+                user_note="Judge (high confidence)",
+                resolved_by="judge",
+                judge_reasoning="safe",
+                audit_store=audit_store,
+                evaluator=MagicMock(),
+                intention_barrier=barrier,
+            )
+
+            barrier.trigger_from_decision.assert_not_awaited()
+
+        asyncio.run(_test())
+
     def test_deny_does_not_learn_paths(self, audit_store, session_store):
         """Deny resolution should not trigger path learning."""
 
@@ -1266,6 +1373,39 @@ class TestJudgePrompt:
             anti_injection=ANTI_INJECTION_PREAMBLE,
         )
         assert "boundary tags" in formatted.lower() or "BOUNDARY" in formatted
+
+    def test_prompt_includes_dedicated_user_decisions(self):
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[],
+            user_decisions=[
+                {
+                    "tool": "web_search",
+                    "args_redacted": {"query": "daily brief"},
+                    "user_decision": "approve",
+                    "user_note": "aligned with the session",
+                }
+            ],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="web_search",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+        )
+
+        assert "## User Decisions" in prompt
+        assert "⟨user_decisions⟩" in prompt
+        assert "aligned with the session" in prompt
 
     def test_reasoning_not_truncated_at_200(self):
         """Reasoning records longer than 200 chars appear in full (up to safety valve)."""

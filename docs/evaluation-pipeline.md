@@ -185,6 +185,12 @@ When a tool call is escalated:
 5. **Client** blocks the tool call and polls `GET /audit/{call_id}` for resolution
 6. **Resolution** recorded via judge auto-resolution or human `POST /api/v1/decision`
 
+When a **human** approves an escalation with a note, Intaris also triggers a
+best-effort intention refresh for that session. The approval note is treated as
+authoritative scope guidance for later evaluations, so long-lived sessions can
+shift away from stale topics without requiring an exact retry of the same tool
+arguments.
+
 ### Judge Auto-Resolution
 
 When `JUDGE_MODE` is enabled (`auto` or `advisory`), escalated tool calls are automatically reviewed by a judge LLM (default gpt-5.4) as a fire-and-forget async task. The judge does not block the evaluate response — the client still receives `decision=escalate` immediately and polls for resolution.
@@ -209,6 +215,10 @@ Judge decisions are visible in the Approvals tab with a "judge" badge and the ju
 ### Escalation Retry
 
 When a tool call is escalated and later approved (by human or judge), subsequent identical calls (same tool + same args) reuse the approval for 10 minutes. Identity is based on SHA-256 of the normalized arguments JSON.
+
+This retry cache is intentionally exact-match only. For later **similar** calls
+with different arguments, Intaris relies on the session intention plus the
+dedicated human-decision context injected into evaluator and judge prompts.
 
 ### Standalone Mode
 
