@@ -135,7 +135,9 @@ function sessionPlayer() {
           }
         }
 
-        this.lastSeq = result.last_seq || this.lastSeq;
+        if (newEvents.length > 0) {
+          this.lastSeq = newEvents[newEvents.length - 1].seq;
+        }
         this.hasMore = result.has_more || false;
       } catch (e) {
         this.error = 'Failed to load events: ' + e.message;
@@ -385,9 +387,9 @@ function sessionPlayer() {
       const data = event.data || {};
       switch (event.type) {
         case 'tool_call':
-          return data.tool || 'tool call';
+          return data.tool || data.name || 'tool call';
         case 'tool_result':
-          return (data.tool || 'result') + (data.isError ? ' (error)' : '');
+          return (data.tool || data.name || 'result') + (data.isError ? ' (error)' : '');
         case 'evaluation': {
           let evalSummary = `${data.tool || '?'}: ${data.decision || '?'} (${data.risk || '?'})`;
           if (data.args_redacted) {

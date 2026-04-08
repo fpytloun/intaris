@@ -386,7 +386,7 @@ function processOpenCode(events) {
     // ── Tool call → correlate with evaluation + result ──
     if (event.type === 'tool_call') {
       const callID = data.callID || data.call_id || data.toolCallId;
-      const toolName = data.tool || '?';
+      const toolName = data.tool || data.name || '?';
       const args = data.args || {};
 
       // Find matching evaluation (same tool, seq between this and next tool_call)
@@ -439,10 +439,10 @@ function processOpenCode(events) {
         blocks.push({
           type: 'tool-group',
           id: 'b' + (blockId++),
-          tool: data.tool || '?',
+          tool: data.tool || data.name || '?',
           subtitle: data.reasoning || '',
           args: data.args_redacted || {},
-          argsDisplay: formatArgsDisplay(data.tool, data.args_redacted || {}),
+          argsDisplay: formatArgsDisplay(data.tool || data.name, data.args_redacted || {}),
           decision: data.decision || null,
           risk: data.risk || null,
           latency: formatLatency(data.latency_ms),
@@ -884,7 +884,9 @@ function consolePlayer() {
           }
         }
 
-        this.lastSeq = result.last_seq || this.lastSeq;
+        if (newEvents.length > 0) {
+          this.lastSeq = newEvents[newEvents.length - 1].seq;
+        }
         this.hasMore = result.has_more || false;
       } catch (e) {
         this.error = 'Failed to load events: ' + e.message;
