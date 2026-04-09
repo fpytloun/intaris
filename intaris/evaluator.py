@@ -70,6 +70,58 @@ _MIN_MERGE_DEPTH = 4
 logger = logging.getLogger(__name__)
 
 
+def _apply_authoritative_user_precedent(
+    evaluation: EvaluationResult,
+    *,
+    tool: str,
+    user_decisions: list[dict[str, Any]],
+) -> EvaluationResult:
+    """Apply final human same-tool precedent to low/medium-risk evaluations.
+
+    This is a narrow guard against stale intention drift: if the LLM marks a
+    low/medium-risk call as not aligned, but the same session has a recent
+    final human approval for the same tool (and no newer human denial for that
+    tool), honor the human precedent and treat the call as aligned.
+    """
+    risk = evaluation.risk.lower()
+    if evaluation.aligned or risk not in ("low", "medium"):
+        return evaluation
+
+    tool_key = (tool or "").strip()
+    if not tool_key:
+        return evaluation
+
+    latest_same_tool = next(
+        (
+            record
+            for record in user_decisions
+            if str(record.get("tool") or "").strip() == tool_key
+        ),
+        None,
+    )
+    if not latest_same_tool:
+        return evaluation
+
+    user_decision = str(latest_same_tool.get("user_decision") or "").lower()
+    if user_decision != "approve":
+        return evaluation
+
+    note = str(latest_same_tool.get("user_note") or "").strip()
+    reasoning = (
+        "Final human approval for the same tool in this session is "
+        "authoritative precedent. " + evaluation.reasoning
+    )
+    if note:
+        reasoning += f' User note: "{note}".'
+
+    return EvaluationResult(
+        aligned=True,
+        risk=evaluation.risk,
+        reasoning=reasoning,
+        decision="approve",
+    )
+
+
 class Evaluator:
     """Orchestrates tool call safety evaluation.
 
@@ -928,6 +980,11 @@ class Evaluator:
                 risk=str(result.get("risk", "high")),
                 reasoning=str(result.get("reasoning", "No reasoning provided")),
                 decision=str(result.get("decision", "escalate")),
+            )
+            evaluation = _apply_authoritative_user_precedent(
+                evaluation,
+                tool=tool,
+                user_decisions=user_decisions,
             )
 
             return apply_decision_matrix(evaluation)

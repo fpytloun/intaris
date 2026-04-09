@@ -390,6 +390,111 @@ class TestEvaluatorDecisionContext:
             "this is fine and aligned"
         )
 
+    def test_llm_evaluate_honors_final_human_same_tool_approval(
+        self, db, session_store
+    ):
+        from intaris.audit import AuditStore
+
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        audit = AuditStore(db)
+        audit.insert(
+            call_id="call-1",
+            user_id="user-1",
+            session_id="sess-1",
+            agent_id=None,
+            tool="mcptodoist_find-projects",
+            args_redacted={"query": "cognis"},
+            classification="write",
+            evaluation_path="llm",
+            decision="escalate",
+            risk="low",
+            reasoning="Needs review",
+            latency_ms=10,
+        )
+        audit.resolve_escalation(
+            "call-1",
+            "approve",
+            user_note="Todoist project lookup is fine in this session",
+            user_id="user-1",
+            resolved_by="user",
+        )
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": false, "risk": "low", '
+            '"reasoning": "Not aligned with intention but previously approved", '
+            '"decision": "approve"}'
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=audit,
+            db=db,
+        )
+
+        session = session_store.get("sess-1", user_id="user-1")
+        decision = evaluator._llm_evaluate(
+            session=session,
+            tool="mcptodoist_find-projects",
+            args_redacted={"query": "intaris"},
+            agent_id=None,
+        )
+
+        assert decision.decision == "approve"
+        assert "authoritative precedent" in decision.reasoning
+
+    def test_llm_evaluate_respects_newer_same_tool_human_denial(
+        self, db, session_store
+    ):
+        from intaris.audit import AuditStore
+
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        audit = AuditStore(db)
+        audit.insert(
+            call_id="call-1",
+            user_id="user-1",
+            session_id="sess-1",
+            agent_id=None,
+            tool="mcptodoist_find-projects",
+            args_redacted={"query": "cognis"},
+            classification="write",
+            evaluation_path="llm",
+            decision="escalate",
+            risk="low",
+            reasoning="Needs review",
+            latency_ms=10,
+        )
+        audit.resolve_escalation(
+            "call-1",
+            "deny",
+            user_note="Do not do this now",
+            user_id="user-1",
+            resolved_by="user",
+        )
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": false, "risk": "low", '
+            '"reasoning": "Not aligned with intention", '
+            '"decision": "approve"}'
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=audit,
+            db=db,
+        )
+
+        session = session_store.get("sess-1", user_id="user-1")
+        decision = evaluator._llm_evaluate(
+            session=session,
+            tool="mcptodoist_find-projects",
+            args_redacted={"query": "intaris"},
+            agent_id=None,
+        )
+
+        assert decision.decision == "escalate"
+
     def test_strips_quotes_from_llm_response(self, db, session_store):
         """generate_intention strips surrounding quotes from LLM output."""
         llm = MagicMock()
