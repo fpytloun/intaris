@@ -169,6 +169,10 @@ class TestUserDecisionsPromptRendering:
 
         assert "## User Decisions" not in prompt
 
+    def test_system_prompt_mentions_similar_operation_families(self):
+        assert "sufficiently similar **operation**" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "web_search` and `web_fetch`" in SAFETY_EVALUATION_SYSTEM_PROMPT
+
     def test_approval_without_note_does_not_render_prior_reasoning(self):
         section = render_user_decisions_section(
             [

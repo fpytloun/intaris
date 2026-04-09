@@ -516,6 +516,161 @@ class TestJudgeReviewer:
 
         asyncio.run(_test())
 
+    def test_auto_mode_honors_cross_tool_human_precedent(
+        self,
+        mock_llm,
+        audit_store,
+        session_store,
+        mock_evaluator,
+        mock_metrics,
+    ):
+        """Judge approves low-risk equivalent tool calls with human precedent."""
+
+        async def _test():
+            _create_session(session_store)
+            audit_store.insert(
+                call_id="prior-call",
+                user_id="test-user",
+                session_id="test-session",
+                agent_id="test-agent",
+                tool="web_search",
+                args_redacted={"query": "todoist docs"},
+                classification="write",
+                evaluation_path="llm",
+                decision="escalate",
+                risk="low",
+                reasoning="Needs review",
+                latency_ms=10,
+            )
+            audit_store.resolve_escalation(
+                "prior-call",
+                "approve",
+                user_note="Web lookup is fine in this session",
+                user_id="test-user",
+                resolved_by="user",
+            )
+            audit_store.insert(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+                agent_id="test-agent",
+                tool="web_fetch",
+                args_redacted={"url": "https://todoist.com/help"},
+                classification="write",
+                evaluation_path="llm",
+                decision="escalate",
+                risk="low",
+                reasoning="Not aligned with intention",
+                latency_ms=10,
+            )
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "deny",
+                    "reasoning": "Intention looks stale so I would deny",
+                    "confidence": "low",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="auto",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] == "approve"
+            assert record["resolved_by"] == "judge"
+            assert "authoritative precedent" in (record["judge_reasoning"] or "")
+
+        asyncio.run(_test())
+
+    def test_auto_mode_respects_cross_tool_human_denial(
+        self,
+        mock_llm,
+        audit_store,
+        session_store,
+        mock_evaluator,
+        mock_metrics,
+    ):
+        """A newer family-level denial blocks cross-tool approval override."""
+
+        async def _test():
+            _create_session(session_store)
+            audit_store.insert(
+                call_id="prior-call",
+                user_id="test-user",
+                session_id="test-session",
+                agent_id="test-agent",
+                tool="mcptodoist_find-projects",
+                args_redacted={"query": "cognis"},
+                classification="write",
+                evaluation_path="llm",
+                decision="escalate",
+                risk="low",
+                reasoning="Needs review",
+                latency_ms=10,
+            )
+            audit_store.resolve_escalation(
+                "prior-call",
+                "deny",
+                user_note="No Todoist lookups for now",
+                user_id="test-user",
+                resolved_by="user",
+            )
+            audit_store.insert(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+                agent_id="test-agent",
+                tool="mcptodoist_find-sections",
+                args_redacted={"projectId": "abc123"},
+                classification="write",
+                evaluation_path="llm",
+                decision="escalate",
+                risk="low",
+                reasoning="Not aligned with intention",
+                latency_ms=10,
+            )
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "deny",
+                    "reasoning": "Still looks off-topic",
+                    "confidence": "low",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="auto",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] == "deny"
+            assert record["resolved_by"] == "judge"
+
+        asyncio.run(_test())
+
     def test_auto_deny(
         self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
     ):

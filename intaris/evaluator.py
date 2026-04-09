@@ -47,6 +47,7 @@ from intaris.decision import (
     make_fast_decision,
 )
 from intaris.llm import LLMClient, parse_json_response
+from intaris.precedent import find_authoritative_precedent
 from intaris.prompts import (
     SAFETY_EVALUATION_SCHEMA,
     SAFETY_EVALUATION_SYSTEM_PROMPT,
@@ -74,6 +75,7 @@ def _apply_authoritative_user_precedent(
     evaluation: EvaluationResult,
     *,
     tool: str,
+    args_redacted: dict[str, Any],
     user_decisions: list[dict[str, Any]],
 ) -> EvaluationResult:
     """Apply final human same-tool precedent to low/medium-risk evaluations.
@@ -87,30 +89,18 @@ def _apply_authoritative_user_precedent(
     if evaluation.aligned or risk not in ("low", "medium"):
         return evaluation
 
-    tool_key = (tool or "").strip()
-    if not tool_key:
+    precedent = find_authoritative_precedent(tool, args_redacted, user_decisions)
+    if not precedent:
         return evaluation
 
-    latest_same_tool = next(
-        (
-            record
-            for record in user_decisions
-            if str(record.get("tool") or "").strip() == tool_key
-        ),
-        None,
-    )
-    if not latest_same_tool:
-        return evaluation
-
-    user_decision = str(latest_same_tool.get("user_decision") or "").lower()
-    if user_decision != "approve":
-        return evaluation
-
-    note = str(latest_same_tool.get("user_note") or "").strip()
+    note = str(precedent.get("user_note") or "").strip()
+    prior_tool = str(precedent.get("tool") or "").strip()
     reasoning = (
-        "Final human approval for the same tool in this session is "
+        "Final human approval for a sufficiently similar operation in this session is "
         "authoritative precedent. " + evaluation.reasoning
     )
+    if prior_tool and prior_tool != tool:
+        reasoning += f" Prior approved tool: {prior_tool}."
     if note:
         reasoning += f' User note: "{note}".'
 
@@ -984,6 +974,7 @@ class Evaluator:
             evaluation = _apply_authoritative_user_precedent(
                 evaluation,
                 tool=tool,
+                args_redacted=args_redacted,
                 user_decisions=user_decisions,
             )
 

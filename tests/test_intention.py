@@ -443,6 +443,57 @@ class TestEvaluatorDecisionContext:
         assert decision.decision == "approve"
         assert "authoritative precedent" in decision.reasoning
 
+    def test_llm_evaluate_honors_cross_tool_family_approval(self, db, session_store):
+        from intaris.audit import AuditStore
+
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        audit = AuditStore(db)
+        audit.insert(
+            call_id="call-1",
+            user_id="user-1",
+            session_id="sess-1",
+            agent_id=None,
+            tool="web_search",
+            args_redacted={"query": "todoist docs"},
+            classification="write",
+            evaluation_path="llm",
+            decision="escalate",
+            risk="low",
+            reasoning="Needs review",
+            latency_ms=10,
+        )
+        audit.resolve_escalation(
+            "call-1",
+            "approve",
+            user_note="Web lookup is fine for this session",
+            user_id="user-1",
+            resolved_by="user",
+        )
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": false, "risk": "low", '
+            '"reasoning": "Fetching docs looks off-topic", '
+            '"decision": "approve"}'
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=audit,
+            db=db,
+        )
+
+        session = session_store.get("sess-1", user_id="user-1")
+        decision = evaluator._llm_evaluate(
+            session=session,
+            tool="web_fetch",
+            args_redacted={"url": "https://todoist.com/help"},
+            agent_id=None,
+        )
+
+        assert decision.decision == "approve"
+        assert "Prior approved tool: web_search" in decision.reasoning
+
     def test_llm_evaluate_respects_newer_same_tool_human_denial(
         self, db, session_store
     ):
@@ -490,6 +541,56 @@ class TestEvaluatorDecisionContext:
             session=session,
             tool="mcptodoist_find-projects",
             args_redacted={"query": "intaris"},
+            agent_id=None,
+        )
+
+        assert decision.decision == "escalate"
+
+    def test_llm_evaluate_respects_cross_tool_family_denial(self, db, session_store):
+        from intaris.audit import AuditStore
+
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        audit = AuditStore(db)
+        audit.insert(
+            call_id="call-1",
+            user_id="user-1",
+            session_id="sess-1",
+            agent_id=None,
+            tool="mcptodoist_find-projects",
+            args_redacted={"query": "cognis"},
+            classification="write",
+            evaluation_path="llm",
+            decision="escalate",
+            risk="low",
+            reasoning="Needs review",
+            latency_ms=10,
+        )
+        audit.resolve_escalation(
+            "call-1",
+            "deny",
+            user_note="Do not do Todoist lookups now",
+            user_id="user-1",
+            resolved_by="user",
+        )
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": false, "risk": "low", '
+            '"reasoning": "Not aligned with intention", '
+            '"decision": "approve"}'
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=audit,
+            db=db,
+        )
+
+        session = session_store.get("sess-1", user_id="user-1")
+        decision = evaluator._llm_evaluate(
+            session=session,
+            tool="mcptodoist_find-sections",
+            args_redacted={"projectId": "abc123"},
             agent_id=None,
         )
 
