@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-04-11
+
+### Added
+
+- **Human approval precedent** -- Feed final human approval decisions back into intention and evaluation prompts so follow-up calls on the same task inherit the user's explicit guidance more reliably.
+
+### Fixed
+
+- **Session metadata** -- Persist and expose `status_reason` and `agent_id` consistently in session APIs and bootstrap responses.
+- **Background workers** -- Reuse analysis LLM clients and tighten task liveness tracking to reduce RSS growth and make stuck-task recovery more reliable.
+- **Audit and evaluation** -- Honor final human same-tool approvals and share those precedents across similar low-risk tools to cut redundant escalations.
+- **Event and storage IDs** -- Allow plus-addressed user IDs in the event store and encode path-based identifiers safely.
+- **UI** -- Fix event pagination and Cognis tool name rendering in the management UI.
+
+### Changed
+
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.4.1`.
+
 ## [0.4.0] - 2026-04-02
 
 ### Added
@@ -121,6 +139,7 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.4.1]: https://github.com/fpytloun/intaris/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/fpytloun/intaris/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/fpytloun/intaris/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/fpytloun/intaris/compare/v0.3.0...v0.3.1
