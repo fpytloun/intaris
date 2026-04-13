@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from openai import BadRequestError, OpenAI
@@ -18,6 +19,27 @@ from openai import BadRequestError, OpenAI
 from intaris.config import LLMConfig
 
 logger = logging.getLogger(__name__)
+
+_RETRY_AFTER_SECONDS_RE = re.compile(
+    r"(?:try again in|retry after)\s+([0-9]+(?:\.[0-9]+)?)s",
+    re.IGNORECASE,
+)
+
+
+class LLMTemporaryError(RuntimeError):
+    """Transient LLM/provider failure with a user-facing message."""
+
+    def __init__(
+        self,
+        user_message: str,
+        *,
+        retry_after_seconds: float | None = None,
+        original_exception: Exception | None = None,
+    ) -> None:
+        super().__init__(user_message)
+        self.user_message = user_message
+        self.retry_after_seconds = retry_after_seconds
+        self.original_exception = original_exception
 
 
 class LLMClient:
@@ -28,7 +50,13 @@ class LLMClient:
     providers that don't support it.
     """
 
-    def __init__(self, config: LLMConfig):
+    def __init__(
+        self,
+        config: LLMConfig,
+        *,
+        transient_retries: int = 0,
+        max_retry_after_seconds: float = 15.0,
+    ):
         self._client = OpenAI(
             api_key=config.api_key,
             base_url=config.base_url,
@@ -43,6 +71,8 @@ class LLMClient:
         # Maps param name -> fix action. Populated on first BadRequestError.
         self._param_fixes: dict[str, str] = {}
         self._closed = False
+        self._transient_retries = max(0, transient_retries)
+        self._max_retry_after_seconds = max(0.0, max_retry_after_seconds)
 
     def close(self) -> None:
         """Close the underlying HTTP client.
@@ -94,7 +124,9 @@ class LLMClient:
                 )
                 self._supports_structured = True
                 return result
-            except Exception:
+            except LLMTemporaryError:
+                raise
+            except BadRequestError:
                 if self._supports_structured is None:
                     logger.warning(
                         "Structured outputs not supported by provider, "
@@ -140,12 +172,18 @@ class LLMClient:
             reasoning_effort=reasoning_effort,
         )
 
-        # Retry loop for parameter incompatibilities
+        # Retry loop for parameter incompatibilities and transient provider
+        # issues. Background analysis clients opt into the latter; request-path
+        # clients keep zero transient retries to preserve latency budgets.
         max_retries = 3
         response = None
+        transient_attempts = self._transient_retries + 1
         for attempt in range(1 + max_retries):
             try:
-                response = self._client.chat.completions.create(**params)
+                response = self._call_with_transient_retries(
+                    params,
+                    max_attempts=transient_attempts,
+                )
                 break
             except BadRequestError as e:
                 if attempt < max_retries and self._try_fix_params(
@@ -203,7 +241,10 @@ class LLMClient:
                     content_retries,
                 )
 
-            response = self._client.chat.completions.create(**params)
+            response = self._call_with_transient_retries(
+                params,
+                max_attempts=transient_attempts,
+            )
         else:
             choice = response.choices[0]
             content = choice.message.content or ""
@@ -218,6 +259,42 @@ class LLMClient:
                 )
 
         return _clean_response(content)
+
+    def _call_with_transient_retries(
+        self,
+        params: dict[str, Any],
+        *,
+        max_attempts: int,
+    ) -> Any:
+        """Execute a chat completion with optional transient retry handling."""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return self._client.chat.completions.create(**params)
+            except BadRequestError:
+                raise
+            except Exception as exc:
+                normalized = normalize_llm_error(exc)
+                if normalized is None:
+                    raise
+                if attempt >= max_attempts:
+                    raise normalized from exc
+
+                delay = normalized.retry_after_seconds or 1.0
+                delay = min(delay, self._max_retry_after_seconds)
+                if delay <= 0:
+                    raise normalized from exc
+
+                logger.warning(
+                    "Transient LLM failure for model %s, retrying in %.2fs (%d/%d): %s",
+                    self._model,
+                    delay,
+                    attempt,
+                    max_attempts,
+                    normalized.user_message,
+                )
+                time.sleep(delay)
+
+        raise RuntimeError("unreachable")
 
     def _build_params(
         self,
@@ -318,6 +395,118 @@ def _clean_response(text: str) -> str:
         text = re.sub(r"\n?```$", "", text)
 
     return text.strip()
+
+
+def normalize_llm_error(exc: Exception) -> LLMTemporaryError | None:
+    """Map provider/transport failures to concise transient errors."""
+    status_code = getattr(exc, "status_code", None)
+    body = getattr(exc, "body", None)
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    type_name = type(exc).__name__
+    message = str(exc)
+    lower_msg = message.lower()
+
+    retry_after = _parse_retry_after_seconds(headers, body, message)
+
+    if (
+        status_code == 429
+        or "ratelimit" in type_name.lower()
+        or ("rate limit" in lower_msg and "429" in lower_msg)
+    ):
+        user_message = (
+            "LLM provider is temporarily rate limited. Please try again shortly."
+        )
+        return LLMTemporaryError(
+            user_message,
+            retry_after_seconds=retry_after,
+            original_exception=exc,
+        )
+
+    if (
+        "timeout" in type_name.lower()
+        or "timed out" in lower_msg
+        or "connection" in type_name.lower()
+        or "connection" in lower_msg
+    ):
+        return LLMTemporaryError(
+            "LLM provider is temporarily unavailable. Please try again.",
+            retry_after_seconds=retry_after,
+            original_exception=exc,
+        )
+
+    if isinstance(status_code, int) and status_code >= 500:
+        return LLMTemporaryError(
+            "LLM provider returned a temporary server error. Please try again.",
+            retry_after_seconds=retry_after,
+            original_exception=exc,
+        )
+
+    return None
+
+
+def _parse_retry_after_seconds(
+    headers: Any,
+    body: Any,
+    message: str,
+) -> float | None:
+    """Extract retry delay from provider headers or error text."""
+    candidates: list[str] = []
+
+    if headers is not None:
+        for key in (
+            "retry-after",
+            "x-ratelimit-reset-after",
+            "x-rate-limit-reset-after",
+            "x-ratelimit-retry-after",
+        ):
+            try:
+                value = headers.get(key)
+            except Exception:
+                value = None
+            if value:
+                candidates.append(str(value))
+
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            err_msg = error.get("message")
+            if err_msg:
+                candidates.append(str(err_msg))
+        body_msg = body.get("message")
+        if body_msg:
+            candidates.append(str(body_msg))
+
+    if message:
+        candidates.append(message)
+
+    for candidate in candidates:
+        parsed = _parse_retry_after_value(candidate)
+        if parsed is not None:
+            return parsed
+
+    return None
+
+
+def _parse_retry_after_value(value: str) -> float | None:
+    """Parse a retry-after string or provider message fragment."""
+    text = value.strip()
+    if not text:
+        return None
+
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+
+    match = _RETRY_AFTER_SECONDS_RE.search(text)
+    if match:
+        try:
+            return max(0.0, float(match.group(1)))
+        except ValueError:
+            return None
+
+    return None
 
 
 def parse_json_response(

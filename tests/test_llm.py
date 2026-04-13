@@ -7,10 +7,18 @@ and edge cases in _validate_keys().
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from intaris.llm import _KEY_ALIASES, _validate_keys, parse_json_response
+from intaris.config import LLMConfig
+from intaris.llm import (
+    _KEY_ALIASES,
+    LLMClient,
+    LLMTemporaryError,
+    _validate_keys,
+    parse_json_response,
+)
 
 # ── _validate_keys: basic behavior ────────────────────────────────────
 
@@ -260,3 +268,108 @@ class TestKeyAliasesCoverage:
             assert key in _KEY_ALIASES, (
                 f"Observed hallucination {key!r} has no alias mapping"
             )
+
+
+class _FakeRateLimitError(Exception):
+    def __init__(self, message: str, *, headers: dict[str, str] | None = None):
+        super().__init__(message)
+        self.status_code = 429
+        self.body = {"error": {"message": message}}
+        self.response = SimpleNamespace(headers=headers or {})
+
+
+def _make_response(content: str):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=content, refusal=None),
+            )
+        ]
+    )
+
+
+class TestTransientLLMFailures:
+    def test_generate_retries_rate_limit_and_succeeds(self, monkeypatch):
+        calls = []
+        sleeps = []
+
+        class _FakeCompletions:
+            def create(self, **params):
+                calls.append(params)
+                if len(calls) == 1:
+                    raise _FakeRateLimitError(
+                        "Rate limit reached. Please try again in 4.7052s."
+                    )
+                return _make_response('{"ok": true}')
+
+        class _FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr("intaris.llm.OpenAI", _FakeOpenAI)
+        monkeypatch.setattr(
+            "intaris.llm.time.sleep", lambda seconds: sleeps.append(seconds)
+        )
+
+        client = LLMClient(
+            LLMConfig(api_key="test-key", base_url="http://example.test"),
+            transient_retries=1,
+        )
+
+        assert client.generate([{"role": "user", "content": "hi"}]) == '{"ok": true}'
+        assert len(calls) == 2
+        assert sleeps == [pytest.approx(4.7052)]
+
+    def test_generate_raises_friendly_error_after_retry_exhausted(self, monkeypatch):
+        class _FakeCompletions:
+            def create(self, **params):
+                raise _FakeRateLimitError("Rate limit reached")
+
+        class _FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr("intaris.llm.OpenAI", _FakeOpenAI)
+        monkeypatch.setattr("intaris.llm.time.sleep", lambda seconds: None)
+
+        client = LLMClient(
+            LLMConfig(api_key="test-key", base_url="http://example.test"),
+            transient_retries=1,
+        )
+
+        with pytest.raises(LLMTemporaryError, match="temporarily rate limited"):
+            client.generate([{"role": "user", "content": "hi"}])
+
+    def test_structured_output_does_not_swallow_temporary_error(self, monkeypatch):
+        class _FakeCompletions:
+            def create(self, **params):
+                raise _FakeRateLimitError("Rate limit reached")
+
+        class _FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr("intaris.llm.OpenAI", _FakeOpenAI)
+
+        client = LLMClient(
+            LLMConfig(api_key="test-key", base_url="http://example.test"),
+            transient_retries=0,
+        )
+
+        with pytest.raises(LLMTemporaryError):
+            client.generate(
+                [{"role": "user", "content": "hi"}],
+                json_schema={"name": "x", "schema": {"type": "object"}},
+            )
+
+        assert client._supports_structured is None

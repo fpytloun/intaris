@@ -595,6 +595,46 @@ class TestBackgroundWorkerLLMCache:
         worker = self._make_worker(db)
         asyncio.run(worker.stop())  # Should not raise
 
+    def test_create_analysis_llm_enables_transient_retries(self, monkeypatch, db):
+        from intaris.config import LLMConfig
+
+        worker = self._make_worker(db)
+
+        class _FakeClient:
+            def __init__(self, cfg, **kwargs):
+                self.cfg = cfg
+                self.kwargs = kwargs
+
+        created = []
+
+        def _fake_llm_client(cfg, **kwargs):
+            created.append((cfg, kwargs))
+            return _FakeClient(cfg, **kwargs)
+
+        monkeypatch.setattr(
+            "intaris.config.load_config",
+            lambda: type(
+                "Cfg",
+                (),
+                {
+                    "llm_analysis": LLMConfig(
+                        api_key="test-key", base_url="http://example.test"
+                    ),
+                    "llm_l3_analysis": LLMConfig(
+                        api_key="test-key", base_url="http://example.test"
+                    ),
+                },
+            )(),
+        )
+
+        monkeypatch.setattr("intaris.llm.LLMClient", _fake_llm_client)
+
+        client = worker._create_llm_client("analysis")
+
+        assert isinstance(client, _FakeClient)
+        assert created[0][1]["transient_retries"] == 2
+        assert created[0][1]["max_retry_after_seconds"] == 15.0
+
     def test_intention_update_skips_when_no_llm(self, db, session_store):
         """Intention update returns skipped when LLM client is unavailable."""
         import asyncio

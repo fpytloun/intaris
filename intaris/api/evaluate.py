@@ -313,7 +313,16 @@ async def evaluate(
         return EvaluateResponse(**result)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
-    except Exception:
+    except Exception as e:
+        try:
+            from intaris.llm import LLMTemporaryError
+
+            if isinstance(e, LLMTemporaryError):
+                raise HTTPException(status_code=503, detail=e.user_message) from e
+        except HTTPException:
+            raise
+        except Exception:
+            pass
         logger.exception("Error in /evaluate")
         raise HTTPException(
             status_code=500,

@@ -918,6 +918,14 @@ class BackgroundWorker:
                     )
             except Exception as e:
                 runtime_s = time.monotonic() - start_monotonic
+                error_message = str(e)
+                try:
+                    from intaris.llm import LLMTemporaryError
+
+                    if isinstance(e, LLMTemporaryError):
+                        error_message = e.user_message
+                except Exception:
+                    pass
                 logger.exception(
                     "Failed %s task %s after %.2fs (user=%s, session=%s): %s",
                     task_type,
@@ -925,9 +933,9 @@ class BackgroundWorker:
                     runtime_s,
                     task.get("user_id"),
                     task.get("session_id"),
-                    e,
+                    error_message,
                 )
-                self._task_queue.fail(task_id, str(e))
+                self._task_queue.fail(task_id, error_message)
                 if task_type == "summary":
                     self.metrics.summaries_failed_total += 1
                 elif task_type == "analysis":
@@ -1269,7 +1277,11 @@ class BackgroundWorker:
             llm_cfg = cfg.llm_l3_analysis
         else:
             llm_cfg = cfg.llm_analysis
-        client = LLMClient(llm_cfg)
+        client = LLMClient(
+            llm_cfg,
+            transient_retries=2,
+            max_retry_after_seconds=15.0,
+        )
         logger.info(
             "Created cached %s LLM client (model=%s)",
             role,
