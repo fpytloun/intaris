@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -44,6 +45,7 @@ def session_store(tmp_db):
 def mock_llm():
     """Create a mock LLM client."""
     llm = MagicMock()
+    llm._timeout_ms = 15000
     return llm
 
 
@@ -626,6 +628,165 @@ class TestJudgeReviewer:
             assert mock_metrics.judge_reviews_total == 1
             assert mock_metrics.judge_approvals_total == 1
             assert mock_event_bus.publish.called
+
+        asyncio.run(_test())
+
+    def test_review_for_evaluate_returns_persisted_effective_approval(
+        self,
+        mock_llm,
+        audit_store,
+        session_store,
+        mock_evaluator,
+        mock_metrics,
+    ):
+        """Blocking judge path returns the persisted effective approval."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "approve",
+                    "reasoning": "Clearly safe operation within project scope",
+                    "risk": "low",
+                    "confidence": "high",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+            )
+
+            outcome = await reviewer.review_for_evaluate(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+                agent_id="test-agent",
+            )
+
+            assert outcome.decision == "approve"
+            assert outcome.risk == "low"
+            assert "Clearly safe" in (outcome.reasoning or "")
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] == "approve"
+            assert record["resolved_by"] == "judge"
+
+        asyncio.run(_test())
+
+    def test_review_for_evaluate_returns_human_winner_when_race_lost(
+        self,
+        mock_llm,
+        audit_store,
+        session_store,
+        mock_evaluator,
+        mock_metrics,
+    ):
+        """Blocking judge path re-reads persistence and returns the human winner."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            def _slow_generate(*args, **kwargs):
+                time.sleep(0.05)
+                return json.dumps(
+                    {
+                        "decision": "approve",
+                        "reasoning": "Judge would approve this",
+                        "risk": "low",
+                        "confidence": "high",
+                    }
+                )
+
+            mock_llm.generate.side_effect = _slow_generate
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+            )
+
+            task = asyncio.create_task(
+                reviewer.review_for_evaluate(
+                    call_id="test-call",
+                    user_id="test-user",
+                    session_id="test-session",
+                )
+            )
+            await asyncio.sleep(0.01)
+            audit_store.resolve_escalation(
+                "test-call",
+                "deny",
+                user_note="Human denied first",
+                user_id="test-user",
+                resolved_by="user",
+            )
+            outcome = await task
+
+            assert outcome.decision == "deny"
+            assert outcome.reasoning == "Human denied first"
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] == "deny"
+            assert record["resolved_by"] == "user"
+
+        asyncio.run(_test())
+
+    def test_review_for_evaluate_timeout_falls_back_to_escalate(
+        self,
+        mock_llm,
+        audit_store,
+        session_store,
+        mock_evaluator,
+        mock_metrics,
+    ):
+        """Blocking judge path times out without resolving the escalation."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+            mock_llm._timeout_ms = 10
+
+            def _slow_generate(*args, **kwargs):
+                time.sleep(0.05)
+                return json.dumps(
+                    {
+                        "decision": "approve",
+                        "reasoning": "Too slow to matter",
+                        "risk": "low",
+                        "confidence": "high",
+                    }
+                )
+
+            mock_llm.generate.side_effect = _slow_generate
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+            )
+
+            outcome = await reviewer.review_for_evaluate(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            assert outcome.decision == "escalate"
+            assert "timed out" in (outcome.reasoning or "")
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] is None
 
         asyncio.run(_test())
 

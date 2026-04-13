@@ -7,6 +7,7 @@ in-memory SQLite database and mock LLM client.
 from __future__ import annotations
 
 import os
+import time
 from unittest.mock import patch
 
 import pytest
@@ -93,6 +94,88 @@ def client_with_auth(env_with_auth):
 def _auth_headers(token: str = "test-api-key") -> dict:
     """Create auth headers."""
     return {"Authorization": f"Bearer {token}"}
+
+
+class _FakeEvaluator:
+    """Stub evaluator used for endpoint contract tests."""
+
+    def __init__(self, result: dict):
+        self._result = result
+
+    def evaluate(self, **kwargs):
+        return dict(self._result)
+
+    def get_behavioral_context(self, user_id, agent_id):
+        return None
+
+
+class _NotificationRecorder:
+    def __init__(self):
+        self.notifications = []
+
+    async def notify(self, user_id: str, notification):
+        self.notifications.append((user_id, notification))
+
+
+class _WebhookRecorder:
+    def __init__(self):
+        self.sent = []
+
+    def is_configured(self) -> bool:
+        return True
+
+    async def send_escalation(self, **kwargs):
+        self.sent.append(kwargs)
+
+
+def _insert_escalated_result(
+    *,
+    user_id: str,
+    session_id: str,
+    call_id: str,
+    tool: str = "bash",
+    args_redacted: dict | None = None,
+    risk: str = "medium",
+    reasoning: str = "Needs review",
+    path: str = "llm",
+) -> dict:
+    from intaris.audit import AuditStore
+    from intaris.server import _get_db
+
+    store = AuditStore(_get_db())
+    record = store.insert(
+        call_id=call_id,
+        user_id=user_id,
+        session_id=session_id,
+        agent_id="test-agent",
+        tool=tool,
+        args_redacted=args_redacted or {"command": "ls"},
+        classification="write",
+        evaluation_path=path,
+        decision="escalate",
+        risk=risk,
+        reasoning=reasoning,
+        latency_ms=12,
+    )
+    return {
+        "call_id": record["call_id"],
+        "decision": "escalate",
+        "reasoning": record["reasoning"],
+        "risk": record["risk"],
+        "path": record["evaluation_path"],
+        "latency_ms": record["latency_ms"],
+        "args_redacted": record["args_redacted"],
+        "classification": record["classification"],
+    }
+
+
+def _set_app_state(client: TestClient, name: str, value) -> None:
+    """Set state on both the Starlette parent app and mounted FastAPI API app."""
+
+    setattr(client.app.state, name, value)
+    api_app = getattr(client.app.state, "_api_app", None)
+    if api_app is not None:
+        setattr(api_app.state, name, value)
 
 
 def _create_session(client, session_id: str = "test-sess", headers: dict | None = None):
@@ -466,6 +549,325 @@ class TestEvaluate:
         data = resp.json()
         assert data["decision"] == "deny"
         assert "suspended" in data["reasoning"]
+
+    def test_evaluate_waits_for_judge_auto_approve(self, client_no_auth, monkeypatch):
+        """Judge-enabled escalations return final approval inline."""
+        from intaris.judge import JudgeEffectiveOutcome
+
+        headers = {"X-User-Id": "user-judge-approve"}
+        _create_session(client_no_auth, "sess-judge-approve", headers)
+        result = _insert_escalated_result(
+            user_id="user-judge-approve",
+            session_id="sess-judge-approve",
+            call_id="call-judge-approve",
+            risk="low",
+        )
+
+        class _Reviewer:
+            is_enabled = True
+
+            async def review_for_evaluate(self, **kwargs):
+                return JudgeEffectiveOutcome(
+                    decision="approve",
+                    reasoning="Judge approved",
+                    risk="low",
+                    record={"call_id": result["call_id"]},
+                    latency_ms=7,
+                )
+
+        monkeypatch.setattr(
+            "intaris.server._get_evaluator",
+            lambda: _FakeEvaluator(result),
+        )
+        _set_app_state(client_no_auth, "judge_reviewer", _Reviewer())
+
+        resp = client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-judge-approve",
+                "tool": "bash",
+                "args": {"command": "ls"},
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["decision"] == "approve"
+        assert data["reasoning"] == "Judge approved"
+        assert data["risk"] == "low"
+
+    def test_evaluate_waits_for_judge_auto_deny(self, client_no_auth, monkeypatch):
+        """Judge-enabled escalations return final denial inline."""
+        from intaris.judge import JudgeEffectiveOutcome
+
+        headers = {"X-User-Id": "user-judge-deny"}
+        _create_session(client_no_auth, "sess-judge-deny", headers)
+        result = _insert_escalated_result(
+            user_id="user-judge-deny",
+            session_id="sess-judge-deny",
+            call_id="call-judge-deny",
+            risk="high",
+        )
+
+        class _Reviewer:
+            is_enabled = True
+
+            async def review_for_evaluate(self, **kwargs):
+                return JudgeEffectiveOutcome(
+                    decision="deny",
+                    reasoning="Judge denied",
+                    risk="high",
+                    record={"call_id": result["call_id"]},
+                    latency_ms=7,
+                )
+
+        monkeypatch.setattr(
+            "intaris.server._get_evaluator",
+            lambda: _FakeEvaluator(result),
+        )
+        _set_app_state(client_no_auth, "judge_reviewer", _Reviewer())
+
+        resp = client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-judge-deny",
+                "tool": "bash",
+                "args": {"command": "ls"},
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["decision"] == "deny"
+        assert data["reasoning"] == "Judge denied"
+        assert data["risk"] == "high"
+
+    def test_evaluate_advisory_defer_returns_escalate_once(
+        self, client_no_auth, monkeypatch
+    ):
+        """Unresolved judge outcomes emit a single escalation after judge wait."""
+        from intaris.judge import JudgeEffectiveOutcome
+
+        headers = {"X-User-Id": "user-judge-defer"}
+        _create_session(client_no_auth, "sess-judge-defer", headers)
+        result = _insert_escalated_result(
+            user_id="user-judge-defer",
+            session_id="sess-judge-defer",
+            call_id="call-judge-defer",
+            risk="medium",
+            reasoning="Initial escalation",
+        )
+
+        class _Reviewer:
+            is_enabled = True
+            notify_mode = "always"
+
+            async def review_for_evaluate(self, **kwargs):
+                return JudgeEffectiveOutcome(
+                    decision="escalate",
+                    reasoning="Judge deferred to human",
+                    risk="medium",
+                    record={"call_id": result["call_id"]},
+                    latency_ms=9,
+                    notification_event_type="judge_deferral",
+                )
+
+        monkeypatch.setattr(
+            "intaris.server._get_evaluator",
+            lambda: _FakeEvaluator(result),
+        )
+        webhook = _WebhookRecorder()
+        dispatcher = _NotificationRecorder()
+        _set_app_state(client_no_auth, "judge_reviewer", _Reviewer())
+        _set_app_state(client_no_auth, "webhook", webhook)
+        _set_app_state(client_no_auth, "notification_dispatcher", dispatcher)
+
+        resp = client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-judge-defer",
+                "tool": "bash",
+                "args": {"command": "ls"},
+            },
+            headers=headers,
+        )
+        time.sleep(0.02)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["decision"] == "escalate"
+        assert data["reasoning"] == "Judge deferred to human"
+        assert len(webhook.sent) == 1
+        assert len(dispatcher.notifications) == 1
+        assert dispatcher.notifications[0][1].event_type == "judge_deferral"
+
+    def test_evaluate_judge_failure_falls_back_to_escalate(
+        self, client_no_auth, monkeypatch
+    ):
+        """Judge failures still return unresolved escalation for human review."""
+        from intaris.judge import JudgeEffectiveOutcome
+
+        headers = {"X-User-Id": "user-judge-fail"}
+        _create_session(client_no_auth, "sess-judge-fail", headers)
+        result = _insert_escalated_result(
+            user_id="user-judge-fail",
+            session_id="sess-judge-fail",
+            call_id="call-judge-fail",
+        )
+
+        class _Reviewer:
+            is_enabled = True
+            notify_mode = "deny_only"
+
+            async def review_for_evaluate(self, **kwargs):
+                return JudgeEffectiveOutcome(
+                    decision="escalate",
+                    reasoning="Judge review failed — escalation requires human review",
+                    risk="medium",
+                    record={"call_id": result["call_id"]},
+                    latency_ms=10,
+                    notification_event_type="judge_error",
+                )
+
+        monkeypatch.setattr(
+            "intaris.server._get_evaluator",
+            lambda: _FakeEvaluator(result),
+        )
+        webhook = _WebhookRecorder()
+        dispatcher = _NotificationRecorder()
+        _set_app_state(client_no_auth, "judge_reviewer", _Reviewer())
+        _set_app_state(client_no_auth, "webhook", webhook)
+        _set_app_state(client_no_auth, "notification_dispatcher", dispatcher)
+
+        resp = client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-judge-fail",
+                "tool": "bash",
+                "args": {"command": "ls"},
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["decision"] == "escalate"
+        assert "failed" in data["reasoning"]
+        time.sleep(0.02)
+        assert len(webhook.sent) == 1
+        assert len(dispatcher.notifications) == 0
+
+    def test_evaluate_judge_notify_never_skips_unresolved_channel_notification(
+        self, client_no_auth, monkeypatch
+    ):
+        """Judge notify_mode=never suppresses unresolved channel notifications."""
+        from intaris.judge import JudgeEffectiveOutcome
+
+        headers = {"X-User-Id": "user-judge-never"}
+        _create_session(client_no_auth, "sess-judge-never", headers)
+        result = _insert_escalated_result(
+            user_id="user-judge-never",
+            session_id="sess-judge-never",
+            call_id="call-judge-never",
+        )
+
+        class _Reviewer:
+            is_enabled = True
+            notify_mode = "never"
+
+            async def review_for_evaluate(self, **kwargs):
+                return JudgeEffectiveOutcome(
+                    decision="escalate",
+                    reasoning="Judge review timed out — escalation requires human review",
+                    risk="medium",
+                    record={"call_id": result["call_id"]},
+                    latency_ms=10,
+                    notification_event_type="judge_error",
+                )
+
+        monkeypatch.setattr(
+            "intaris.server._get_evaluator",
+            lambda: _FakeEvaluator(result),
+        )
+        webhook = _WebhookRecorder()
+        dispatcher = _NotificationRecorder()
+        _set_app_state(client_no_auth, "judge_reviewer", _Reviewer())
+        _set_app_state(client_no_auth, "webhook", webhook)
+        _set_app_state(client_no_auth, "notification_dispatcher", dispatcher)
+
+        resp = client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-judge-never",
+                "tool": "bash",
+                "args": {"command": "ls"},
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        time.sleep(0.02)
+        assert len(webhook.sent) == 1
+        assert len(dispatcher.notifications) == 0
+
+    def test_evaluate_judge_human_race_returns_persisted_human_winner(
+        self, client_no_auth, monkeypatch
+    ):
+        """The API returns the persisted human winner if resolved during the wait."""
+        from intaris.audit import AuditStore
+        from intaris.judge import JudgeEffectiveOutcome
+        from intaris.server import _get_db
+
+        headers = {"X-User-Id": "user-judge-race"}
+        _create_session(client_no_auth, "sess-judge-race", headers)
+        result = _insert_escalated_result(
+            user_id="user-judge-race",
+            session_id="sess-judge-race",
+            call_id="call-judge-race",
+        )
+
+        class _Reviewer:
+            is_enabled = True
+
+            async def review_for_evaluate(self, **kwargs):
+                store = AuditStore(_get_db())
+                record = store.resolve_escalation(
+                    "call-judge-race",
+                    "deny",
+                    user_note="Human denied first",
+                    user_id="user-judge-race",
+                    resolved_by="user",
+                )
+                return JudgeEffectiveOutcome(
+                    decision="deny",
+                    reasoning=record["user_note"],
+                    risk=record["risk"],
+                    record=record,
+                    latency_ms=8,
+                )
+
+        monkeypatch.setattr(
+            "intaris.server._get_evaluator",
+            lambda: _FakeEvaluator(result),
+        )
+        _set_app_state(client_no_auth, "judge_reviewer", _Reviewer())
+
+        resp = client_no_auth.post(
+            "/api/v1/evaluate",
+            json={
+                "session_id": "sess-judge-race",
+                "tool": "bash",
+                "args": {"command": "ls"},
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["decision"] == "deny"
+        assert data["reasoning"] == "Human denied first"
 
 
 # ── Audit ─────────────────────────────────────────────────────────────

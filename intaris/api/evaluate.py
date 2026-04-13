@@ -18,6 +18,63 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _emit_unresolved_escalation(
+    *,
+    http_request: Request,
+    user_id: str,
+    session_id: str,
+    agent_id: str | None,
+    tool: str,
+    result: dict,
+    event_type: str = "escalation",
+    notify_channels: bool = True,
+) -> None:
+    """Emit escalation side effects once final human review is required."""
+
+    webhook = getattr(http_request.app.state, "webhook", None)
+    if webhook is not None and webhook.is_configured():
+        asyncio.create_task(
+            webhook.send_escalation(
+                call_id=result["call_id"],
+                session_id=session_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                tool=tool,
+                args_redacted=result.get("args_redacted"),
+                risk=result.get("risk"),
+                reasoning=result.get("reasoning"),
+            )
+        )
+
+    dispatcher = getattr(http_request.app.state, "notification_dispatcher", None)
+    if dispatcher is None or not notify_channels:
+        return
+
+    from intaris.notifications.providers import Notification
+
+    notification = Notification(
+        event_type=event_type,
+        call_id=result["call_id"],
+        session_id=session_id,
+        user_id=user_id,
+        agent_id=agent_id,
+        tool=tool,
+        args_redacted=result.get("args_redacted"),
+        risk=result.get("risk"),
+        reasoning=result.get("reasoning"),
+        ui_url=None,
+        approve_url=None,
+        deny_url=None,
+        timestamp=datetime.now(tz.utc).isoformat(),
+    )
+    asyncio.create_task(
+        dispatcher.notify(
+            user_id=user_id,
+            notification=notification,
+        )
+    )
+
+
 @router.post("/evaluate", response_model=EvaluateResponse)
 async def evaluate(
     request: EvaluateRequest,
@@ -70,6 +127,7 @@ async def evaluate(
         await alignment_barrier.wait(ctx.user_id, request.session_id)
 
     try:
+        request_started = asyncio.get_running_loop().time()
         evaluator = _get_evaluator()
         # agent_id: request body overrides header if provided
         agent_id = request.agent_id or ctx.agent_id
@@ -94,68 +152,47 @@ async def evaluate(
             ),
         )
 
-        # Fire-and-forget webhook on escalation (Cognis integration)
-        webhook = getattr(http_request.app.state, "webhook", None)
-        if (
-            webhook is not None
-            and webhook.is_configured()
-            and result.get("decision") == "escalate"
-        ):
-            asyncio.create_task(
-                webhook.send_escalation(
-                    call_id=result["call_id"],
-                    session_id=request.session_id,
-                    user_id=ctx.user_id,
-                    agent_id=agent_id,
-                    tool=request.tool,
-                    args_redacted=result.get("args_redacted"),
-                    risk=result.get("risk"),
-                    reasoning=result.get("reasoning"),
-                )
-            )
-
-        # Judge auto-resolution and notification handling for escalations
         judge_reviewer = getattr(http_request.app.state, "judge_reviewer", None)
         dispatcher = getattr(http_request.app.state, "notification_dispatcher", None)
+        judge_waited = False
 
         if result.get("decision") == "escalate":
             if judge_reviewer is not None and judge_reviewer.is_enabled:
-                # Judge is enabled — defer notification to judge outcome.
-                # The judge will send a single notification with its
-                # decision (judge_denial, judge_approval, judge_deferral,
-                # or judge_error) instead of a noisy pre-judge escalation.
-                asyncio.create_task(
-                    judge_reviewer.review_and_resolve(
-                        call_id=result["call_id"],
+                judge_waited = True
+                outcome = await judge_reviewer.review_for_evaluate(
+                    call_id=result["call_id"],
+                    user_id=ctx.user_id,
+                    session_id=request.session_id,
+                    agent_id=agent_id,
+                )
+                result["decision"] = outcome.decision
+                result["reasoning"] = outcome.reasoning
+                result["risk"] = outcome.risk
+                result["latency_ms"] = int(
+                    (asyncio.get_running_loop().time() - request_started) * 1000
+                )
+                if outcome.decision == "escalate":
+                    await _emit_unresolved_escalation(
+                        http_request=http_request,
                         user_id=ctx.user_id,
                         session_id=request.session_id,
                         agent_id=agent_id,
+                        tool=request.tool,
+                        result=result,
+                        event_type=outcome.notification_event_type or "escalation",
+                        notify_channels=getattr(
+                            judge_reviewer, "notify_mode", "deny_only"
+                        )
+                        == "always",
                     )
-                )
-            elif dispatcher is not None:
-                # No judge — send escalation notification (current behavior)
-                from intaris.notifications.providers import Notification
-
-                notification = Notification(
-                    event_type="escalation",
-                    call_id=result["call_id"],
-                    session_id=request.session_id,
+            else:
+                await _emit_unresolved_escalation(
+                    http_request=http_request,
                     user_id=ctx.user_id,
+                    session_id=request.session_id,
                     agent_id=agent_id,
                     tool=request.tool,
-                    args_redacted=result.get("args_redacted"),
-                    risk=result.get("risk"),
-                    reasoning=result.get("reasoning"),
-                    ui_url=None,
-                    approve_url=None,
-                    deny_url=None,
-                    timestamp=datetime.now(tz.utc).isoformat(),
-                )
-                asyncio.create_task(
-                    dispatcher.notify(
-                        user_id=ctx.user_id,
-                        notification=notification,
-                    )
+                    result=result,
                 )
 
         # Fire-and-forget notification on session suspension
@@ -185,7 +222,11 @@ async def evaluate(
             )
 
         # Fire-and-forget notification on denial
-        if dispatcher is not None and result.get("decision") == "deny":
+        if (
+            dispatcher is not None
+            and result.get("decision") == "deny"
+            and not judge_waited
+        ):
             from intaris.notifications.providers import Notification
 
             notification = Notification(

@@ -10,6 +10,8 @@ OpenAPI documentation is available at `/api/v1/docs` when the server is running.
 
 Evaluate a tool call for safety and alignment.
 
+When judge auto-resolution is enabled and the first-pass evaluator escalates, this endpoint waits for the judge and returns the final effective/public decision. Clients should only treat `decision="escalate"` as a true human-review requirement.
+
 **Request:**
 
 ```json
@@ -55,6 +57,16 @@ Evaluate a tool call for safety and alignment.
 | `latency_ms` | integer | Evaluation time in milliseconds |
 | `session_status` | string | Current session status (if changed) |
 | `status_reason` | string | Reason for status change (if any) |
+
+Judge-enabled escalation semantics:
+
+| Situation | `decision` | `reasoning` / `risk` source | `path` |
+|---|---|---|---|
+| Judge disabled | Raw evaluator result | Raw evaluator output | Raw evaluator path |
+| Judge enabled, final approve/deny | Effective persisted winner | Judge reasoning/risk (or winning persisted note when a human resolves first) | Original evaluator path (`llm` or `alignment`) |
+| Judge enabled, defer/failure/timeout | `escalate` | Judge defer/failure fallback reasoning and persisted risk when available | Original evaluator path (`llm` or `alignment`) |
+
+`latency_ms` includes judge wait time whenever the endpoint blocks on judge review.
 
 **Status codes:** 200 (evaluated), 429 (rate limited), 400 (bad request), 500 (evaluation error)
 
@@ -231,13 +243,15 @@ Query audit records with filtering and pagination.
 
 For escalated records that have been resolved, `user_decision` is `"approve"` or `"deny"`, `resolved_by` is `"user"` (human) or `"judge"` (judge LLM), and `judge_reasoning` contains the judge's reasoning when the judge reviewed the escalation.
 
+Important: `audit_log.decision` is the raw evaluator output, not necessarily the public final outcome. For judge-reviewed calls it may remain `"escalate"` even when `POST /evaluate` returned an effective `approve` or `deny`.
+
 ### GET /audit/{call_id}
 
 Get a single audit record by call ID.
 
 ### POST /decision
 
-Resolve an escalated tool call (approve or deny). When the judge is enabled (`JUDGE_MODE`), escalations may also be auto-resolved by the judge — this endpoint is for human resolution.
+Resolve an escalated tool call (approve or deny). When the judge is enabled (`JUDGE_MODE`), escalations may also be auto-resolved by the judge before `POST /evaluate` returns. This endpoint is only for unresolved human-review escalations.
 
 **Request:**
 

@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone as tz
 from typing import Any
@@ -88,6 +89,73 @@ def _apply_authoritative_user_precedent(
     if note:
         updated_reasoning += f' User note: "{note}".'
     return "approve", "high", updated_reasoning
+
+
+@dataclass(frozen=True)
+class JudgeEffectiveOutcome:
+    """Final public outcome returned to `/evaluate` after judge handling.
+
+    The audit log keeps the raw evaluator decision (often ``"escalate"``),
+    while the HTTP API needs the persisted effective/public decision.
+    """
+
+    decision: str
+    reasoning: str | None
+    risk: str | None
+    record: dict[str, Any]
+    latency_ms: int
+    notification_event_type: str | None = None
+
+
+def _effective_outcome_from_record(
+    record: dict[str, Any],
+    *,
+    fallback_reasoning: str | None = None,
+    fallback_risk: str | None = None,
+    latency_ms: int = 0,
+    fallback_event_type: str | None = None,
+) -> JudgeEffectiveOutcome:
+    """Map a persisted audit row to the public/effective decision."""
+
+    persisted_decision = str(record.get("user_decision") or "").strip().lower()
+    if persisted_decision in {"approve", "deny"}:
+        if record.get("resolved_by") == "user":
+            reasoning = (
+                record.get("user_note")
+                or record.get("judge_reasoning")
+                or record.get("reasoning")
+            )
+        else:
+            reasoning = (
+                record.get("judge_reasoning")
+                or record.get("user_note")
+                or record.get("reasoning")
+            )
+        risk = record.get("judge_risk") or record.get("risk")
+        return JudgeEffectiveOutcome(
+            decision=persisted_decision,
+            reasoning=reasoning,
+            risk=risk,
+            record=record,
+            latency_ms=latency_ms,
+            notification_event_type=None,
+        )
+
+    reasoning = (
+        fallback_reasoning or record.get("judge_reasoning") or record.get("reasoning")
+    )
+    risk = fallback_risk or record.get("judge_risk") or record.get("risk")
+    event_type = fallback_event_type
+    if event_type is None and record.get("judge_decision") == "defer":
+        event_type = "judge_deferral"
+    return JudgeEffectiveOutcome(
+        decision="escalate",
+        reasoning=reasoning,
+        risk=risk,
+        record=record,
+        latency_ms=latency_ms,
+        notification_event_type=event_type,
+    )
 
 
 # ── Judge Prompt ──────────────────────────────────────────────────────
@@ -875,6 +943,7 @@ class JudgeReviewer:
                 user_id=user_id,
                 session_id=session_id,
                 agent_id=agent_id,
+                notify_unresolved=True,
             )
         except ValueError as e:
             # Expected: record already resolved (human beat judge)
@@ -926,6 +995,67 @@ class JudgeReviewer:
                 "Judge review latency: %dms for call_id=%s", latency_ms, call_id
             )
 
+    async def review_for_evaluate(
+        self,
+        *,
+        call_id: str,
+        user_id: str,
+        session_id: str,
+        agent_id: str | None = None,
+    ) -> JudgeEffectiveOutcome:
+        """Run judge review for `/evaluate` and return the persisted outcome.
+
+        The returned decision is the effective/public decision that should be
+        sent back to clients. It is always derived from the persisted audit row
+        after judge handling completes or fails.
+        """
+
+        start_time = time.monotonic()
+        timeout_seconds = max(getattr(self._llm, "_timeout_ms", 0) / 1000.0, 0.001)
+        fallback_reasoning: str | None = None
+        fallback_event_type: str | None = None
+
+        try:
+            await asyncio.wait_for(
+                self._do_review(
+                    call_id=call_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    notify_unresolved=False,
+                ),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            fallback_reasoning = (
+                "Judge review timed out — escalation requires human review"
+            )
+            fallback_event_type = "judge_error"
+            logger.warning("Judge review timed out for call_id=%s", call_id)
+            if self._metrics:
+                self._metrics.judge_errors_total += 1
+        except ValueError as e:
+            logger.info("Judge review skipped for call_id=%s: %s", call_id, e)
+        except Exception:
+            fallback_reasoning = (
+                "Judge review failed — escalation requires human review"
+            )
+            fallback_event_type = "judge_error"
+            logger.exception("Judge review failed for call_id=%s", call_id)
+            if self._metrics:
+                self._metrics.judge_errors_total += 1
+
+        record = await asyncio.to_thread(
+            self._audit.get_by_call_id, call_id, user_id=user_id
+        )
+        latency_ms = int((time.monotonic() - start_time) * 1000)
+        return _effective_outcome_from_record(
+            record,
+            fallback_reasoning=fallback_reasoning,
+            latency_ms=latency_ms,
+            fallback_event_type=fallback_event_type,
+        )
+
     async def _do_review(
         self,
         *,
@@ -933,6 +1063,7 @@ class JudgeReviewer:
         user_id: str,
         session_id: str,
         agent_id: str | None = None,
+        notify_unresolved: bool = True,
     ) -> None:
         """Internal review logic. Raises on failure."""
         start_time = time.monotonic()
@@ -1214,7 +1345,7 @@ class JudgeReviewer:
                     self._metrics.judge_deferrals_total += 1
 
                 # Send notification so human knows to review
-                if self._config.notify_mode != "never":
+                if notify_unresolved and self._config.notify_mode != "never":
                     await self._send_escalation_notification(
                         call_id=call_id,
                         user_id=user_id,

@@ -179,11 +179,11 @@ Each decision is tagged with the path that produced it:
 When a tool call is escalated:
 
 1. **Audit record** created with `decision=escalate`
-2. **Webhook** fires (if configured) to notify external systems
-3. **Judge review** (if `JUDGE_MODE` is `auto` or `advisory`): a more capable LLM automatically reviews the escalation with richer session context (30 recent tool calls + reasoning records). The judge can approve, deny, or defer to a human. See [Judge Auto-Resolution](#judge-auto-resolution) below.
-4. **Notification** sent to user's configured channels — behavior depends on `JUDGE_NOTIFY_MODE` when judge is enabled (`deny_only` by default: only notify on judge deny)
-5. **Client** blocks the tool call and polls `GET /audit/{call_id}` for resolution
-6. **Resolution** recorded via judge auto-resolution or human `POST /api/v1/decision`
+2. **Judge review** (if `JUDGE_MODE` is `auto` or `advisory`): a more capable LLM automatically reviews the escalation with richer session context (30 recent tool calls + reasoning records). The judge can approve, deny, or defer to a human. See [Judge Auto-Resolution](#judge-auto-resolution) below.
+3. **Resolved outcome** is returned inline from `POST /evaluate` when the judge reaches a final decision.
+4. **Webhook + escalation notification** fire only if the final effective outcome is still unresolved human review (`decision=escalate`).
+5. **Client** only blocks and polls `GET /audit/{call_id}` when `POST /evaluate` still returns `decision=escalate`.
+6. **Resolution** is recorded via judge auto-resolution or human `POST /api/v1/decision`.
 
 When a **human** approves an escalation with a note, Intaris also triggers a
 best-effort intention refresh for that session. The approval note is treated as
@@ -193,22 +193,28 @@ arguments.
 
 ### Judge Auto-Resolution
 
-When `JUDGE_MODE` is enabled (`auto` or `advisory`), escalated tool calls are automatically reviewed by a judge LLM (default gpt-5.4) as a fire-and-forget async task. The judge does not block the evaluate response — the client still receives `decision=escalate` immediately and polls for resolution.
+When `JUDGE_MODE` is enabled (`auto` or `advisory`), `POST /evaluate` waits for the judge before returning its final effective/public decision. The audit log still keeps the raw evaluator decision in `audit_log.decision`, but clients should treat the HTTP response as the public contract.
 
 | Mode | Behavior |
 |---|---|
 | `disabled` (default) | No judge. Escalations require human resolution. |
-| `auto` | Judge auto-resolves: approve or deny. Denies if uncertain (low confidence or defer). |
-| `advisory` | Judge reviews: approve, deny, or defer to human. Deferred escalations remain unresolved with judge reasoning visible in the UI. |
+| `auto` | Judge auto-resolves: approve or deny. Denies if uncertain (low confidence or defer). `POST /evaluate` never returns an intermediate `escalate` in this mode on successful judge completion; only judge failure or timeout degrades to unresolved human review. |
+| `advisory` | Judge reviews: approve, deny, or defer to human. Deferred escalations remain unresolved with judge reasoning visible in the UI, and only then does `POST /evaluate` return `decision=escalate`. |
 
 **Notification modes** (`JUDGE_NOTIFY_MODE`):
 - `deny_only` (default): Only notify when judge denies.
-- `always`: Notify on escalation (before judge) AND on judge resolution.
+- `always`: Notify on judge approvals/denials and on final unresolved escalations after judge defer/failure.
 - `never`: Fully silent — no notifications in judge mode.
 
-**Fail-open**: If the judge LLM fails, the escalation remains unresolved for human review.
+**Fail-open**: If the judge LLM fails or times out, `POST /evaluate` degrades to an unresolved `escalate` and human review is required.
 
-**Race condition**: If a human resolves before the judge, the atomic `WHERE user_decision IS NULL` guard prevents double-resolution. The judge exits gracefully.
+**Race condition**: If a human resolves before the judge finishes, the atomic `WHERE user_decision IS NULL` guard prevents double-resolution. `POST /evaluate` re-reads persistence and returns the winning effective decision.
+
+### Raw vs Effective Decision
+
+- **Raw decision**: `audit_log.decision`, the evaluator's immediate output. For judge-reviewed calls this often remains `"escalate"`.
+- **Effective/public decision**: the final outcome exposed by `POST /evaluate`. This is derived from persisted resolution state (`user_decision`, `resolved_by`, `judge_*`) after judge handling completes.
+- For analytics or UI work that needs the final outcome, prefer the effective decision semantics instead of reading `audit_log.decision` in isolation.
 
 Judge decisions are visible in the Approvals tab with a "judge" badge and the judge's reasoning alongside the original evaluator reasoning.
 
