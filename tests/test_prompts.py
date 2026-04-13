@@ -75,6 +75,10 @@ class TestEnglishEnforcementInSchemas:
         ]
         assert "in English" in desc
 
+    def test_judge_risk_schema_exists(self):
+        desc = JUDGE_EVALUATION_SCHEMA["schema"]["properties"]["risk"]["description"]
+        assert "risk level" in desc.lower()
+
     def test_session_summary_schema(self):
         desc = SESSION_SUMMARY_SCHEMA["schema"]["properties"]["summary"]["description"]
         assert "in English" in desc
@@ -172,6 +176,10 @@ class TestUserDecisionsPromptRendering:
     def test_system_prompt_mentions_similar_operation_families(self):
         assert "sufficiently similar **operation**" in SAFETY_EVALUATION_SYSTEM_PROMPT
         assert "web_search` and `web_fetch`" in SAFETY_EVALUATION_SYSTEM_PROMPT
+
+    def test_system_prompt_mentions_multi_part_intentions(self):
+        assert "multiple active deliverables" in SAFETY_EVALUATION_SYSTEM_PROMPT
+        assert "most relevant part" in SAFETY_EVALUATION_SYSTEM_PROMPT
 
     def test_approval_without_note_does_not_render_prior_reasoning(self):
         section = render_user_decisions_section(

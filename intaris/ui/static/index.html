@@ -776,7 +776,7 @@
                               <div class="flex items-center gap-2">
                                 <span :class="decisionBadgeClass(expandedAuditRecord.user_decision)" x-text="expandedAuditRecord.user_decision"></span>
                                 <span x-show="expandedAuditRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
-                                <span x-show="expandedAuditRecord.resolved_by === 'user' && expandedAuditRecord.judge_reasoning"
+                                <span x-show="expandedAuditRecord.resolved_by === 'user' && ['approve', 'deny'].includes(expandedAuditRecord.judge_decision)"
                                       class="text-xs font-medium text-amber-400">overridden by user</span>
                                 <span class="text-sm" x-text="expandedAuditRecord.user_note" x-show="expandedAuditRecord.user_note"></span>
                                 <span class="text-xs text-muted" x-text="formatTime(expandedAuditRecord.resolved_at)"></span>
@@ -791,7 +791,7 @@
                             </div>
                           </template>
                           <!-- User Override (when judge decision was overridden) -->
-                          <template x-if="expandedAuditRecord?.resolved_by === 'user' && expandedAuditRecord?.judge_reasoning">
+                          <template x-if="expandedAuditRecord?.resolved_by === 'user' && ['approve', 'deny'].includes(expandedAuditRecord?.judge_decision)">
                             <div class="mb-2">
                               <div class="text-xs text-muted mb-1">User Override</div>
                               <div class="text-sm bg-amber-500/10 border border-amber-500/20 rounded p-3">
@@ -961,7 +961,7 @@
                     <div class="flex items-center gap-2">
                       <span :class="decisionBadgeClass(expandedRecord.user_decision)" x-text="expandedRecord.user_decision"></span>
                       <span x-show="expandedRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
-                      <span x-show="expandedRecord.resolved_by === 'user' && expandedRecord.judge_reasoning"
+                      <span x-show="expandedRecord.resolved_by === 'user' && ['approve', 'deny'].includes(expandedRecord.judge_decision)"
                             class="text-xs font-medium text-amber-400">overridden by user</span>
                       <span class="text-sm" x-text="expandedRecord.user_note" x-show="expandedRecord.user_note"></span>
                       <span class="text-xs text-muted" x-text="formatTime(expandedRecord.resolved_at)"></span>
@@ -1024,7 +1024,7 @@
                   </div>
                 </template>
                 <!-- User Override (when judge decision was overridden) -->
-                <template x-if="expandedRecord?.resolved_by === 'user' && expandedRecord?.judge_reasoning">
+                <template x-if="expandedRecord?.resolved_by === 'user' && ['approve', 'deny'].includes(expandedRecord?.judge_decision)">
                   <div class="mb-3">
                     <div class="text-xs text-muted mb-1">User Override</div>
                     <div class="text-sm bg-amber-500/10 border border-amber-500/20 rounded p-3">
@@ -1279,7 +1279,7 @@
                     <span class="badge badge-escalate">escalate</span>
                     <span :class="decisionBadgeClass(item.user_decision)" x-text="item.user_decision"></span>
                     <span x-show="item.resolved_by === 'judge'" class="badge badge-judge">judge</span>
-                    <span x-show="item.resolved_by === 'user' && item.judge_reasoning"
+                    <span x-show="item.resolved_by === 'user' && ['approve', 'deny'].includes(item.judge_decision)"
                           class="text-xs font-medium px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">overridden</span>
                     <span class="font-mono text-sm" x-text="item.tool"></span>
                     <span :class="riskBadgeClass(item.risk)" x-text="item.risk" x-show="item.risk"></span>
@@ -1331,7 +1331,7 @@
                       <div class="flex items-center gap-2">
                         <span :class="decisionBadgeClass(expandedResolvedRecord.user_decision)" x-text="expandedResolvedRecord.user_decision"></span>
                         <span x-show="expandedResolvedRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
-                        <span x-show="expandedResolvedRecord.resolved_by === 'user' && expandedResolvedRecord.judge_reasoning"
+                        <span x-show="expandedResolvedRecord.resolved_by === 'user' && ['approve', 'deny'].includes(expandedResolvedRecord.judge_decision)"
                               class="text-xs font-medium text-amber-400">overridden by user</span>
                         <span class="text-sm" x-text="expandedResolvedRecord.user_note" x-show="expandedResolvedRecord.user_note"></span>
                         <span class="text-xs text-muted" x-text="formatTime(expandedResolvedRecord.resolved_at)"></span>
@@ -1348,7 +1348,7 @@
                   </template>
 
                   <!-- User Override (when judge decision was overridden) -->
-                  <template x-if="expandedResolvedRecord?.resolved_by === 'user' && expandedResolvedRecord?.judge_reasoning">
+                  <template x-if="expandedResolvedRecord?.resolved_by === 'user' && ['approve', 'deny'].includes(expandedResolvedRecord?.judge_decision)">
                     <div class="mb-3">
                       <div class="text-xs text-muted mb-1">User Override</div>
                       <div class="text-sm bg-amber-500/10 border border-amber-500/20 rounded p-3">
@@ -2616,7 +2616,7 @@
                       <span x-show="r.decision === 'escalate' && r.user_decision"
                             :class="'badge badge-' + (r.user_decision || 'low')" x-text="r.user_decision"></span>
                       <span x-show="r.resolved_by === 'judge'" class="badge badge-judge text-xs">judge</span>
-                      <span x-show="r.resolved_by === 'user' && r.judge_reasoning"
+                      <span x-show="r.resolved_by === 'user' && ['approve', 'deny'].includes(r.judge_decision)"
                             class="text-xs font-medium px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400">overridden</span>
                       <span class="font-mono text-xs" x-text="r.tool || r.record_type"></span>
                       <span :class="'badge badge-' + (r.risk || 'low')" x-text="r.risk" x-show="r.risk" class="text-xs"></span>
@@ -2655,7 +2655,7 @@
                         <div class="flex items-center gap-2">
                           <span :class="'badge badge-' + ($store.nav.sessionModalAuditRecord.user_decision || 'low')" x-text="$store.nav.sessionModalAuditRecord.user_decision"></span>
                           <span x-show="$store.nav.sessionModalAuditRecord.resolved_by === 'judge'" class="badge badge-judge">judge</span>
-                          <span x-show="$store.nav.sessionModalAuditRecord.resolved_by === 'user' && $store.nav.sessionModalAuditRecord.judge_reasoning"
+                          <span x-show="$store.nav.sessionModalAuditRecord.resolved_by === 'user' && ['approve', 'deny'].includes($store.nav.sessionModalAuditRecord.judge_decision)"
                                 class="text-xs font-medium text-amber-400">overridden by user</span>
                           <span class="text-sm" x-text="$store.nav.sessionModalAuditRecord.user_note" x-show="$store.nav.sessionModalAuditRecord.user_note"></span>
                           <span class="text-xs text-muted" x-text="new Date($store.nav.sessionModalAuditRecord.resolved_at).toLocaleString()"></span>
@@ -2669,7 +2669,7 @@
                       </div>
                     </template>
                     <!-- User Override (when judge decision was overridden) -->
-                    <template x-if="$store.nav.sessionModalAuditRecord?.resolved_by === 'user' && $store.nav.sessionModalAuditRecord?.judge_reasoning">
+                    <template x-if="$store.nav.sessionModalAuditRecord?.resolved_by === 'user' && ['approve', 'deny'].includes($store.nav.sessionModalAuditRecord?.judge_decision)">
                       <div class="mb-2">
                         <div class="text-xs text-muted mb-1">User Override</div>
                         <div class="text-sm bg-amber-500/10 border border-amber-500/20 rounded p-3">

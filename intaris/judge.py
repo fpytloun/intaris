@@ -55,6 +55,9 @@ _REASONING_CONTENT_LIMIT = 8000
 # Number of parent session reasoning records to include for sub-sessions.
 _PARENT_CONTEXT_LIMIT = 10
 
+# Number of prior explicit judge outcomes to include as soft precedent.
+_PRIOR_JUDGE_LIMIT = 3
+
 
 def _apply_authoritative_user_precedent(
     *,
@@ -124,6 +127,12 @@ approved if they serve a plausible development purpose (research, \
 reference, debugging).
 - Write operations outside the project scope require clear justification \
 from the session intention.
+- The session intention may contain multiple active deliverables or \
+follow-up tasks. Evaluate the current call against the most relevant \
+stated deliverable, not only the first clause of the intention.
+- When a dedicated latest reasoning/context section is present, treat it \
+as the freshest conversational signal for the current action. It may \
+clarify recent user-approved work that the intention summary compressed.
 - **Always respond in English.** The reasoning field must be in English \
 regardless of the language of the session intention, tool arguments, \
 or context data.
@@ -152,9 +161,9 @@ signal for alignment assessment.
 {anti_injection}
 
 Respond with a JSON object matching the required schema. Your response \
-MUST use exactly these keys: "decision" (string), "reasoning" (string), \
-"confidence" (string). Do not use alternative key names like "verdict", \
-"explanation", or "certainty".
+MUST use exactly these keys: "decision" (string), "risk" (string), \
+"reasoning" (string), "confidence" (string). Do not use alternative key \
+names like "verdict", "explanation", or "certainty".
 """
 
 # ── Mode-specific decision rules ─────────────────────────────────────
@@ -260,6 +269,11 @@ JUDGE_EVALUATION_SCHEMA: dict[str, Any] = {
                     "and key factors."
                 ),
             },
+            "risk": {
+                "type": "string",
+                "enum": ["low", "medium", "high", "critical"],
+                "description": "Judge-assessed risk level for the call.",
+            },
             "confidence": {
                 "type": "string",
                 "enum": ["high", "medium", "low"],
@@ -269,7 +283,7 @@ JUDGE_EVALUATION_SCHEMA: dict[str, Any] = {
                 ),
             },
         },
-        "required": ["decision", "reasoning", "confidence"],
+        "required": ["decision", "reasoning", "risk", "confidence"],
         "additionalProperties": False,
     },
 }
@@ -291,6 +305,8 @@ def _build_judge_prompt(
     parent_recent_messages: list[dict[str, Any]] | None = None,
     behavioral_context: dict[str, Any] | None = None,
     user_decisions: list[dict[str, Any]] | None = None,
+    latest_reasoning: dict[str, Any] | None = None,
+    prior_judge_reviews: list[dict[str, Any]] | None = None,
 ) -> str:
     """Build the user prompt for judge evaluation.
 
@@ -315,6 +331,8 @@ def _build_judge_prompt(
             led to the sub-session being spawned.
         behavioral_context: Behavioral profile data (risk_level, alerts).
         user_decisions: Recent final human decisions for this session.
+        latest_reasoning: Most recent reasoning record before the reviewed call.
+        prior_judge_reviews: Recent explicit judge approvals/denials.
 
     Returns:
         Formatted user prompt string.
@@ -393,6 +411,21 @@ def _build_judge_prompt(
             f"{wrap_with_boundary(eval_text, 'context')}"
         )
 
+    if latest_reasoning:
+        latest_lines = []
+        content = latest_reasoning.get("content", "")
+        if content:
+            latest_lines.append(_truncate(content, _REASONING_CONTENT_LIMIT))
+        _append_context_line(latest_lines, latest_reasoning)
+        if latest_lines:
+            safe_latest = sanitize_for_prompt("\n".join(latest_lines))
+            sections.append(
+                "## Latest Reasoning\n"
+                "Use this as the freshest conversational context for the current "
+                "tool call.\n"
+                f"{wrap_with_boundary(safe_latest, 'context')}"
+            )
+
     # Recent history (extended context — 30 records)
     if recent_history:
         history_lines = []
@@ -442,6 +475,27 @@ def _build_judge_prompt(
     decision_section = render_user_decisions_section(user_decisions)
     if decision_section:
         sections.append(decision_section)
+
+    if prior_judge_reviews:
+        judge_lines = []
+        for record in prior_judge_reviews[:_PRIOR_JUDGE_LIMIT]:
+            decision = record.get("judge_decision") or record.get("user_decision")
+            risk = record.get("judge_risk") or record.get("risk") or "unknown"
+            line = (
+                f"- [judge:{decision}/{risk}] {record.get('tool', '?')}: "
+                f"{_truncate(str(record.get('args_redacted', '')), 120)}"
+            )
+            if record.get("judge_reasoning"):
+                line += f" — {_truncate(str(record['judge_reasoning']), 100)}"
+            judge_lines.append(line)
+        if judge_lines:
+            safe_judges = sanitize_for_prompt("\n".join(judge_lines))
+            sections.append(
+                "## Prior Judge Outcomes\n"
+                "These are soft consistency signals only. Final human decisions "
+                "remain authoritative.\n"
+                f"{wrap_with_boundary(safe_judges, 'history')}"
+            )
 
     # Agent identity
     if agent_id:
@@ -498,6 +552,17 @@ def _append_context_line(
     lines.append(f"  [context] {_truncate(safe_ctx, _REASONING_CONTENT_LIMIT)}")
 
 
+def _normalize_judge_risk(raw_risk: str | None, fallback: str | None = None) -> str:
+    """Normalize judge risk output to one of the supported levels."""
+    risk = str(raw_risk or fallback or "high").lower()
+    if risk in {"low", "medium", "high", "critical"}:
+        return risk
+    fallback_risk = str(fallback or "high").lower()
+    if fallback_risk in {"low", "medium", "high", "critical"}:
+        return fallback_risk
+    return "high"
+
+
 # ── Shared Resolution Handler ─────────────────────────────────────────
 
 
@@ -509,6 +574,8 @@ async def resolve_with_side_effects(
     user_note: str | None = None,
     resolved_by: str = "user",
     judge_reasoning: str | None = None,
+    judge_decision: str | None = None,
+    judge_risk: str | None = None,
     audit_store: Any,
     evaluator: Any | None = None,
     intention_barrier: Any | None = None,
@@ -540,6 +607,8 @@ async def resolve_with_side_effects(
         user_note: Optional note from the resolver.
         resolved_by: "user" or "judge".
         judge_reasoning: Judge's reasoning (when resolved_by="judge").
+        judge_decision: Historical judge recommendation.
+        judge_risk: Historical judge risk assessment.
         audit_store: AuditStore instance.
         evaluator: Evaluator instance (for path learning).
         intention_barrier: IntentionBarrier for note-triggered scope refresh.
@@ -581,6 +650,8 @@ async def resolve_with_side_effects(
         user_id=user_id,
         resolved_by=resolved_by,
         judge_reasoning=judge_reasoning,
+        judge_decision=judge_decision,
+        judge_risk=judge_risk,
     )
 
     # Look up the full record for downstream processing
@@ -903,6 +974,21 @@ class JudgeReviewer:
             user_id=user_id,
             limit=5,
         )
+        latest_reasoning = await asyncio.to_thread(
+            self._audit.get_latest_reasoning,
+            session_id,
+            user_id=user_id,
+            before_ts=record["timestamp"],
+            before_id=record["id"],
+        )
+        prior_judge_reviews = await asyncio.to_thread(
+            self._audit.get_recent_judge_reviews,
+            session_id,
+            user_id=user_id,
+            before_ts=record["timestamp"],
+            before_id=record["id"],
+            limit=_PRIOR_JUDGE_LIMIT,
+        )
 
         # Load parent intention and context for sub-sessions
         parent_intention: str | None = None
@@ -966,6 +1052,8 @@ class JudgeReviewer:
             parent_recent_messages=parent_recent_messages,
             behavioral_context=behavioral_context,
             user_decisions=user_decisions,
+            latest_reasoning=latest_reasoning,
+            prior_judge_reviews=prior_judge_reviews,
         )
 
         # Select mode-specific decision rules for the system prompt
@@ -995,11 +1083,12 @@ class JudgeReviewer:
         )
         result = parse_json_response(
             raw,
-            expected_keys={"decision", "reasoning", "confidence"},
+            expected_keys={"decision", "reasoning", "risk", "confidence"},
         )
 
         decision = str(result.get("decision", "deny"))
         reasoning = str(result.get("reasoning", "No reasoning provided"))
+        judge_risk = _normalize_judge_risk(result.get("risk"), record.get("risk"))
         confidence = str(result.get("confidence", "low"))
         decision, confidence, reasoning = _apply_authoritative_user_precedent(
             decision=decision,
@@ -1007,7 +1096,7 @@ class JudgeReviewer:
             reasoning=reasoning,
             tool=record.get("tool", ""),
             args_redacted=record.get("args_redacted") or {},
-            risk=record.get("risk"),
+            risk=judge_risk,
             user_decisions=user_decisions,
         )
 
@@ -1019,6 +1108,21 @@ class JudgeReviewer:
 
         # Apply mode-specific logic
         if self._config.mode == "auto":
+            original_decision = decision
+            if judge_risk == "critical":
+                decision = "deny"
+                if original_decision != "deny":
+                    reasoning = (
+                        f"Judge auto-denied critical-risk call in auto mode "
+                        f"(original_decision={original_decision}): {reasoning}"
+                    )
+            elif decision == "approve" and confidence == "low":
+                decision = "deny"
+                reasoning = (
+                    f"Judge auto-denied (confidence={confidence}, original_decision=approve): "
+                    f"{reasoning}"
+                )
+
             # In auto mode: defer → deny, low confidence → deny
             if decision == "defer" or confidence == "low":
                 if decision != "deny":
@@ -1036,6 +1140,8 @@ class JudgeReviewer:
                 user_note=f"Judge ({confidence} confidence)",
                 resolved_by="judge",
                 judge_reasoning=reasoning,
+                judge_decision=decision,
+                judge_risk=judge_risk,
                 audit_store=self._audit,
                 evaluator=self._evaluator,
                 intention_barrier=self._intention_barrier,
@@ -1063,21 +1169,35 @@ class JudgeReviewer:
             )
 
         elif self._config.mode == "advisory":
-            # Defense-in-depth: in advisory mode, only high-confidence
-            # denials stay as deny.  Low/medium confidence denials are
-            # converted to deferrals — let the human decide.
-            if decision == "deny" and confidence != "high":
-                logger.info(
-                    "Judge advisory converting deny→defer for call_id=%s "
-                    "(confidence=%s)",
-                    call_id,
-                    confidence,
-                )
-                reasoning = (
-                    f"Judge deferred (advisory, confidence={confidence}, "
-                    f"original_decision=deny): {reasoning}"
-                )
-                decision = "defer"
+            original_decision = decision
+            if judge_risk == "low":
+                decision = "approve"
+                if original_decision != "approve":
+                    reasoning = (
+                        f"Judge auto-approved low-risk call in advisory mode "
+                        f"(original_decision={original_decision}): {reasoning}"
+                    )
+            elif judge_risk == "critical":
+                decision = "deny"
+                if original_decision != "deny":
+                    reasoning = (
+                        f"Judge denied critical-risk call in advisory mode "
+                        f"(original_decision={original_decision}): {reasoning}"
+                    )
+            elif judge_risk == "medium":
+                if decision != "approve" or confidence == "low":
+                    decision = "defer"
+                    reasoning = (
+                        f"Judge deferred medium-risk call in advisory mode "
+                        f"(original_decision={original_decision}): {reasoning}"
+                    )
+            elif judge_risk == "high":
+                if decision != "approve" or confidence != "high":
+                    decision = "defer"
+                    reasoning = (
+                        f"Judge deferred high-risk call in advisory mode "
+                        f"(original_decision={original_decision}): {reasoning}"
+                    )
 
             if decision == "defer":
                 # Store reasoning but leave unresolved for human
@@ -1086,6 +1206,8 @@ class JudgeReviewer:
                     call_id,
                     reasoning,
                     user_id=user_id,
+                    judge_decision="defer",
+                    judge_risk=judge_risk,
                 )
 
                 if self._metrics:
@@ -1099,7 +1221,7 @@ class JudgeReviewer:
                         session_id=session_id,
                         agent_id=agent_id,
                         tool=record.get("tool"),
-                        risk=record.get("risk"),
+                        risk=judge_risk,
                         reasoning=(
                             f"Judge deferred to human ({confidence} confidence): "
                             f"{reasoning}"
@@ -1122,6 +1244,8 @@ class JudgeReviewer:
                     user_note=f"Judge ({confidence} confidence)",
                     resolved_by="judge",
                     judge_reasoning=reasoning,
+                    judge_decision=decision,
+                    judge_risk=judge_risk,
                     audit_store=self._audit,
                     evaluator=self._evaluator,
                     intention_barrier=self._intention_barrier,

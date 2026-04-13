@@ -715,7 +715,7 @@ These are separate from the standard event types (`escalation`, `resolution`, `d
 - **MCP proxy coverage**: Both REST API and MCP proxy escalation paths trigger the judge.
 - **Race condition handling**: If a human resolves before the judge, the atomic WHERE guard prevents double-resolution. The judge catches the `ValueError` and exits gracefully.
 - **Fail-open**: If the judge LLM fails, the escalation remains unresolved for human review. A notification is sent if `notify_mode` allows.
-- **Human override of judge decisions**: Humans can override any judge-resolved decision (deny→approve or approve→deny) via `POST /decision`. The `resolve_escalation()` WHERE clause matches `(user_decision IS NULL OR resolved_by = 'judge')`, allowing re-resolution of judge decisions while keeping human decisions final. `COALESCE(?, judge_reasoning)` preserves the judge's reasoning when a human overrides. The UI shows an "Override" button on judge-resolved records in the Resolved section, with an "overridden by user" indicator when a judge decision has been overridden. After override, the escalation retry mechanism and LLM history labels (`escalate→user:approve`) ensure subsequent retries of the same tool call respect the human's decision. Note: the "overridden by user" UI label uses `judge_reasoning IS NOT NULL` as a heuristic; this can produce false positives for advisory+defer escalations resolved by a human (where `judge_reasoning` was stored during the defer phase). A dedicated DB column would resolve this in a future migration if needed.
+- **Human override of judge decisions**: Humans can override any judge-resolved decision (deny→approve or approve→deny) via `POST /decision`. The `resolve_escalation()` WHERE clause matches `(user_decision IS NULL OR resolved_by = 'judge')`, allowing re-resolution of judge decisions while keeping human decisions final. `COALESCE(...)` preserves the judge's historical assessment when a human overrides. The UI shows an "Override" button on judge-resolved records in the Resolved section, with an "overridden by user" indicator only when the audit row carries an explicit prior judge resolution (`judge_decision` of `approve` or `deny`). Advisory deferrals keep their judge reasoning visible without being mislabeled as overrides.
 
 ### Ex-post denial overrides (L1 denials)
 
@@ -739,6 +739,8 @@ Parallel to the judge override flow, humans can also override L1 denials — too
 
 - `audit_log.resolved_by TEXT` — NULL (not resolved), "user" (human), "judge" (judge LLM). Changes from "judge" to "user" when a human overrides.
 - `audit_log.judge_reasoning TEXT` — Judge's reasoning (stored when judge reviews, regardless of outcome). Preserved via COALESCE when a human overrides.
+- `audit_log.judge_decision TEXT` — Historical judge recommendation (`approve`, `deny`, or `defer`). Written by the judge and preserved across later human overrides so the UI can distinguish judge deferrals from judge resolutions.
+- `audit_log.judge_risk TEXT` — Judge-assessed risk level (`low`, `medium`, `high`, `critical`). Stored alongside `judge_decision` for audit/debug visibility.
 
 ### Observability
 

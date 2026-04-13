@@ -413,6 +413,8 @@ class AuditStore:
         user_id: str,
         resolved_by: str = "user",
         judge_reasoning: str | None = None,
+        judge_decision: str | None = None,
+        judge_risk: str | None = None,
     ) -> dict[str, Any]:
         """Record a user decision on an escalated or denied tool call.
 
@@ -431,6 +433,8 @@ class AuditStore:
             user_id: Tenant identifier.
             resolved_by: Who resolved: "user" (human) or "judge" (LLM judge).
             judge_reasoning: Judge's reasoning (stored when judge resolves).
+            judge_decision: Historical judge recommendation.
+            judge_risk: Historical judge risk assessment.
 
         Returns:
             Updated audit record.
@@ -461,7 +465,10 @@ class AuditStore:
                 """
                 UPDATE audit_log
                 SET user_decision = ?, user_note = ?, resolved_at = ?,
-                    resolved_by = ?, judge_reasoning = COALESCE(?, judge_reasoning)
+                    resolved_by = ?,
+                    judge_reasoning = COALESCE(?, judge_reasoning),
+                    judge_decision = COALESCE(?, judge_decision),
+                    judge_risk = COALESCE(?, judge_risk)
                 WHERE call_id = ? AND user_id = ?
                   AND decision IN ('escalate', 'deny')
                   AND (user_decision IS NULL OR resolved_by = 'judge')
@@ -472,6 +479,8 @@ class AuditStore:
                     now,
                     resolved_by,
                     judge_reasoning,
+                    judge_decision,
+                    judge_risk,
                     call_id,
                     user_id,
                 ),
@@ -505,6 +514,8 @@ class AuditStore:
         judge_reasoning: str,
         *,
         user_id: str,
+        judge_decision: str | None = None,
+        judge_risk: str | None = None,
     ) -> None:
         """Store judge reasoning on an unresolved escalation.
 
@@ -521,18 +532,83 @@ class AuditStore:
             call_id: The escalated call.
             judge_reasoning: Judge's reasoning text.
             user_id: Tenant identifier.
+            judge_decision: Historical judge recommendation.
+            judge_risk: Historical judge risk assessment.
         """
         with self._db.cursor() as cur:
             cur.execute(
                 """
                 UPDATE audit_log
-                SET judge_reasoning = ?
+                SET judge_reasoning = ?,
+                    judge_decision = COALESCE(?, judge_decision),
+                    judge_risk = COALESCE(?, judge_risk)
                 WHERE call_id = ? AND user_id = ?
                   AND decision = 'escalate'
                   AND user_decision IS NULL
                 """,
-                (judge_reasoning, call_id, user_id),
+                (judge_reasoning, judge_decision, judge_risk, call_id, user_id),
             )
+
+    def get_latest_reasoning(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        before_ts: str,
+        before_id: str,
+    ) -> dict[str, Any] | None:
+        """Get the latest reasoning record before a specific audit row."""
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM audit_log
+                WHERE session_id = ? AND user_id = ?
+                  AND record_type = 'reasoning'
+                  AND (
+                    timestamp < ?
+                    OR (timestamp = ? AND id < ?)
+                  )
+                ORDER BY timestamp DESC, id DESC
+                LIMIT 1
+                """,
+                (session_id, user_id, before_ts, before_ts, before_id),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            return None
+        return _row_to_dict(row)
+
+    def get_recent_judge_reviews(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        before_ts: str,
+        before_id: str,
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Get recent explicit judge approvals/denials before a review point."""
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM audit_log
+                WHERE session_id = ? AND user_id = ?
+                  AND record_type = 'tool_call'
+                  AND resolved_by = 'judge'
+                  AND judge_decision IN ('approve', 'deny')
+                  AND (
+                    timestamp < ?
+                    OR (timestamp = ? AND id < ?)
+                  )
+                ORDER BY timestamp DESC, id DESC
+                LIMIT ?
+                """,
+                (session_id, user_id, before_ts, before_ts, before_id, limit),
+            )
+            rows = cur.fetchall()
+
+        return [_row_to_dict(row) for row in rows]
 
     def get_window(
         self,

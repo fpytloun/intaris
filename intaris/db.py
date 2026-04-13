@@ -413,6 +413,14 @@ class Database:
             conn.execute("ALTER TABLE audit_log ADD COLUMN judge_reasoning TEXT")
             logger.info("Migration: added judge_reasoning column to audit_log")
 
+        if not self._sqlite_column_exists(conn, "audit_log", "judge_decision"):
+            conn.execute("ALTER TABLE audit_log ADD COLUMN judge_decision TEXT")
+            logger.info("Migration: added judge_decision column to audit_log")
+
+        if not self._sqlite_column_exists(conn, "audit_log", "judge_risk"):
+            conn.execute("ALTER TABLE audit_log ADD COLUMN judge_risk TEXT")
+            logger.info("Migration: added judge_risk column to audit_log")
+
         if not self._sqlite_column_exists(conn, "sessions", "title"):
             conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT")
             logger.info("Migration: added title column to sessions")
@@ -774,6 +782,8 @@ class Database:
                 ("session_summaries", "summary_type", "TEXT NOT NULL DEFAULT 'window'"),
                 ("audit_log", "resolved_by", "TEXT"),
                 ("audit_log", "judge_reasoning", "TEXT"),
+                ("audit_log", "judge_decision", "TEXT"),
+                ("audit_log", "judge_risk", "TEXT"),
                 ("sessions", "title", "TEXT"),
                 ("analysis_tasks", "started_at", "TIMESTAMPTZ"),
                 ("analysis_tasks", "heartbeat_at", "TIMESTAMPTZ"),
@@ -1003,6 +1013,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
     user_decision TEXT,
     user_note TEXT,
     resolved_at TEXT,
+    resolved_by TEXT,
+    judge_reasoning TEXT,
+    judge_decision TEXT,
+    judge_risk TEXT,
     args_hash TEXT,
     injection_detected INTEGER DEFAULT 0,
     FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
@@ -1267,6 +1281,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
     user_decision TEXT,
     user_note TEXT,
     resolved_at TIMESTAMPTZ,
+    resolved_by TEXT,
+    judge_reasoning TEXT,
+    judge_decision TEXT,
+    judge_risk TEXT,
     args_hash TEXT,
     profile_version INTEGER,
     intention TEXT,

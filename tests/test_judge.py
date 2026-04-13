@@ -154,11 +154,15 @@ class TestAuditStoreJudge:
             user_id="test-user",
             resolved_by="judge",
             judge_reasoning="Clearly safe operation within scope",
+            judge_decision="approve",
+            judge_risk="low",
         )
 
         assert result["user_decision"] == "approve"
         assert result["resolved_by"] == "judge"
         assert result["judge_reasoning"] == "Clearly safe operation within scope"
+        assert result["judge_decision"] == "approve"
+        assert result["judge_risk"] == "low"
         assert result["resolved_at"] is not None
 
     def test_resolve_with_user(self, audit_store, session_store):
@@ -197,10 +201,14 @@ class TestAuditStoreJudge:
             "test-call",
             "Judge recommends deny — ambiguous scope",
             user_id="test-user",
+            judge_decision="defer",
+            judge_risk="medium",
         )
 
         record = audit_store.get_by_call_id("test-call", user_id="test-user")
         assert record["judge_reasoning"] == "Judge recommends deny — ambiguous scope"
+        assert record["judge_decision"] == "defer"
+        assert record["judge_risk"] == "medium"
         assert record["user_decision"] is None  # Not resolved
 
     def test_set_judge_reasoning_on_resolved_is_noop(self, audit_store, session_store):
@@ -219,6 +227,100 @@ class TestAuditStoreJudge:
 
         record = audit_store.get_by_call_id("test-call", user_id="test-user")
         assert record["judge_reasoning"] is None  # Not set (already resolved)
+
+    def test_get_latest_reasoning_is_time_bounded(self, audit_store, session_store):
+        _create_session(session_store)
+        audit_store.insert(
+            call_id="reasoning-1",
+            user_id="test-user",
+            session_id="test-session",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted={"context": "older"},
+            classification=None,
+            evaluation_path="reasoning",
+            decision="approve",
+            risk=None,
+            reasoning=None,
+            latency_ms=0,
+            record_type="reasoning",
+            content="User message: older",
+        )
+        escalated = _create_escalated_record(audit_store)
+        audit_store.insert(
+            call_id="reasoning-2",
+            user_id="test-user",
+            session_id="test-session",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted={"context": "newer"},
+            classification=None,
+            evaluation_path="reasoning",
+            decision="approve",
+            risk=None,
+            reasoning=None,
+            latency_ms=0,
+            record_type="reasoning",
+            content="User message: newer",
+        )
+
+        latest = audit_store.get_latest_reasoning(
+            "test-session",
+            user_id="test-user",
+            before_ts=escalated["timestamp"],
+            before_id=escalated["id"],
+        )
+
+        assert latest is not None
+        assert latest["content"] == "User message: older"
+
+    def test_get_recent_judge_reviews_excludes_overridden_and_legacy_rows(
+        self, audit_store, session_store
+    ):
+        _create_session(session_store)
+        _create_escalated_record(audit_store, call_id="legacy-call")
+        audit_store.set_judge_reasoning(
+            "legacy-call",
+            "legacy judge note",
+            user_id="test-user",
+        )
+        judge_kept = _create_escalated_record(audit_store, call_id="judge-kept")
+        audit_store.resolve_escalation(
+            "judge-kept",
+            "approve",
+            user_id="test-user",
+            resolved_by="judge",
+            judge_reasoning="safe",
+            judge_decision="approve",
+            judge_risk="low",
+        )
+        _create_escalated_record(audit_store, call_id="judge-overridden")
+        audit_store.resolve_escalation(
+            "judge-overridden",
+            "deny",
+            user_id="test-user",
+            resolved_by="judge",
+            judge_reasoning="risky",
+            judge_decision="deny",
+            judge_risk="high",
+        )
+        audit_store.resolve_escalation(
+            "judge-overridden",
+            "approve",
+            user_id="test-user",
+            resolved_by="user",
+        )
+        current = _create_escalated_record(audit_store, call_id="current-call")
+
+        reviews = audit_store.get_recent_judge_reviews(
+            "test-session",
+            user_id="test-user",
+            before_ts=current["timestamp"],
+            before_id=current["id"],
+            limit=10,
+        )
+
+        assert [r["call_id"] for r in reviews] == [judge_kept["call_id"]]
 
     def test_get_user_decisions_filters_to_final_humans(
         self, audit_store, session_store
@@ -299,6 +401,8 @@ class TestAuditStoreJudge:
             user_id="test-user",
             resolved_by="judge",
             judge_reasoning="Looks risky — outside project scope",
+            judge_decision="deny",
+            judge_risk="high",
         )
 
         # Human overrides to approve
@@ -315,6 +419,8 @@ class TestAuditStoreJudge:
         assert updated["user_note"] == "Allow writing secret for this session"
         # Judge reasoning preserved via COALESCE
         assert updated["judge_reasoning"] == "Looks risky — outside project scope"
+        assert updated["judge_decision"] == "deny"
+        assert updated["judge_risk"] == "high"
 
     def test_override_judge_approve_to_deny(self, audit_store, session_store):
         """Human can override a judge approval to deny."""
@@ -329,6 +435,8 @@ class TestAuditStoreJudge:
             user_id="test-user",
             resolved_by="judge",
             judge_reasoning="Looks safe and aligned",
+            judge_decision="approve",
+            judge_risk="low",
         )
 
         # Human overrides to deny
@@ -343,6 +451,8 @@ class TestAuditStoreJudge:
         assert updated["user_decision"] == "deny"
         assert updated["resolved_by"] == "user"
         assert updated["judge_reasoning"] == "Looks safe and aligned"
+        assert updated["judge_decision"] == "approve"
+        assert updated["judge_risk"] == "low"
 
     def test_cannot_override_user_decision(self, audit_store, session_store):
         """Human decisions are final — cannot be overridden."""
@@ -486,6 +596,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "approve",
                     "reasoning": "Clearly safe operation within project scope",
+                    "risk": "low",
                     "confidence": "high",
                 }
             )
@@ -510,6 +621,8 @@ class TestJudgeReviewer:
             assert record["user_decision"] == "approve"
             assert record["resolved_by"] == "judge"
             assert "Clearly safe" in record["judge_reasoning"]
+            assert record["judge_decision"] == "approve"
+            assert record["judge_risk"] == "low"
             assert mock_metrics.judge_reviews_total == 1
             assert mock_metrics.judge_approvals_total == 1
             assert mock_event_bus.publish.called
@@ -568,6 +681,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "deny",
                     "reasoning": "Intention looks stale so I would deny",
+                    "risk": "low",
                     "confidence": "low",
                 }
             )
@@ -646,6 +760,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "deny",
                     "reasoning": "Still looks off-topic",
+                    "risk": "high",
                     "confidence": "low",
                 }
             )
@@ -684,6 +799,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "deny",
                     "reasoning": "Operation is outside project scope and risky",
+                    "risk": "high",
                     "confidence": "high",
                 }
             )
@@ -705,6 +821,8 @@ class TestJudgeReviewer:
             record = audit_store.get_by_call_id("test-call", user_id="test-user")
             assert record["user_decision"] == "deny"
             assert record["resolved_by"] == "judge"
+            assert record["judge_decision"] == "deny"
+            assert record["judge_risk"] == "high"
             assert mock_metrics.judge_denials_total == 1
 
         asyncio.run(_test())
@@ -722,6 +840,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "defer",
                     "reasoning": "Borderline case, needs human judgment",
+                    "risk": "medium",
                     "confidence": "medium",
                 }
             )
@@ -744,6 +863,7 @@ class TestJudgeReviewer:
             assert record["user_decision"] == "deny"
             assert record["resolved_by"] == "judge"
             assert "auto-denied" in record["judge_reasoning"]
+            assert record["judge_decision"] == "deny"
 
         asyncio.run(_test())
 
@@ -760,6 +880,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "approve",
                     "reasoning": "Seems okay but not sure",
+                    "risk": "medium",
                     "confidence": "low",
                 }
             )
@@ -781,13 +902,14 @@ class TestJudgeReviewer:
             record = audit_store.get_by_call_id("test-call", user_id="test-user")
             assert record["user_decision"] == "deny"
             assert "auto-denied" in record["judge_reasoning"]
+            assert record["judge_decision"] == "deny"
 
         asyncio.run(_test())
 
-    def test_advisory_defer(
+    def test_advisory_medium_defer_stays_defer(
         self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
     ):
-        """In advisory mode, defer stores reasoning but leaves unresolved."""
+        """In advisory mode, medium-risk defer stores reasoning but leaves unresolved."""
 
         async def _test():
             _create_session(session_store)
@@ -797,6 +919,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "defer",
                     "reasoning": "Needs human judgment on scope",
+                    "risk": "medium",
                     "confidence": "medium",
                 }
             )
@@ -818,7 +941,9 @@ class TestJudgeReviewer:
 
             record = audit_store.get_by_call_id("test-call", user_id="test-user")
             assert record["user_decision"] is None  # Not resolved
-            assert record["judge_reasoning"] == "Needs human judgment on scope"
+            assert "Judge deferred medium-risk call" in record["judge_reasoning"]
+            assert record["judge_decision"] == "defer"
+            assert record["judge_risk"] == "medium"
             assert mock_metrics.judge_deferrals_total == 1
 
         asyncio.run(_test())
@@ -836,6 +961,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "approve",
                     "reasoning": "Safe operation",
+                    "risk": "medium",
                     "confidence": "high",
                 }
             )
@@ -858,6 +984,8 @@ class TestJudgeReviewer:
             record = audit_store.get_by_call_id("test-call", user_id="test-user")
             assert record["user_decision"] == "approve"
             assert record["resolved_by"] == "judge"
+            assert record["judge_decision"] == "approve"
+            assert record["judge_risk"] == "medium"
 
         asyncio.run(_test())
 
@@ -874,6 +1002,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "deny",
                     "reasoning": "Destructive rm -rf / command, clearly malicious",
+                    "risk": "critical",
                     "confidence": "high",
                 }
             )
@@ -896,6 +1025,8 @@ class TestJudgeReviewer:
             record = audit_store.get_by_call_id("test-call", user_id="test-user")
             assert record["user_decision"] == "deny"
             assert record["resolved_by"] == "judge"
+            assert record["judge_decision"] == "deny"
+            assert record["judge_risk"] == "critical"
             assert mock_metrics.judge_denials_total == 1
 
         asyncio.run(_test())
@@ -913,6 +1044,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "deny",
                     "reasoning": "Might be outside scope but not certain",
+                    "risk": "medium",
                     "confidence": "medium",
                 }
             )
@@ -934,7 +1066,9 @@ class TestJudgeReviewer:
 
             record = audit_store.get_by_call_id("test-call", user_id="test-user")
             assert record["user_decision"] is None  # Not resolved — deferred
-            assert "original_decision=deny" in record["judge_reasoning"]
+            assert "Judge deferred medium-risk call" in record["judge_reasoning"]
+            assert record["judge_decision"] == "defer"
+            assert record["judge_risk"] == "medium"
             assert mock_metrics.judge_deferrals_total == 1
 
         asyncio.run(_test())
@@ -952,6 +1086,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "deny",
                     "reasoning": "Uncertain about this operation",
+                    "risk": "medium",
                     "confidence": "low",
                 }
             )
@@ -973,8 +1108,217 @@ class TestJudgeReviewer:
 
             record = audit_store.get_by_call_id("test-call", user_id="test-user")
             assert record["user_decision"] is None  # Not resolved — deferred
-            assert "original_decision=deny" in record["judge_reasoning"]
+            assert "Judge deferred medium-risk call" in record["judge_reasoning"]
+            assert record["judge_decision"] == "defer"
+            assert record["judge_risk"] == "medium"
             assert mock_metrics.judge_deferrals_total == 1
+
+        asyncio.run(_test())
+
+    def test_advisory_low_risk_defer_becomes_approve(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """In advisory mode, low-risk defer is auto-approved."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "defer",
+                    "reasoning": "The intention might be stale but the action is harmless",
+                    "risk": "low",
+                    "confidence": "medium",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] == "approve"
+            assert record["resolved_by"] == "judge"
+            assert record["judge_decision"] == "approve"
+            assert record["judge_risk"] == "low"
+            assert "auto-approved low-risk call" in record["judge_reasoning"]
+
+        asyncio.run(_test())
+
+    def test_advisory_low_risk_deny_becomes_approve(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """In advisory mode, low-risk deny is auto-approved."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "deny",
+                    "reasoning": "This looks off-topic but it is still harmless",
+                    "risk": "low",
+                    "confidence": "high",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] == "approve"
+            assert record["resolved_by"] == "judge"
+            assert record["judge_decision"] == "approve"
+            assert record["judge_risk"] == "low"
+            assert "auto-approved low-risk call" in record["judge_reasoning"]
+
+        asyncio.run(_test())
+
+    def test_advisory_medium_risk_low_confidence_approve_becomes_defer(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """In advisory mode, low-confidence medium-risk approve is deferred."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "approve",
+                    "reasoning": "Probably okay but I am not sure",
+                    "risk": "medium",
+                    "confidence": "low",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] is None
+            assert record["judge_decision"] == "defer"
+            assert record["judge_risk"] == "medium"
+            assert "Judge deferred medium-risk call" in record["judge_reasoning"]
+
+        asyncio.run(_test())
+
+    def test_advisory_high_risk_low_confidence_approve_becomes_defer(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """In advisory mode, low-confidence high-risk approve is deferred."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "approve",
+                    "reasoning": "Might be acceptable",
+                    "risk": "high",
+                    "confidence": "low",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] is None
+            assert record["judge_decision"] == "defer"
+            assert record["judge_risk"] == "high"
+            assert "Judge deferred high-risk call" in record["judge_reasoning"]
+
+        asyncio.run(_test())
+
+    def test_advisory_critical_risk_approve_is_rewritten_to_deny(
+        self, mock_llm, audit_store, session_store, mock_evaluator, mock_metrics
+    ):
+        """Critical-risk approve is denied with rewritten reasoning."""
+
+        async def _test():
+            _create_session(session_store)
+            _create_escalated_record(audit_store)
+
+            mock_llm.generate.return_value = json.dumps(
+                {
+                    "decision": "approve",
+                    "reasoning": "Looks okay",
+                    "risk": "critical",
+                    "confidence": "high",
+                }
+            )
+
+            reviewer = self._make_reviewer(
+                mock_llm=mock_llm,
+                audit_store=audit_store,
+                session_store=session_store,
+                mock_evaluator=mock_evaluator,
+                mock_metrics=mock_metrics,
+                mode="advisory",
+            )
+
+            await reviewer.review_and_resolve(
+                call_id="test-call",
+                user_id="test-user",
+                session_id="test-session",
+            )
+
+            record = audit_store.get_by_call_id("test-call", user_id="test-user")
+            assert record["user_decision"] == "deny"
+            assert record["judge_decision"] == "deny"
+            assert record["judge_risk"] == "critical"
+            assert "critical-risk call" in record["judge_reasoning"]
 
         asyncio.run(_test())
 
@@ -991,6 +1335,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "approve",
                     "reasoning": "Safe",
+                    "risk": "low",
                     "confidence": "high",
                 }
             )
@@ -1070,6 +1415,7 @@ class TestJudgeReviewer:
                 {
                     "decision": "deny",
                     "reasoning": "Would deny but human already approved",
+                    "risk": "high",
                     "confidence": "high",
                 }
             )
@@ -1703,6 +2049,69 @@ class TestJudgePrompt:
         assert "[context]" in prompt
         assert "gpt-4" in prompt
 
+    def test_prompt_includes_latest_reasoning_section(self):
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+            latest_reasoning={
+                "content": "User message: add the task in Todoist too",
+                "args_redacted": {"context": "Assistant proposed adding a follow-up."},
+            },
+        )
+
+        assert "Latest Reasoning" in prompt
+        assert "add the task in Todoist too" in prompt
+        assert "Assistant proposed adding a follow-up" in prompt
+
+    def test_prompt_includes_prior_judge_outcomes(self):
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Test",
+            policy=None,
+            recent_history=[],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+            prior_judge_reviews=[
+                {
+                    "tool": "todoist_add_tasks",
+                    "args_redacted": {"project": "Backlog"},
+                    "judge_decision": "approve",
+                    "judge_risk": "low",
+                    "judge_reasoning": "Harmless follow-up task update.",
+                }
+            ],
+        )
+
+        assert "Prior Judge Outcomes" in prompt
+        assert "judge:approve/low" in prompt
+        assert "Harmless follow-up task update" in prompt
+
     def test_checkpoint_and_summary_skipped(self):
         """Checkpoint and summary records are omitted from judge history."""
         from intaris.judge import _build_judge_prompt
@@ -2264,3 +2673,15 @@ class TestDBMigration:
             cur.execute("PRAGMA table_info(audit_log)")
             columns = {row[1] for row in cur.fetchall()}
         assert "judge_reasoning" in columns
+
+    def test_judge_decision_column_exists(self, tmp_db):
+        with tmp_db.cursor() as cur:
+            cur.execute("PRAGMA table_info(audit_log)")
+            columns = {row[1] for row in cur.fetchall()}
+        assert "judge_decision" in columns
+
+    def test_judge_risk_column_exists(self, tmp_db):
+        with tmp_db.cursor() as cur:
+            cur.execute("PRAGMA table_info(audit_log)")
+            columns = {row[1] for row in cur.fetchall()}
+        assert "judge_risk" in columns

@@ -231,6 +231,8 @@ class AuditRecord(BaseModel):
     resolved_at: str | None = None
     resolved_by: str | None = None
     judge_reasoning: str | None = None
+    judge_decision: str | None = None
+    judge_risk: str | None = None
 
 
 class AuditListResponse(BaseModel):
