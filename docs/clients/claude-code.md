@@ -40,7 +40,7 @@ export INTARIS_AGENT_ID=claude-code        # optional, defaults to "claude-code"
 export INTARIS_USER_ID=your-username       # optional if API key maps to user
 export INTARIS_FAIL_OPEN=false             # optional, defaults to false
 export INTARIS_INTENTION=""                # optional, auto-generated from cwd
-export INTARIS_ALLOW_PATHS=~/src           # optional, allow reads from sibling projects
+export INTARIS_ALLOW_PATHS=~/src           # optional, appended after built-in safe paths
 export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disabled)
 export INTARIS_SESSION_RECORDING=false     # optional, enable session recording
 export INTARIS_DEBUG=false                 # optional, enable stderr logging
@@ -52,9 +52,9 @@ export INTARIS_DEBUG=false                 # optional, enable stderr logging
 | `INTARIS_API_KEY` | (empty) | API key for authentication. **Required** if Intaris has auth configured. |
 | `INTARIS_AGENT_ID` | `claude-code` | Agent ID sent to Intaris |
 | `INTARIS_USER_ID` | (empty) | User ID (optional if API key maps to a user) |
-| `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed when Intaris is unreachable. |
+| `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed only when Intaris is unreachable or returns transient `5xx` errors. Client/auth/schema errors still block. |
 | `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"Claude Code coding session in <cwd>"` |
-| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories for cross-project reads. Supports `~` expansion. |
+| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories for cross-project reads. Supports `~` expansion. Intaris always includes `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set. User entries are appended after normalization. |
 | `INTARIS_CHECKPOINT_INTERVAL` | `25` | Evaluate calls between periodic checkpoints. `0` = disabled. |
 | `INTARIS_SESSION_RECORDING` | `false` | Enable session recording for playback and analysis. |
 | `INTARIS_DEBUG` | `false` | Enable debug logging to stderr. |
@@ -66,10 +66,15 @@ Copy the hooks configuration and scripts:
 ```bash
 # Copy scripts
 mkdir -p ~/.claude/scripts
-cp integrations/claude-code/scripts/session.sh ~/.claude/scripts/intaris-session.sh
-cp integrations/claude-code/scripts/evaluate.sh ~/.claude/scripts/intaris-evaluate.sh
-cp integrations/claude-code/scripts/record.sh ~/.claude/scripts/intaris-record.sh
-cp integrations/claude-code/scripts/stop.sh ~/.claude/scripts/intaris-stop.sh
+cp integrations/claude-code/scripts/intaris-lib.sh ~/.claude/scripts/intaris-lib.sh
+cp integrations/claude-code/scripts/intaris-session.sh ~/.claude/scripts/intaris-session.sh
+cp integrations/claude-code/scripts/intaris-prompt.sh ~/.claude/scripts/intaris-prompt.sh
+cp integrations/claude-code/scripts/intaris-evaluate.sh ~/.claude/scripts/intaris-evaluate.sh
+cp integrations/claude-code/scripts/intaris-record.sh ~/.claude/scripts/intaris-record.sh
+cp integrations/claude-code/scripts/intaris-subagent.sh ~/.claude/scripts/intaris-subagent.sh
+cp integrations/claude-code/scripts/intaris-subagent-stop.sh ~/.claude/scripts/intaris-subagent-stop.sh
+cp integrations/claude-code/scripts/intaris-stop.sh ~/.claude/scripts/intaris-stop.sh
+cp integrations/claude-code/scripts/intaris-stop-failure.sh ~/.claude/scripts/intaris-stop-failure.sh
 chmod +x ~/.claude/scripts/intaris-*.sh
 
 # Copy hooks config
@@ -77,7 +82,7 @@ cp integrations/claude-code/hooks.json ~/.claude/settings.json
 # Or merge with existing settings.json if you have other hooks
 ```
 
-The hooks section includes `SessionStart`, `PreToolUse`, `PostToolUse`, and `Stop` hooks.
+The hooks section includes `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`, and `StopFailure` hooks.
 
 ### 3. Prerequisites
 
@@ -139,18 +144,19 @@ See the [MCP Proxy Guide](../mcp-proxy.md) for full details.
 
 ### Hooks Flow
 
-1. **`SessionStart`** (on startup/resume): Creates an Intaris session via `POST /api/v1/intention` with the working directory as context. Stores session state as JSON in a temp file.
+1. **`SessionStart`** (on startup/resume/clear/compact): Creates or re-activates an Intaris session via `POST /api/v1/intention` with the working directory as context. Stores session state as JSON in a temp file.
 2. **`PreToolUse`** (before every tool call):
    - Loads session state from the JSON temp file (or creates one lazily)
    - Calls `POST /api/v1/evaluate` with the tool name and arguments
    - **approve**: outputs `{}` (allow)
-   - **deny**: outputs `{"decision": "block", "reason": "..."}` (blocks execution)
-   - **escalate**: outputs `{"decision": "block", "reason": "..."}` with approval instructions
+   - **deny**: outputs Claude's `hookSpecificOutput.permissionDecision="deny"` format (blocks execution)
+   - **escalate**: polls `GET /api/v1/audit/{call_id}` for judge or human resolution, then blocks with retry instructions if still unresolved
    - Updates session statistics and sends periodic checkpoints
 3. **`PostToolUse`** (after tool execution): Records tool results when session recording is enabled.
 4. **`Stop`** (on session end):
    - Signals session completion: `PATCH /api/v1/session/{id}/status` to `"completed"`
    - Sends agent summary: `POST /api/v1/session/{id}/agent-summary` with session statistics
+   - Completes any leftover child sessions and sends their summaries before cleanup
    - Cleans up the temp state file
 
 ### MCP Proxy Flow
@@ -174,6 +180,8 @@ When `INTARIS_SESSION_RECORDING=true`, the hooks record tool calls and results t
 Unlike the OpenCode plugin (which buffers events client-side), the Claude Code hooks send events directly on each invocation since bash scripts are stateless. Each hook call sends 1-2 events via `POST /session/{id}/events`. The server-side EventStore buffers and consolidates these into chunks.
 
 Recording is completely non-blocking -- all recording API calls are fire-and-forget with 2s timeouts. Recording failures never block tool execution.
+
+Built-in cross-project read defaults for the hooks are always present: `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set. `INTARIS_ALLOW_PATHS` adds more prefixes on top of those defaults.
 
 ## Behavioral Analysis
 

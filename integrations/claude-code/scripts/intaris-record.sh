@@ -31,7 +31,11 @@ if [ "$INTARIS_SESSION_RECORDING" != "true" ]; then
     exit 0
 fi
 
-require_jq
+if ! require_jq; then
+    log "jq is required for PostToolUse recording, skipping"
+    echo '{}'
+    exit 0
+fi
 
 # Read hook input from stdin
 INPUT=$(cat)

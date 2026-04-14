@@ -20,7 +20,11 @@ set -euo pipefail
 # Source shared library
 . "$(dirname "$0")/intaris-lib.sh"
 
-require_jq
+if ! require_jq; then
+    log "jq is required for SessionStart, skipping"
+    echo '{}'
+    exit 0
+fi
 
 # Read hook input from stdin
 INPUT=$(cat)
@@ -108,25 +112,41 @@ else
     log "Failed to create session (HTTP $HTTP_CODE): $RESP_BODY"
 fi
 
-# Write initial JSON state file (always, even on failure — evaluate.sh will retry)
-STATE_JSON=$(jq -n \
-    --arg sid "$INTARIS_SESSION_ID" \
-    --arg cwd "$CWD" \
-    '{
-        session_id: $sid,
-        call_count: 0,
-        approved: 0,
-        denied: 0,
-        escalated: 0,
-        recent_tools: [],
-        cwd: $cwd,
-        last_assistant_text: "",
-        subagents: {}
-    }')
+# Write initial JSON state file on first start, or preserve existing state on
+# resume/clear/compact while refreshing the working directory.
+if [ -f "$SESSION_FILE" ]; then
+    acquire_lock "$SESSION_FILE" || true
+    if [ -f "$SESSION_FILE" ] && jq -e '.session_id' "$SESSION_FILE" >/dev/null 2>&1; then
+        STATE_JSON=$(jq \
+            --arg sid "$INTARIS_SESSION_ID" \
+            --arg cwd "$CWD" \
+            '.session_id = $sid | .cwd = $cwd' \
+            "$SESSION_FILE" 2>/dev/null)
+        if [ -n "$STATE_JSON" ]; then
+            write_state "$SESSION_FILE" "$STATE_JSON"
+        fi
+    fi
+    release_lock "$SESSION_FILE"
+else
+    STATE_JSON=$(jq -n \
+        --arg sid "$INTARIS_SESSION_ID" \
+        --arg cwd "$CWD" \
+        '{
+            session_id: $sid,
+            call_count: 0,
+            approved: 0,
+            denied: 0,
+            escalated: 0,
+            recent_tools: [],
+            cwd: $cwd,
+            last_assistant_text: "",
+            subagents: {}
+        }')
 
-acquire_lock "$SESSION_FILE" || true
-write_state "$SESSION_FILE" "$STATE_JSON"
-release_lock "$SESSION_FILE"
+    acquire_lock "$SESSION_FILE" || true
+    write_state "$SESSION_FILE" "$STATE_JSON"
+    release_lock "$SESSION_FILE"
+fi
 
 # Output empty (no modifications to Claude's behavior)
 echo '{}'

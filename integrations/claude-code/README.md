@@ -42,7 +42,7 @@ export INTARIS_AGENT_ID=claude-code        # optional, defaults to "claude-code"
 export INTARIS_USER_ID=your-username       # optional if API key maps to user
 export INTARIS_FAIL_OPEN=false             # optional, defaults to false
 export INTARIS_INTENTION=""                # optional, auto-generated from cwd
-export INTARIS_ALLOW_PATHS=~/src           # optional, allow reads from sibling projects
+export INTARIS_ALLOW_PATHS=~/src           # optional, appended after built-in safe paths
 export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disabled)
 export INTARIS_ESCALATION_TIMEOUT=55       # optional, max seconds to wait for approval
 export INTARIS_SESSION_RECORDING=false     # optional, enable session recording
@@ -55,9 +55,9 @@ export INTARIS_DEBUG=false                 # optional, enable stderr logging
 | `INTARIS_API_KEY` | (empty) | API key for authentication. **Required** if Intaris has `INTARIS_API_KEYS` set. |
 | `INTARIS_AGENT_ID` | `claude-code` | Agent ID sent to Intaris |
 | `INTARIS_USER_ID` | (empty) | User ID (optional if API key maps to a user) |
-| `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed when Intaris is unreachable. Default is `false` (fail-closed) -- tool calls are blocked when Intaris is down. |
+| `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed only when Intaris is unreachable or returns transient `5xx` errors. Client/auth/schema errors still block. Default is `false` (fail-closed). |
 | `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"Claude Code coding session in <cwd>"` |
-| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories to allow reads from without LLM evaluation. Supports `~` expansion. E.g., `~/src` allows reads from all projects under `~/src/`. |
+| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories to allow reads from without LLM evaluation. Supports `~` expansion. Intaris always includes `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set. User entries are appended after normalization. |
 | `INTARIS_CHECKPOINT_INTERVAL` | `25` | Number of evaluate calls between periodic checkpoints. Set to `0` to disable checkpoints. Each checkpoint consumes one rate limit slot. |
 | `INTARIS_ESCALATION_TIMEOUT` | `55` | Max seconds to wait for escalation or suspension approval. The hard ceiling is 60s (the PreToolUse hook timeout). Set to `0` to use the hook timeout as the ceiling. |
 | `INTARIS_SESSION_RECORDING` | `false` | Enable session recording. When `true`, tool calls, results, and user messages are recorded to the event store for playback and analysis. |
@@ -71,13 +71,13 @@ Copy the hooks configuration and scripts:
 # Copy scripts (including shared library)
 mkdir -p ~/.claude/scripts
 cp integrations/claude-code/scripts/intaris-lib.sh ~/.claude/scripts/intaris-lib.sh
-cp integrations/claude-code/scripts/session.sh ~/.claude/scripts/intaris-session.sh
+cp integrations/claude-code/scripts/intaris-session.sh ~/.claude/scripts/intaris-session.sh
 cp integrations/claude-code/scripts/intaris-prompt.sh ~/.claude/scripts/intaris-prompt.sh
-cp integrations/claude-code/scripts/evaluate.sh ~/.claude/scripts/intaris-evaluate.sh
-cp integrations/claude-code/scripts/record.sh ~/.claude/scripts/intaris-record.sh
+cp integrations/claude-code/scripts/intaris-evaluate.sh ~/.claude/scripts/intaris-evaluate.sh
+cp integrations/claude-code/scripts/intaris-record.sh ~/.claude/scripts/intaris-record.sh
 cp integrations/claude-code/scripts/intaris-subagent.sh ~/.claude/scripts/intaris-subagent.sh
 cp integrations/claude-code/scripts/intaris-subagent-stop.sh ~/.claude/scripts/intaris-subagent-stop.sh
-cp integrations/claude-code/scripts/stop.sh ~/.claude/scripts/intaris-stop.sh
+cp integrations/claude-code/scripts/intaris-stop.sh ~/.claude/scripts/intaris-stop.sh
 cp integrations/claude-code/scripts/intaris-stop-failure.sh ~/.claude/scripts/intaris-stop-failure.sh
 chmod +x ~/.claude/scripts/intaris-*.sh
 
@@ -181,6 +181,8 @@ When a tool call is escalated, the `PreToolUse` hook polls for resolution:
 3. If the judge LLM auto-resolves (approve or deny), the hook returns immediately
 4. If a human approves/denies in the Intaris UI, the hook returns immediately
 5. If `INTARIS_ESCALATION_TIMEOUT` is reached, the hook denies with a message directing the user to the Intaris UI
+
+Built-in cross-project read defaults for the hooks are always present: `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set. `INTARIS_ALLOW_PATHS` adds more prefixes on top of those defaults.
 
 **Known limitation**: The PreToolUse hook timeout is 60s. Escalation approval must complete within this window. The default `INTARIS_ESCALATION_TIMEOUT=55` leaves a 5s margin. If approval takes longer, the user must retry the tool call after approving in the UI.
 
@@ -292,13 +294,13 @@ The evaluate hook supports backward compatibility with legacy state files (plain
 hooks.json                    Hook configuration (8 hooks)
 scripts/
   intaris-lib.sh              Shared library (logging, locking, headers, validation)
-  session.sh                  SessionStart handler (creates/re-activates session)
+  intaris-session.sh          SessionStart handler (creates/re-activates session)
   intaris-prompt.sh           UserPromptSubmit handler (user message → /reasoning)
-  evaluate.sh                 PreToolUse handler (evaluate + escalation polling)
-  record.sh                   PostToolUse handler (session recording)
+  intaris-evaluate.sh         PreToolUse handler (evaluate + escalation polling)
+  intaris-record.sh           PostToolUse handler (session recording)
   intaris-subagent.sh         SubagentStart handler (child session creation)
   intaris-subagent-stop.sh    SubagentStop handler (child session completion)
-  stop.sh                     Stop handler (assistant text + session completion)
+  intaris-stop.sh             Stop handler (assistant text + session completion)
   intaris-stop-failure.sh     StopFailure handler (save assistant text on errors)
 ```
 

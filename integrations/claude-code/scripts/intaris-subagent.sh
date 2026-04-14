@@ -18,7 +18,11 @@ set -euo pipefail
 # Source shared library
 . "$(dirname "$0")/intaris-lib.sh"
 
-require_jq
+if ! require_jq; then
+    log "jq is required for SubagentStart, skipping"
+    echo '{}'
+    exit 0
+fi
 
 # Read hook input from stdin
 INPUT=$(cat)
@@ -107,11 +111,20 @@ BODY=$(jq -n \
 log "Creating child session: $CHILD_SESSION_ID (parent: $PARENT_SESSION_ID, type: ${AGENT_TYPE:-unknown})"
 
 # Create child session (2s timeout)
-curl -s --max-time 2 \
+RESPONSE=$(curl -s --max-time 2 \
+    -w "\n%{http_code}" \
     -X POST \
     "${HEADERS[@]}" \
     -d "$BODY" \
-    "${INTARIS_URL}/api/v1/intention" >/dev/null 2>&1 || log "Failed to create child session"
+    "${INTARIS_URL}/api/v1/intention" 2>/dev/null || printf '\n000')
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+
+if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ] && [ "$HTTP_CODE" != "409" ]; then
+    log "Failed to create child session: HTTP ${HTTP_CODE}"
+    echo '{}'
+    exit 0
+fi
 
 # Write child state file
 CHILD_FILE=$(state_file_for_subagent "$SESSION_ID" "$AGENT_ID")

@@ -27,7 +27,11 @@ set -euo pipefail
 # Source shared library
 . "$(dirname "$0")/intaris-lib.sh"
 
-require_jq
+if ! require_jq; then
+    log "jq is required for Stop hook, skipping"
+    echo '{}'
+    exit 0
+fi
 
 # Read hook input from stdin
 INPUT=$(cat)
@@ -135,14 +139,42 @@ if [ "$SUBAGENTS" != "{}" ] && [ "$SUBAGENTS" != "null" ]; then
         child_sid=$(echo "$SUBAGENTS" | jq -r --arg k "$agent_id" '.[$k]' 2>/dev/null || true)
         if [ -n "$child_sid" ]; then
             log "Completing child session: $child_sid (agent: $agent_id)"
+            CHILD_FILE=$(state_file_for_subagent "$SESSION_ID" "$agent_id")
+            CHILD_SUMMARY_BODY=''
+            if [ -f "$CHILD_FILE" ]; then
+                acquire_lock "$CHILD_FILE" || true
+                if [ -f "$CHILD_FILE" ]; then
+                    CHILD_CALL_COUNT=$(jq -r '.call_count // 0' "$CHILD_FILE" 2>/dev/null || echo "0")
+                    CHILD_APPROVED=$(jq -r '.approved // 0' "$CHILD_FILE" 2>/dev/null || echo "0")
+                    CHILD_DENIED=$(jq -r '.denied // 0' "$CHILD_FILE" 2>/dev/null || echo "0")
+                    CHILD_ESCALATED=$(jq -r '.escalated // 0' "$CHILD_FILE" 2>/dev/null || echo "0")
+                    CHILD_CWD=$(jq -r '.cwd // empty' "$CHILD_FILE" 2>/dev/null || true)
+                    CHILD_AGENT_TYPE=$(jq -r '.agent_type // empty' "$CHILD_FILE" 2>/dev/null || true)
+                    CHILD_LABEL="${CHILD_AGENT_TYPE:-sub-agent}"
+                    CHILD_SUMMARY="Claude Code ${CHILD_LABEL} session completed. ${CHILD_CALL_COUNT} tool calls (${CHILD_APPROVED} approved, ${CHILD_DENIED} denied, ${CHILD_ESCALATED} escalated)."
+                    if [ -n "$CHILD_CWD" ]; then
+                        CHILD_SUMMARY="${CHILD_SUMMARY} Working directory: ${CHILD_CWD}"
+                    fi
+                    CHILD_SUMMARY_BODY=$(jq -n --arg s "$CHILD_SUMMARY" '{summary: $s}')
+                fi
+                release_lock "$CHILD_FILE"
+            fi
+
             curl -s --max-time 2 \
                 -X PATCH \
                 "${HEADERS[@]}" \
                 -d '{"status":"completed"}' \
                 "${INTARIS_URL}/api/v1/session/${child_sid}/status" >/dev/null 2>&1 || true
 
+            if [ -n "$CHILD_SUMMARY_BODY" ]; then
+                curl -s --max-time 2 \
+                    -X POST \
+                    "${HEADERS[@]}" \
+                    -d "$CHILD_SUMMARY_BODY" \
+                    "${INTARIS_URL}/api/v1/session/${child_sid}/agent-summary" >/dev/null 2>&1 || true
+            fi
+
             # Clean up child state file
-            CHILD_FILE=$(state_file_for_subagent "$SESSION_ID" "$agent_id")
             rm -f "$CHILD_FILE"
         fi
     done

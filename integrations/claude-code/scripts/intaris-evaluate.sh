@@ -40,7 +40,10 @@ set -euo pipefail
 # Source shared library
 . "$(dirname "$0")/intaris-lib.sh"
 
-require_jq
+if ! require_jq; then
+    deny_tool "[intaris] jq is required for PreToolUse enforcement but is not installed"
+    exit 0
+fi
 
 # Record hook start time for timing budget
 HOOK_START=$(date +%s)
@@ -268,7 +271,7 @@ fi
 if [ "$HTTP_CODE" != "200" ]; then
     DETAIL=$(echo "$BODY" | jq -r '.detail // "Unknown error"' 2>/dev/null || echo "HTTP $HTTP_CODE")
     log "Evaluate returned HTTP $HTTP_CODE: $DETAIL"
-    if [ "$INTARIS_FAIL_OPEN" = "true" ]; then
+    if [ "$INTARIS_FAIL_OPEN" = "true" ] && [ "$HTTP_CODE" -ge 500 ] 2>/dev/null; then
         log "Allowing (fail-open)"
         allow_tool
         exit 0
@@ -531,6 +534,27 @@ handle_escalation() {
             [ -n "$user_note" ] && deny_suffix=" — $user_note"
             log "Escalation denied: $TOOL_NAME ($call_id)"
             deny_tool "[intaris] DENIED by reviewer ($call_id): ${reasoning}${deny_suffix}"
+            exit 0
+        fi
+
+        local resolved_by
+        resolved_by=$(echo "$audit_resp" | jq -r '.resolved_by // ""' 2>/dev/null || echo "")
+        local judge_decision
+        judge_decision=$(echo "$audit_resp" | jq -r '.judge_decision // ""' 2>/dev/null || echo "")
+
+        if [ "$resolved_by" = "judge" ] && [ "$judge_decision" = "approve" ]; then
+            log "Escalation approved by judge: $TOOL_NAME ($call_id)"
+            allow_tool
+            exit 0
+        fi
+
+        if [ "$resolved_by" = "judge" ] && [ "$judge_decision" = "deny" ]; then
+            local judge_reasoning
+            judge_reasoning=$(echo "$audit_resp" | jq -r '.judge_reasoning // ""' 2>/dev/null || echo "")
+            local deny_reason="$reasoning"
+            [ -n "$judge_reasoning" ] && deny_reason="$judge_reasoning"
+            log "Escalation denied by judge: $TOOL_NAME ($call_id)"
+            deny_tool "[intaris] DENIED by judge ($call_id): ${deny_reason}"
             exit 0
         fi
 

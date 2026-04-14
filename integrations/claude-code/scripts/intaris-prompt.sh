@@ -19,7 +19,11 @@ set -euo pipefail
 # Source shared library
 . "$(dirname "$0")/intaris-lib.sh"
 
-require_jq
+if ! require_jq; then
+    log "jq is required for UserPromptSubmit, skipping"
+    echo '{}'
+    exit 0
+fi
 
 # Read hook input from stdin
 INPUT=$(cat)

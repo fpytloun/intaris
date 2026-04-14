@@ -38,12 +38,12 @@ log() {
 
 # -- Guards ------------------------------------------------------------------
 
-# Check that jq is available. If not, output empty JSON and exit.
+# Check that jq is available.
 require_jq() {
     if ! command -v jq >/dev/null 2>&1; then
-        echo '{}'
-        exit 0
+        return 1
     fi
+    return 0
 }
 
 # Validate session ID format to prevent path traversal in state file paths.
@@ -155,16 +155,32 @@ write_state() {
 
 # -- Allow Paths Policy ------------------------------------------------------
 
-# Build allow_paths policy JSON from INTARIS_ALLOW_PATHS env var.
-# Returns "null" if no paths configured, or a JSON object with allow_paths array.
+# Build allow_paths policy JSON from built-in safe paths plus INTARIS_ALLOW_PATHS.
+# Returns "null" only if no patterns are available, or a JSON object with
+# allow_paths array otherwise.
 # Usage: POLICY_JSON=$(build_allow_paths_policy)
 build_allow_paths_policy() {
+    local patterns="[]"
+
+    patterns=$(echo "$patterns" | jq '. + ["/tmp/*", "/var/tmp/*"]')
+
+    if [ -n "${TMPDIR:-}" ]; then
+        patterns=$(echo "$patterns" | jq --arg pat "${TMPDIR%/}/*" '. + [$pat]')
+    fi
+
+    if [ -n "${HOME:-}" ]; then
+        patterns=$(echo "$patterns" | jq --arg pat "$HOME/.claude/plans/*" '. + [$pat]')
+    fi
+
     if [ -z "$INTARIS_ALLOW_PATHS" ]; then
-        echo "null"
+        if [ "$(echo "$patterns" | jq 'length')" -gt 0 ]; then
+            jq -n --argjson ap "$patterns" '{"allow_paths": $ap}'
+        else
+            echo "null"
+        fi
         return
     fi
 
-    local patterns="[]"
     local IFS=','
     # shellcheck disable=SC2086
     set -- $INTARIS_ALLOW_PATHS
