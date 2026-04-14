@@ -678,6 +678,31 @@ def _make_guarded_handler(
                     )
                     if re_result.data and re_result.data.get("decision") == "approve":
                         return original_handler(args, **kwargs)
+                    if re_result.data and re_result.data.get("decision") == "escalate":
+                        re_call_id = str(re_result.data.get("call_id") or "")
+                        re_reason = str(
+                            re_result.data.get(
+                                "reasoning", "Tool call requires human approval"
+                            )
+                        )
+                        poll_result = _poll_escalation(re_call_id, tool_name)
+                        if poll_result == "approve":
+                            return original_handler(args, **kwargs)
+                        if poll_result == "deny":
+                            return json.dumps(
+                                {
+                                    "error": f"[intaris] DENIED by user ({re_call_id}): {re_reason}"
+                                }
+                            )
+                        return json.dumps(
+                            {
+                                "error": (
+                                    f"[intaris] ESCALATION TIMEOUT ({re_call_id}): {re_reason}\n"
+                                    f"No response within {_cfg.escalation_timeout_s:.0f}s. "
+                                    f"Approve or deny in the Intaris UI."
+                                )
+                            }
+                        )
                     re_reason = (
                         re_result.data.get("reasoning", "denied after reactivation")
                         if re_result.data

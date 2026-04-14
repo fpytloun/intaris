@@ -154,7 +154,7 @@ See the [MCP Proxy Guide](../mcp-proxy.md) for full details.
    - Updates session statistics and sends periodic checkpoints
 3. **`PostToolUse`** (after tool execution): Records tool results when session recording is enabled.
 4. **`Stop`** (on session end):
-   - Signals session completion: `PATCH /api/v1/session/{id}/status` to `"completed"`
+   - Transitions the parent session to `idle`: `PATCH /api/v1/session/{id}/status`
    - Sends agent summary: `POST /api/v1/session/{id}/agent-summary` with session statistics
    - Completes any leftover child sessions and sends their summaries before cleanup
    - Cleans up the temp state file

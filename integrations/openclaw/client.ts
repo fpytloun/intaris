@@ -172,7 +172,7 @@ export class IntarisClient {
     };
     if (intentionPending) body.intention_pending = true;
 
-    return this.callApiWithRetry("POST", "/api/v1/evaluate", body, 30000, 2, agentId);
+    return this.callApi("POST", "/api/v1/evaluate", body, 60000, undefined, agentId);
   }
 
   async updateStatus(sessionId: string, status: string, agentId?: string): Promise<ApiResult> {

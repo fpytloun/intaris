@@ -68,7 +68,7 @@ In your `openclaw.json`:
 4. **`before_tool_call`**: Evaluates every tool call via `POST /api/v1/evaluate`
    - **approve**: tool executes normally
    - **deny**: returns `{ block: true, blockReason }` (blocks execution)
-   - **escalate**: polls for user decision, blocks until resolved
+   - **escalate**: polls only when `/evaluate` still returns unresolved escalation
 5. **`after_tool_call`**: Records tool results for audit trail
 6. **`llm_output`**: Captures last assistant text for intention context
 7. **`agent_end`**: Transitions session to idle, sends checkpoints

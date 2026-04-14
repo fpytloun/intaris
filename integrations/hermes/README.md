@@ -77,7 +77,7 @@ This works because Hermes plugins load **after** built-in tools, and the tool re
 3. **Tool wrapper**: Evaluates every tool call via `POST /api/v1/evaluate`
    - **approve**: calls original handler, returns result
    - **deny**: returns `{"error": "BLOCKED by Intaris: ..."}` to the LLM
-   - **escalate**: polls for user decision, blocks until resolved
+   - **escalate**: polls only when `/evaluate` still returns unresolved escalation
 4. **`pre_tool_call`**: Records tool call events for session recording
 5. **`post_tool_call`**: Records tool results, sends periodic checkpoints
 6. **`post_llm_call`**: Captures assistant response for reasoning context
@@ -99,7 +99,7 @@ Every tool call goes through Intaris evaluation, adding network round-trip laten
 
 ### Synchronous blocking
 
-Tool evaluation is synchronous -- the Hermes agent loop blocks while waiting for Intaris to respond. For escalated tool calls, the agent blocks until a human approves or denies in the Intaris UI (or the timeout expires). This is by design for safety, but means the agent cannot proceed with other work during escalation.
+Tool evaluation is synchronous -- the Hermes agent loop blocks while waiting for Intaris to respond. The `/evaluate` call may already wait for judge review and return a final `approve` or `deny`. Only unresolved escalations block for human approval in the Intaris UI.
 
 ### No sub-agent linking
 

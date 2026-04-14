@@ -180,18 +180,18 @@ if [ "$SUBAGENTS" != "{}" ] && [ "$SUBAGENTS" != "null" ]; then
     done
 fi
 
-# -- Signal Completion (before transcript upload to ensure it always fires) --
+# -- Transition Parent Session To Idle (before transcript upload) -------------
 
 # Build agent summary
-SUMMARY="Claude Code session completed. ${CALL_COUNT} tool calls (${APPROVED} approved, ${DENIED} denied, ${ESCALATED} escalated)."
+SUMMARY="Claude Code session idle. ${CALL_COUNT} tool calls (${APPROVED} approved, ${DENIED} denied, ${ESCALATED} escalated)."
 if [ -n "$CWD" ]; then
     SUMMARY="${SUMMARY} Working directory: ${CWD}"
 fi
 
-STATUS_BODY='{"status":"completed"}'
+STATUS_BODY='{"status":"idle"}'
 SUMMARY_BODY=$(jq -n --arg s "$SUMMARY" '{summary: $s}')
 
-log "Signaling completion for session: $INTARIS_SESSION_ID"
+log "Transitioning session to idle: $INTARIS_SESSION_ID"
 
 # Send status update and agent summary in parallel (fire-and-forget)
 curl -s --max-time 2 \
@@ -208,7 +208,7 @@ curl -s --max-time 2 \
 
 wait
 
-log "Session completion signaled: $INTARIS_SESSION_ID"
+log "Session idle signaled: $INTARIS_SESSION_ID"
 
 # -- Session Recording: upload transcript (best-effort, after completion) ----
 # Transcript upload runs after completion signals so session state is always

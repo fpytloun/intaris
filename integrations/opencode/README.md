@@ -138,12 +138,14 @@ See [OpenCode Permissions](https://opencode.ai/docs/permissions/) for details.
    - Calls `POST /api/v1/evaluate` with the tool name and arguments
    - **approve**: tool executes normally
    - **deny**: throws an error with reasoning (blocks execution)
-   - **escalate**: throws an error directing the user to the Intaris UI for approval
+   - **escalate**: polls only when `/evaluate` still returns unresolved escalation
    - Tracks per-decision statistics (approve/deny/escalate counts)
    - Sends periodic checkpoints via `POST /api/v1/checkpoint` (every N calls)
 3. **`session.deleted`**: Signals session completion to Intaris:
    - `PATCH /api/v1/session/{id}/status` to `"completed"`
    - `POST /api/v1/session/{id}/agent-summary` with session statistics
+
+During normal inactivity, the plugin uses `session.idle` to transition parent sessions to `idle` rather than `completed`. Child sessions still complete when they become idle.
 
 ### MCP Proxy Flow
 

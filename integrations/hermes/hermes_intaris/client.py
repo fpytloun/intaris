@@ -190,12 +190,11 @@ class IntarisClient:
         }
         if intention_pending:
             body["intention_pending"] = True
-        return self.call_api_with_retry(
+        return self.call_api(
             "POST",
             "/api/v1/evaluate",
             body,
-            timeout_s=30.0,
-            max_retries=2,
+            timeout_s=60.0,
             agent_id=agent_id,
         )
 

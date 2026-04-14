@@ -968,6 +968,64 @@ const intarisPlugin = {
           .catch(() => {});
       }
 
+      const waitForEscalation = async (callId: string, reason: string) => {
+        log(
+          "warn",
+          `ESCALATED ${event.toolName} (${callId}): ${reason}. Waiting for approval in Intaris UI...`,
+        );
+
+        const pollBackoffMs = [2000, 4000, 8000, 16000, 30000];
+        const startTime = Date.now();
+        let pollAttempt = 0;
+        let lastReminderAt = startTime;
+
+        while (true) {
+          if (cfg.escalationTimeoutMs > 0 && Date.now() - startTime > cfg.escalationTimeoutMs) {
+            return {
+              block: true,
+              blockReason:
+                `[intaris] ESCALATION TIMEOUT (${callId}): ${reason}\n` +
+                `No response within ${cfg.escalationTimeoutMs / 1000}s. Approve or deny in the Intaris UI.`,
+            };
+          }
+
+          const now = Date.now();
+          if (now - lastReminderAt >= 60000) {
+            const waitSec = Math.round((now - startTime) / 1000);
+            log(
+              "warn",
+              `Still waiting for escalation approval for ${event.toolName} (${callId})... ${waitSec}s elapsed`,
+            );
+            lastReminderAt = now;
+          }
+
+          const delay = pollBackoffMs[Math.min(pollAttempt, pollBackoffMs.length - 1)];
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          pollAttempt++;
+
+          const { data: auditData } = await client.getAudit(callId, ctx.agentId);
+          if (!auditData) continue;
+
+          const auditRecord = auditData as unknown as {
+            user_decision?: string;
+            user_note?: string;
+          };
+
+          if (auditRecord.user_decision === "approve") {
+            log("info", `Escalation approved: ${event.toolName} (${callId})`);
+            return {};
+          }
+
+          if (auditRecord.user_decision === "deny") {
+            const denyNote = auditRecord.user_note ? ` -- ${auditRecord.user_note}` : "";
+            return {
+              block: true,
+              blockReason: `[intaris] DENIED by user (${callId}): ${reason}${denyNote}`,
+            };
+          }
+        }
+      };
+
       // -- Handle DENY -------------------------------------------------------
       if (result.decision === "deny") {
         // Session-level suspension: wait for user action
@@ -1049,10 +1107,10 @@ const intarisPlugin = {
                 };
               }
               if (reResult.decision === "escalate") {
-                return {
-                  block: true,
-                  blockReason: `[intaris] ESCALATED after reactivation: ${reResult.reasoning || "Requires human approval"}`,
-                };
+                return await waitForEscalation(
+                  reResult.call_id,
+                  reResult.reasoning || "Tool call requires human approval",
+                );
               }
               // Approved -- let tool proceed
               return {};
@@ -1084,68 +1142,7 @@ const intarisPlugin = {
       // -- Handle ESCALATE ---------------------------------------------------
       if (result.decision === "escalate") {
         const reason = result.reasoning || "Tool call requires human approval";
-        log(
-          "warn",
-          `ESCALATED ${event.toolName} (${result.call_id}): ${reason}. Waiting for approval in Intaris UI...`,
-        );
-
-        // Poll for user decision with exponential backoff
-        const pollBackoffMs = [2000, 4000, 8000, 16000, 30000];
-        const startTime = Date.now();
-        let pollAttempt = 0;
-        let lastReminderAt = startTime;
-
-        while (true) {
-          // Check timeout (0 = no timeout)
-          if (cfg.escalationTimeoutMs > 0 && Date.now() - startTime > cfg.escalationTimeoutMs) {
-            return {
-              block: true,
-              blockReason:
-                `[intaris] ESCALATION TIMEOUT (${result.call_id}): ${reason}\n` +
-                `No response within ${cfg.escalationTimeoutMs / 1000}s. Approve or deny in the Intaris UI.`,
-            };
-          }
-
-          // Periodic reminder every 60s
-          const now = Date.now();
-          if (now - lastReminderAt >= 60000) {
-            const waitSec = Math.round((now - startTime) / 1000);
-            log(
-              "warn",
-              `Still waiting for escalation approval for ${event.toolName} (${result.call_id})... ${waitSec}s elapsed`,
-            );
-            lastReminderAt = now;
-          }
-
-          // Wait with exponential backoff (capped at 30s)
-          const delay = pollBackoffMs[Math.min(pollAttempt, pollBackoffMs.length - 1)];
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          pollAttempt++;
-
-          // Check if the escalation has been resolved
-          const { data: auditData } = await client.getAudit(result.call_id, ctx.agentId);
-          if (!auditData) continue; // Server unreachable -- keep polling
-
-          const auditRecord = auditData as unknown as {
-            user_decision?: string;
-            user_note?: string;
-          };
-
-          if (auditRecord.user_decision === "approve") {
-            log("info", `Escalation approved: ${event.toolName} (${result.call_id})`);
-            break; // Approved -- let the tool call proceed
-          }
-
-          if (auditRecord.user_decision === "deny") {
-            const denyNote = auditRecord.user_note ? ` -- ${auditRecord.user_note}` : "";
-            return {
-              block: true,
-              blockReason: `[intaris] DENIED by user (${result.call_id}): ${reason}${denyNote}`,
-            };
-          }
-
-          // No decision yet -- continue polling
-        }
+        return await waitForEscalation(result.call_id, reason);
       }
 
       // decision === "approve" (or escalation approved) -- tool call proceeds

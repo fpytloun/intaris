@@ -12,12 +12,12 @@
  * 3. tool.execute.before: Evaluates every tool call via POST /api/v1/evaluate
  *    - approve: tool executes normally
  *    - deny: throws error with reasoning (blocks execution)
- *    - escalate: throws error directing user to Intaris UI for approval
+ *    - escalate: polls only when /evaluate still returns unresolved escalation
  *    - Periodic checkpoints sent every N calls (configurable)
  * 4. session.updated: Updates Intaris intention when session title changes
- * 5. session.deleted / session.idle: Signals session completion to Intaris
- *    - PATCH /session/{id}/status to "completed"
- *    - POST /session/{id}/agent-summary with session statistics
+ * 5. session.deleted / session.idle: Updates session lifecycle in Intaris
+ *    - session.idle marks parent sessions idle and completes idle child sessions
+ *    - session.deleted completes the session and sends an agent summary
  *
  * Configuration via environment variables:
  *   INTARIS_URL                  - Intaris server URL (default: http://localhost:8060)
@@ -262,6 +262,97 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         },
       })
       .catch(() => {})
+  }
+
+  async function waitForEscalationResolution(
+    tool: string,
+    callId: string,
+    reason: string,
+  ): Promise<void> {
+    await client.app
+      .log({
+        body: {
+          service: "intaris",
+          level: "warn",
+          message: `ESCALATED ${tool} (${callId}): ${reason}. Waiting for approval in Intaris UI...`,
+        },
+      })
+      .catch(() => {})
+    showToast(
+      `Tool "${tool}" escalated — approve or deny in Intaris UI.\n${reason}`,
+      "warning",
+      10000,
+    )
+
+    const pollBackoffMs = [2000, 4000, 8000, 16000, 30000]
+    const startTime = Date.now()
+    let pollAttempt = 0
+    let lastReminderAt = startTime
+
+    while (true) {
+      if (escalationTimeoutMs > 0 && Date.now() - startTime > escalationTimeoutMs) {
+        throw new Error(
+          `[intaris] ESCALATION TIMEOUT (${callId}): ${reason}\n` +
+            `No response within ${rawEscalationTimeout}s. Approve or deny in the Intaris UI.`,
+        )
+      }
+
+      const now = Date.now()
+      if (now - lastReminderAt >= 60000) {
+        const waitSec = Math.round((now - startTime) / 1000)
+        await client.app
+          .log({
+            body: {
+              service: "intaris",
+              level: "warn",
+              message: `Still waiting for escalation approval for ${tool} (${callId})... ${waitSec}s elapsed`,
+            },
+          })
+          .catch(() => {})
+        showToast(
+          `Still waiting for approval of "${tool}"... (${waitSec}s)`,
+          "info",
+        )
+        lastReminderAt = now
+      }
+
+      const delay = pollBackoffMs[Math.min(pollAttempt, pollBackoffMs.length - 1)]
+      await new Promise((resolve) => setTimeout(resolve, delay))
+      pollAttempt++
+
+      const { data: auditRecord } = await callApi(
+        "GET",
+        `/api/v1/audit/${encodeURIComponent(callId)}`,
+        null,
+        5000,
+      )
+
+      if (!auditRecord) continue
+
+      if (auditRecord.user_decision === "approve") {
+        await client.app
+          .log({
+            body: {
+              service: "intaris",
+              level: "info",
+              message: `Escalation approved: ${tool} (${callId})`,
+            },
+          })
+          .catch(() => {})
+        showToast(`Tool "${tool}" approved — proceeding`, "success")
+        return
+      }
+
+      if (auditRecord.user_decision === "deny") {
+        const denyNote = auditRecord.user_note
+          ? ` — ${auditRecord.user_note}`
+          : ""
+        showToast(`Tool "${tool}" denied by user`, "error")
+        throw new Error(
+          `[intaris] DENIED by user (${callId}): ${reason}${denyNote}`,
+        )
+      }
+    }
   }
 
   // -- Helpers --------------------------------------------------------------
@@ -1132,11 +1223,11 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         },
       })
 
-      // Evaluate the tool call (30s timeout, retries with backoff).
+      // Evaluate the tool call with a single long timeout.
       // When intentionPending is true, the server waits for the
       // /reasoning call to arrive before evaluating (race condition fix).
       const intentionPending = state.intentionPending
-      const { data: result, error: evalError, status: evalStatus } = await callApiWithRetry(
+      const { data: result, error: evalError, status: evalStatus } = await callApi(
         "POST",
         "/api/v1/evaluate",
         {
@@ -1145,8 +1236,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
           args: _output.args || {},
           ...(intentionPending && { intention_pending: true }),
         },
-        30000, // 30s timeout for evaluation (large tool calls can be slow)
-        2,     // 2 retries (3 total attempts, worst case ~90s)
+        60000,
       )
 
       // Clear the flag after the first evaluate call — subsequent tool
@@ -1294,7 +1384,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
                 .catch(() => {})
               showToast("Session reactivated — re-evaluating...", "success")
 
-              const { data: reResult } = await callApiWithRetry(
+              const { data: reResult } = await callApi(
                 "POST",
                 "/api/v1/evaluate",
                 {
@@ -1302,8 +1392,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
                   tool,
                   args: _output.args || {},
                 },
-                30000,
-                2,
+                60000,
               )
 
               if (!reResult) {
@@ -1315,10 +1404,12 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
                 throw new Error(`[intaris] DENIED: ${reResult.reasoning || "Tool call denied after session reactivation"}`)
               }
               if (reResult.decision === "escalate") {
-                // Fall through to the escalation handling below would be
-                // complex; for simplicity, treat post-reactivation escalation
-                // as a deny. The user just reactivated — they can retry.
-                throw new Error(`[intaris] ESCALATED after reactivation: ${reResult.reasoning || "Requires human approval"}`)
+                await waitForEscalationResolution(
+                  tool,
+                  reResult.call_id,
+                  reResult.reasoning || "Tool call requires human approval",
+                )
+                return
               }
               // Approved — let tool proceed
               return
@@ -1353,99 +1444,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         const reason =
           result.reasoning ||
           "Tool call requires human approval"
-
-        // Log escalation and wait for user approval via polling
-        await client.app
-          .log({
-            body: {
-              service: "intaris",
-              level: "warn",
-              message: `ESCALATED ${tool} (${result.call_id}): ${reason}. Waiting for approval in Intaris UI...`,
-            },
-          })
-          .catch(() => {})
-        showToast(
-          `Tool "${tool}" escalated — approve or deny in Intaris UI.\n${reason}`,
-          "warning",
-          10000,
-        )
-
-        // Poll for user decision with exponential backoff
-        const pollBackoffMs = [2000, 4000, 8000, 16000, 30000]
-        const startTime = Date.now()
-        let pollAttempt = 0
-        let lastReminderAt = startTime
-
-        while (true) {
-          // Check timeout (0 = no timeout)
-          if (escalationTimeoutMs > 0 && Date.now() - startTime > escalationTimeoutMs) {
-            throw new Error(
-              `[intaris] ESCALATION TIMEOUT (${result.call_id}): ${reason}\n` +
-                `No response within ${rawEscalationTimeout}s. Approve or deny in the Intaris UI.`,
-            )
-          }
-
-          // Periodic reminder every 60s so operators know the agent is waiting
-          const now = Date.now()
-          if (now - lastReminderAt >= 60000) {
-            const waitSec = Math.round((now - startTime) / 1000)
-            await client.app
-              .log({
-                body: {
-                  service: "intaris",
-                  level: "warn",
-                  message: `Still waiting for escalation approval for ${tool} (${result.call_id})... ${waitSec}s elapsed`,
-                },
-              })
-              .catch(() => {})
-            showToast(
-              `Still waiting for approval of "${tool}"... (${waitSec}s)`,
-              "info",
-            )
-            lastReminderAt = now
-          }
-
-          // Wait with exponential backoff (capped at 30s)
-          const delay = pollBackoffMs[Math.min(pollAttempt, pollBackoffMs.length - 1)]
-          await new Promise((resolve) => setTimeout(resolve, delay))
-          pollAttempt++
-
-          // Check if the escalation has been resolved
-          const { data: auditRecord } = await callApi(
-            "GET",
-            `/api/v1/audit/${encodeURIComponent(result.call_id)}`,
-            null,
-            5000,
-          )
-
-          if (!auditRecord) continue // Server unreachable — keep polling
-
-          if (auditRecord.user_decision === "approve") {
-            await client.app
-              .log({
-                body: {
-                  service: "intaris",
-                  level: "info",
-                  message: `Escalation approved: ${tool} (${result.call_id})`,
-                },
-              })
-              .catch(() => {})
-            showToast(`Tool "${tool}" approved — proceeding`, "success")
-            break // Approved — let the tool call proceed
-          }
-
-          if (auditRecord.user_decision === "deny") {
-            const denyNote = auditRecord.user_note
-              ? ` — ${auditRecord.user_note}`
-              : ""
-            showToast(`Tool "${tool}" denied by user`, "error")
-            throw new Error(
-              `[intaris] DENIED by user (${result.call_id}): ${reason}${denyNote}`,
-            )
-          }
-
-          // No decision yet — continue polling
-        }
+        await waitForEscalationResolution(tool, result.call_id, reason)
       }
 
       // decision === "approve" (or escalation approved) — tool call proceeds normally

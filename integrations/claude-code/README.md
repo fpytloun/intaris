@@ -162,7 +162,7 @@ Configure upstream MCP servers in Intaris (via the UI, REST API, or `MCP_CONFIG_
 6. **`SubagentStop`** (when a sub-agent finishes): Signals child session completion and sends an agent summary with sub-agent statistics.
 7. **`Stop`** (when Claude finishes responding):
    - Stores the assistant's last response for intention context
-   - On genuine final stop: signals session completion, completes child sessions, uploads transcript, cleans up
+   - On genuine final stop: transitions the parent session to `idle`, completes child sessions, uploads transcript, cleans up
    - On intermediate stop (Claude continuing): stores assistant text only
 8. **`StopFailure`** (on API errors): Saves the assistant's last response to the state file so intention context is preserved even after errors.
 
@@ -174,11 +174,11 @@ Configure upstream MCP servers in Intaris (via the UI, REST API, or `MCP_CONFIG_
 
 ## Escalation Handling
 
-When a tool call is escalated, the `PreToolUse` hook polls for resolution:
+When a tool call is escalated, the `PreToolUse` hook polls for resolution only if `POST /api/v1/evaluate` still returns `decision=escalate`:
 
-1. The hook calls `POST /api/v1/evaluate` and receives `decision=escalate` with a `call_id`
-2. The hook enters a polling loop, checking `GET /api/v1/audit/{call_id}` with exponential backoff (2s, 4s, 8s, 16s, 30s cap)
-3. If the judge LLM auto-resolves (approve or deny), the hook returns immediately
+1. The hook calls `POST /api/v1/evaluate`, which may already return the final judge-mediated `approve` or `deny`
+2. If the returned decision is still `escalate`, the hook receives a `call_id` and enters the polling loop
+3. The hook checks `GET /api/v1/audit/{call_id}` with exponential backoff (2s, 4s, 8s, 16s, 30s cap)
 4. If a human approves/denies in the Intaris UI, the hook returns immediately
 5. If `INTARIS_ESCALATION_TIMEOUT` is reached, the hook denies with a message directing the user to the Intaris UI
 

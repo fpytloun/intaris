@@ -6,7 +6,7 @@
 # statistics and sends periodic checkpoints.
 #
 # Features:
-#   - Retry with exponential backoff on transient failures
+#   - Single-shot evaluation to avoid duplicate audit rows on timeouts
 #   - Escalation polling (waits for judge/human approval)
 #   - Session suspension polling (waits for reactivation)
 #   - Session termination handling
@@ -217,46 +217,29 @@ EVAL_BODY=$(jq -n \
         args: $args
     }')
 
-# Retry with exponential backoff: 3 attempts, 1s/2s/4s delays
-# Only retry on network errors (000) and 5xx. Do NOT retry 4xx.
-BACKOFF_DELAYS=(1 2 4)
-MAX_ATTEMPTS=3
 BODY=""
 HTTP_CODE="000"
 
-for attempt in $(seq 0 $((MAX_ATTEMPTS - 1))); do
-    RESPONSE=$(curl -s --max-time 8 \
+run_evaluate() {
+    local body="$1"
+    local response
+    response=$(curl -s --max-time 45 \
         -w "\n%{http_code}" \
         -X POST \
         "${HEADERS[@]}" \
-        -d "$EVAL_BODY" \
+        -d "$body" \
         "${INTARIS_URL}/api/v1/evaluate" 2>/dev/null || printf '\n000')
 
-    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-    BODY=$(echo "$RESPONSE" | sed '$d')
+    HTTP_CODE=$(echo "$response" | tail -1)
+    BODY=$(echo "$response" | sed '$d')
+}
 
-    # Success
-    if [ "$HTTP_CODE" = "200" ]; then
-        break
-    fi
-
-    # 4xx client error — do not retry
-    if [ "$HTTP_CODE" != "000" ] && [ "$HTTP_CODE" -ge 400 ] 2>/dev/null && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
-        break
-    fi
-
-    # 5xx or network error — retry with backoff (unless last attempt)
-    if [ $attempt -lt $((MAX_ATTEMPTS - 1)) ]; then
-        local_delay=${BACKOFF_DELAYS[$attempt]}
-        log "Evaluate failed (HTTP $HTTP_CODE, attempt $((attempt + 1))/$MAX_ATTEMPTS), retrying in ${local_delay}s"
-        sleep "$local_delay"
-    fi
-done
+run_evaluate "$EVAL_BODY"
 
 # -- Handle Connection Failures ----------------------------------------------
 
 if [ "$HTTP_CODE" = "000" ] || [ -z "$HTTP_CODE" ]; then
-    log "Intaris unreachable after $MAX_ATTEMPTS attempts"
+    log "Intaris unreachable during evaluate"
     if [ "$INTARIS_FAIL_OPEN" = "true" ]; then
         log "Allowing (fail-open)"
         allow_tool
@@ -397,6 +380,65 @@ check_timing_budget() {
     return 0
 }
 
+handle_reactivation_decision() {
+    local re_decision="$1"
+    local re_reasoning="$2"
+    local re_call_id="$3"
+    local re_session_status="$4"
+    local re_status_reason="$5"
+
+    if [ "$re_decision" = "approve" ]; then
+        allow_tool
+        exit 0
+    fi
+
+    if [ "$re_decision" = "escalate" ]; then
+        handle_escalation "$re_call_id" "$re_reasoning"
+    fi
+
+    if [ "$re_session_status" = "terminated" ]; then
+        deny_tool "[intaris] Session terminated: ${re_status_reason:-terminated by user}"
+        exit 0
+    fi
+
+    deny_tool "[intaris] DENIED after reactivation: ${re_reasoning:-Tool call denied}"
+    exit 0
+}
+
+reactivate_completed_session() {
+    log "Session completed — attempting reactivation for $TOOL_NAME"
+
+    curl -s --max-time 5 \
+        -X PATCH \
+        "${HEADERS[@]}" \
+        -d '{"status":"active"}' \
+        "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/status" >/dev/null 2>&1 || true
+
+    run_evaluate "$EVAL_BODY"
+
+    if [ "$HTTP_CODE" != "200" ]; then
+        if [ "$INTARIS_FAIL_OPEN" = "true" ] && { [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" -ge 500 ] 2>/dev/null; }; then
+            allow_tool
+        else
+            deny_tool "[intaris] Re-evaluation failed after session reactivation"
+        fi
+        exit 0
+    fi
+
+    local re_decision
+    re_decision=$(echo "$BODY" | jq -r '.decision // "deny"' 2>/dev/null || echo "deny")
+    local re_reasoning
+    re_reasoning=$(echo "$BODY" | jq -r '.reasoning // ""' 2>/dev/null || echo "")
+    local re_call_id
+    re_call_id=$(echo "$BODY" | jq -r '.call_id // ""' 2>/dev/null || echo "")
+    local re_session_status
+    re_session_status=$(echo "$BODY" | jq -r '.session_status // ""' 2>/dev/null || echo "")
+    local re_status_reason
+    re_status_reason=$(echo "$BODY" | jq -r '.status_reason // ""' 2>/dev/null || echo "")
+
+    handle_reactivation_decision "$re_decision" "$re_reasoning" "$re_call_id" "$re_session_status" "$re_status_reason"
+}
+
 # -- Handle Session Suspension -----------------------------------------------
 
 handle_suspension() {
@@ -433,21 +475,10 @@ handle_suspension() {
         if [ "$current_status" = "active" ]; then
             log "Session reactivated — re-evaluating $TOOL_NAME"
             # Re-evaluate the tool call
-            local re_resp
-            re_resp=$(curl -s --max-time 8 \
-                -w "\n%{http_code}" \
-                -X POST \
-                "${HEADERS[@]}" \
-                -d "$EVAL_BODY" \
-                "${INTARIS_URL}/api/v1/evaluate" 2>/dev/null || printf '\n000')
+            run_evaluate "$EVAL_BODY"
 
-            local re_code
-            re_code=$(echo "$re_resp" | tail -1)
-            local re_body
-            re_body=$(echo "$re_resp" | sed '$d')
-
-            if [ "$re_code" != "200" ]; then
-                if [ "$INTARIS_FAIL_OPEN" = "true" ]; then
+            if [ "$HTTP_CODE" != "200" ]; then
+                if [ "$INTARIS_FAIL_OPEN" = "true" ] && { [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" -ge 500 ] 2>/dev/null; }; then
                     allow_tool
                 else
                     deny_tool "[intaris] Re-evaluation failed after session reactivation"
@@ -456,19 +487,17 @@ handle_suspension() {
             fi
 
             local re_decision
-            re_decision=$(echo "$re_body" | jq -r '.decision // "deny"' 2>/dev/null || echo "deny")
+            re_decision=$(echo "$BODY" | jq -r '.decision // "deny"' 2>/dev/null || echo "deny")
             local re_reasoning
-            re_reasoning=$(echo "$re_body" | jq -r '.reasoning // ""' 2>/dev/null || echo "")
+            re_reasoning=$(echo "$BODY" | jq -r '.reasoning // ""' 2>/dev/null || echo "")
+            local re_call_id
+            re_call_id=$(echo "$BODY" | jq -r '.call_id // ""' 2>/dev/null || echo "")
+            local re_session_status
+            re_session_status=$(echo "$BODY" | jq -r '.session_status // ""' 2>/dev/null || echo "")
+            local re_status_reason
+            re_status_reason=$(echo "$BODY" | jq -r '.status_reason // ""' 2>/dev/null || echo "")
 
-            if [ "$re_decision" = "approve" ]; then
-                allow_tool
-                exit 0
-            fi
-            # Treat escalate-after-reactivation as deny to prevent infinite
-            # polling loops. The user just reactivated the session — they can
-            # retry the tool call, which will create a fresh escalation.
-            deny_tool "[intaris] DENIED after reactivation: ${re_reasoning:-Tool call denied}"
-            exit 0
+            handle_reactivation_decision "$re_decision" "$re_reasoning" "$re_call_id" "$re_session_status" "$re_status_reason"
         fi
 
         if [ "$current_status" = "terminated" ]; then
@@ -573,6 +602,10 @@ case "$DECISION" in
         allow_tool
         ;;
     deny)
+        if [ "$SESSION_STATUS" = "completed" ]; then
+            reactivate_completed_session
+        fi
+
         # Handle session-level suspension
         if [ "$SESSION_STATUS" = "suspended" ]; then
             handle_suspension "${STATUS_REASON:-Session suspended}"

@@ -76,7 +76,7 @@ The plugin registers 6 lifecycle hooks plus the tool wrapping:
 3. **Tool wrapper**: Core guardrail -- evaluates every tool call via `POST /api/v1/evaluate`:
    - **approve**: calls original handler, returns result
    - **deny**: returns error JSON to the LLM (blocks execution)
-   - **escalate**: enters polling loop with exponential backoff (2s, 4s, 8s, 16s, 30s cap), waiting for human approval in the Intaris UI
+   - **escalate**: enters polling only when `/evaluate` still returns unresolved escalation (2s, 4s, 8s, 16s, 30s cap)
    - **session suspended**: polls session status until reactivated or terminated
    - **session terminated**: immediate block
 4. **`pre_tool_call`**: Records tool call events when session recording is enabled.

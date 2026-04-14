@@ -137,12 +137,14 @@ See the [MCP Proxy Guide](../mcp-proxy.md) for full details.
    - Calls `POST /api/v1/evaluate` with the tool name and arguments
    - **approve**: tool executes normally
    - **deny**: throws an error with reasoning (blocks execution)
-   - **escalate**: enters polling loop with exponential backoff, waiting for human approval
+   - **escalate**: enters polling only when `/evaluate` still returns unresolved escalation
    - Tracks per-decision statistics (approve/deny/escalate counts)
    - Sends periodic checkpoints via `POST /api/v1/checkpoint`
 3. **`session.deleted`**: Signals session completion:
    - `PATCH /api/v1/session/{id}/status` to `"completed"`
    - `POST /api/v1/session/{id}/agent-summary` with session statistics
+
+During normal inactivity, parent sessions transition to `idle`. Child sessions complete when they become idle.
 
 ### MCP Proxy Flow
 

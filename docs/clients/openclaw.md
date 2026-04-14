@@ -69,7 +69,7 @@ The plugin registers 10 hooks plus an optional tool factory via OpenClaw's `api.
 3. **`before_tool_call`**: Core guardrail -- evaluates every tool call via `POST /api/v1/evaluate`:
    - **approve**: tool executes normally
    - **deny**: blocks execution with `{ block: true, blockReason: "[intaris] DENIED: ..." }`
-   - **escalate**: enters polling loop with exponential backoff (2s, 4s, 8s, 16s, 30s cap), waiting for human approval in the Intaris UI
+   - **escalate**: enters polling only when `/evaluate` still returns unresolved escalation (2s, 4s, 8s, 16s, 30s cap)
    - **session suspended**: polls session status until reactivated or terminated
    - **session terminated**: immediate block
 4. **`after_tool_call`**: Records tool results when session recording is enabled.
