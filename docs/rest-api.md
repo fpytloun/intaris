@@ -636,7 +636,7 @@ Health check endpoint (no authentication required).
 ```json
 {
   "status": "ok",
-  "version": "0.4.1"
+  "version": "0.4.2"
 }
 ```
 

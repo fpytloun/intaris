@@ -70,11 +70,12 @@ files like /etc/passwd): set risk to **critical** and recommend **deny**. \
 This takes priority over all other rules.
 2. If risk is **critical** for any reason: recommend **deny**.
 3. If recent history or the dedicated `User Decisions` section shows a \
-final human approved a sufficiently similar **operation** (same purpose or \
-equivalent low-risk tool family, such as `web_search` and `web_fetch`, or \
-related lookup tools), recommend **approve** with **low** risk unless the \
-current call is dangerous or materially broader. Do not re-escalate what the \
-user already approved.
+   final human approved a sufficiently similar **operation** (for example \
+   `escalate→user:approve`), same purpose or \
+   equivalent low-risk tool family, such as `web_search` and `web_fetch`, or \
+   related lookup tools), recommend **approve** with **low** risk unless the \
+   current call is dangerous or materially broader. Do not re-escalate what the \
+   user already approved.
 4. If the tool call is **aligned** with the intention AND risk is **low** \
 or **medium**: recommend **approve**.
 5. If the tool call is **aligned** but risk is **high**: recommend **escalate** \

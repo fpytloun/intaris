@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-04-14
+
+### Added
+
+- **Claude Code hooks resilience** -- Improve hook execution resilience and add safer default path handling in the Claude Code integration.
+
+### Fixed
+
+- **Judge workflow** -- Persist explicit judge outcomes, refine advisory resolution behavior, and block evaluate responses until judge review reaches a final outcome.
+- **LLM provider errors** -- Normalize transient upstream provider failures so retryable model errors are handled more consistently.
+- **Prompt guidance** -- Keep authoritative human-approval precedent explicit in the evaluator decision rules.
+- **Integration lifecycle** -- Align evaluate lifecycle handling across integrations for more consistent guardrail behavior.
+
+### Changed
+
+- **Claude Code scripts** -- Rename integration scripts and preserve executable bits in the packaged hook assets.
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.4.2`.
+
 ## [0.4.1] - 2026-04-11
 
 ### Added
@@ -139,6 +157,7 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.4.2]: https://github.com/fpytloun/intaris/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/fpytloun/intaris/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/fpytloun/intaris/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/fpytloun/intaris/compare/v0.3.1...v0.3.2
