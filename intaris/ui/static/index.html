@@ -1478,6 +1478,7 @@
               <div class="stat-card">
                 <div class="stat-label">Task Queue</div>
                 <div class="stat-value">
+                  <div class="text-xs text-muted mb-1" x-text="taskScopeLabel()"></div>
                   <template x-if="taskStatus.summaryPending + taskStatus.summaryRunning + taskStatus.analysisPending + taskStatus.analysisRunning > 0">
                     <div class="flex items-center gap-2">
                       <svg class="animate-spin h-4 w-4 text-brand flex-shrink-0" viewBox="0 0 24 24" fill="none">
@@ -1498,7 +1499,7 @@
                 </div>
               </div>
               <div class="stat-card">
-                <div class="stat-label">Last Updated</div>
+                <div class="stat-label" x-text="lastUpdatedLabel()"></div>
                 <div class="stat-value text-sm" x-text="profile.updated_at ? new Date(profile.updated_at).toLocaleString() : 'Never'"></div>
               </div>
             </div>

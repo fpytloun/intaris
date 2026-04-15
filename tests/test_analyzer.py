@@ -71,6 +71,7 @@ def _create_session(
     user_id=TEST_USER,
     intention="Implement authentication module",
     parent_session_id=None,
+    agent_id="test-agent",
 ):
     try:
         session_store.create(
@@ -80,7 +81,7 @@ def _create_session(
             details=None,
             policy=None,
             parent_session_id=parent_session_id,
-            agent_id="test-agent",
+            agent_id=agent_id,
         )
     except ValueError:
         pass
@@ -297,7 +298,7 @@ class TestRunAnalysis:
 
         task = {
             "user_id": TEST_USER,
-            "payload": {"triggered_by": "manual", "agent_id": "", "lookback_days": 30},
+            "payload": {"triggered_by": "manual", "lookback_days": 30},
         }
         result = run_analysis(db, llm, task)
         assert "analysis_id" in result
@@ -312,7 +313,7 @@ class TestRunAnalysis:
 
         task = {
             "user_id": TEST_USER,
-            "payload": {"triggered_by": "manual", "agent_id": "", "lookback_days": 30},
+            "payload": {"triggered_by": "manual", "lookback_days": 30},
         }
         run_analysis(db, llm, task)
         with db.cursor() as cur:
@@ -360,6 +361,29 @@ class TestRunAnalysis:
 
         task = {"user_id": TEST_USER, "payload": {"lookback_days": 30}}
         result = run_analysis(db, llm, task)
+        assert result["sessions_analyzed"] == 2
+
+    def test_filters_blank_agent_scope_only(self, db, session_store, audit_store):
+        _create_session(session_store, "sess-blank-1", agent_id="")
+        _insert_tool_calls(audit_store, "sess-blank-1", count=5)
+        _insert_summary(db, "sess-blank-1")
+        _create_session(session_store, "sess-blank-2", agent_id="")
+        _insert_tool_calls(audit_store, "sess-blank-2", count=5)
+        _insert_summary(db, "sess-blank-2")
+        _create_session(session_store, "sess-named", agent_id="named-agent")
+        _insert_tool_calls(audit_store, "sess-named", count=5)
+        _insert_summary(db, "sess-named")
+        llm = MagicMock()
+        llm.generate.return_value = _ANALYSIS_RESPONSE
+        from intaris.analyzer import run_analysis
+
+        task = {
+            "user_id": TEST_USER,
+            "agent_id": "",
+            "payload": {"triggered_by": "manual", "lookback_days": 30},
+        }
+        result = run_analysis(db, llm, task)
+
         assert result["sessions_analyzed"] == 2
 
     def test_agent_scoped_filtering(self, db, session_store, audit_store):
@@ -520,7 +544,7 @@ class TestGetSessionSummariesForAnalysis:
         _create_session(session_store, "sess-without")
         from intaris.analyzer import _get_session_summaries_for_analysis
 
-        result = _get_session_summaries_for_analysis(db, TEST_USER, "", 30)
+        result = _get_session_summaries_for_analysis(db, TEST_USER, None, 30)
         assert "sess-with" in result
         assert "sess-without" not in result
 
@@ -531,7 +555,7 @@ class TestGetSessionSummariesForAnalysis:
         _insert_summary(db, "sess-child-x")
         from intaris.analyzer import _get_session_summaries_for_analysis
 
-        result = _get_session_summaries_for_analysis(db, TEST_USER, "", 30)
+        result = _get_session_summaries_for_analysis(db, TEST_USER, None, 30)
         assert "sess-root" in result
         assert "sess-child-x" not in result
 
@@ -541,7 +565,7 @@ class TestGetSessionSummariesForAnalysis:
         _insert_summary(db, "sess-pref", summary_type="compacted")
         from intaris.analyzer import _get_session_summaries_for_analysis
 
-        result = _get_session_summaries_for_analysis(db, TEST_USER, "", 30)
+        result = _get_session_summaries_for_analysis(db, TEST_USER, None, 30)
         assert len(result["sess-pref"]["summaries"]) == 1
         assert result["sess-pref"]["summaries"][0]["summary_type"] == "compacted"
 
@@ -557,7 +581,7 @@ class TestGetSessionSummariesForAnalysis:
         _insert_summary(db, "sess-recent")
         from intaris.analyzer import _get_session_summaries_for_analysis
 
-        result = _get_session_summaries_for_analysis(db, TEST_USER, "", 30)
+        result = _get_session_summaries_for_analysis(db, TEST_USER, None, 30)
         assert "sess-recent" in result
         assert "sess-old" not in result
 
@@ -1225,17 +1249,58 @@ class TestHierarchicalSummary:
         _insert_tool_calls(audit_store, "sess-parent", count=5)
         _create_session(session_store, "sess-child", parent_session_id="sess-parent")
         _insert_tool_calls(audit_store, "sess-child", count=5)
-        # Set total_calls on child so the needs_children check sees enough data
-        with db.cursor() as cur:
-            cur.execute(
-                "UPDATE sessions SET total_calls = 5 "
-                "WHERE session_id = 'sess-child' AND user_id = ?",
-                (TEST_USER,),
-            )
+        session_store.update_activity("sess-child", user_id=TEST_USER)
         from intaris.analyzer import generate_summary
 
         result = generate_summary(db, mock_llm, _make_task("sess-parent"))
         assert result.get("needs_children") is True
+
+    def test_needs_children_signal_for_reasoning_only_child(
+        self, db, session_store, audit_store, mock_llm
+    ):
+        _create_session(session_store, "sess-parent-reason")
+        _insert_tool_calls(audit_store, "sess-parent-reason", count=5)
+        _create_session(
+            session_store,
+            "sess-child-reason",
+            parent_session_id="sess-parent-reason",
+        )
+        audit_store.insert(
+            call_id=str(uuid.uuid4()),
+            user_id=TEST_USER,
+            session_id="sess-child-reason",
+            agent_id="test-agent",
+            tool=None,
+            args_redacted=None,
+            classification=None,
+            evaluation_path="reasoning",
+            decision="approve",
+            risk=None,
+            reasoning=None,
+            latency_ms=0,
+            record_type="reasoning",
+            content="Child agent reasoning only",
+        )
+        session_store.update_activity("sess-child-reason", user_id=TEST_USER)
+        from intaris.analyzer import generate_summary
+
+        result = generate_summary(db, mock_llm, _make_task("sess-parent-reason"))
+        assert result.get("needs_children") is True
+
+    def test_empty_child_does_not_trigger_recheck(
+        self, db, session_store, audit_store, mock_llm
+    ):
+        _create_session(session_store, "sess-parent-empty")
+        _insert_tool_calls(audit_store, "sess-parent-empty", count=5)
+        _create_session(
+            session_store,
+            "sess-child-empty",
+            parent_session_id="sess-parent-empty",
+        )
+        from intaris.analyzer import generate_summary
+
+        result = generate_summary(db, mock_llm, _make_task("sess-parent-empty"))
+        assert result.get("needs_children") is not True
 
     def test_proceeds_after_max_recheck(self, db, session_store, audit_store, mock_llm):
         _create_session(session_store, "sess-pm")

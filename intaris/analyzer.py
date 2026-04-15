@@ -389,7 +389,15 @@ def generate_summary(
         children_needing_summaries = [
             c
             for c in children
-            if c.get("summary_count", 0) == 0 and (c.get("total_calls", 0) or 0) > 0
+            if c.get("summary_count", 0) == 0
+            and c.get("last_activity_at")
+            and c.get("created_at")
+            and c.get("last_activity_at") > c.get("created_at")
+            and (
+                not c.get("last_summary_attempt_at")
+                or not c.get("last_activity_at")
+                or c.get("last_summary_attempt_at") < c.get("last_activity_at")
+            )
         ]
 
         if children_needing_summaries and parent_check_count < _MAX_PARENT_RECHECK:
@@ -901,7 +909,12 @@ def run_analysis(
     user_id = task.get("user_id", "")
     payload = task.get("payload") or {}
     triggered_by = payload.get("triggered_by", "manual")
-    agent_id = payload.get("agent_id", "")
+    if "agent_id" in task:
+        agent_id = task.get("agent_id")
+    elif "agent_id" in payload:
+        agent_id = payload.get("agent_id")
+    else:
+        agent_id = None
     lookback_days = payload.get("lookback_days", 30)
 
     if not user_id:
@@ -1280,7 +1293,7 @@ def _get_child_sessions(
             SELECT session_id, intention, status, total_calls,
                    approved_count, denied_count, escalated_count,
                    created_at, last_activity_at, agent_id,
-                   intention_source, summary_count
+                   intention_source, summary_count, last_summary_attempt_at
             FROM sessions
             WHERE user_id = ? AND parent_session_id = ?
             ORDER BY last_activity_at DESC
@@ -2761,7 +2774,7 @@ def _build_compaction_prompt(
 def _get_session_summaries_for_analysis(
     db: Database,
     user_id: str,
-    agent_id: str,
+    agent_id: str | None,
     lookback_days: int,
 ) -> dict[str, dict[str, Any]]:
     """Fetch session summaries grouped by session for L3 analysis.
@@ -2777,7 +2790,7 @@ def _get_session_summaries_for_analysis(
 
     # Get root sessions only (parent_session_id IS NULL)
     with db.cursor() as cur:
-        if agent_id:
+        if agent_id is not None:
             cur.execute(
                 """
                 SELECT s.session_id, s.intention, s.status, s.total_calls,
@@ -2785,7 +2798,7 @@ def _get_session_summaries_for_analysis(
                        s.created_at, s.last_activity_at, s.agent_id,
                        s.intention_source
                 FROM sessions s
-                WHERE s.user_id = ? AND s.agent_id = ?
+                WHERE s.user_id = ? AND COALESCE(s.agent_id, '') = ?
                   AND s.parent_session_id IS NULL
                   AND s.last_activity_at >= ?
                 ORDER BY s.last_activity_at DESC
@@ -2877,7 +2890,7 @@ def _get_session_summaries_for_analysis(
 def _build_analysis_prompt(
     *,
     user_id: str,
-    agent_id: str,
+    agent_id: str | None,
     lookback_days: int,
     summaries_by_session: dict[str, dict[str, Any]],
 ) -> str:
@@ -3063,7 +3076,7 @@ def _update_profile(
     db: Database,
     *,
     user_id: str,
-    agent_id: str,
+    agent_id: str | None,
     risk_level: int,
     context_summary: str,
     findings: list[dict[str, Any]],

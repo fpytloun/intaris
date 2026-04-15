@@ -15,6 +15,7 @@ SQLite uses WAL mode with thread-local connections. PostgreSQL uses
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -315,6 +316,10 @@ class Database:
             )
             logger.info("Migration: added summary_count column to sessions")
 
+        if not self._sqlite_column_exists(conn, "sessions", "last_summary_attempt_at"):
+            conn.execute("ALTER TABLE sessions ADD COLUMN last_summary_attempt_at TEXT")
+            logger.info("Migration: added last_summary_attempt_at column to sessions")
+
         if not self._sqlite_column_exists(conn, "audit_log", "profile_version"):
             conn.execute("ALTER TABLE audit_log ADD COLUMN profile_version INTEGER")
             logger.info("Migration: added profile_version column to audit_log")
@@ -433,12 +438,24 @@ class Database:
             conn.execute("ALTER TABLE analysis_tasks ADD COLUMN heartbeat_at TEXT")
             logger.info("Migration: added heartbeat_at column to analysis_tasks")
 
+        if not self._sqlite_column_exists(conn, "analysis_tasks", "agent_id"):
+            conn.execute(
+                "ALTER TABLE analysis_tasks ADD COLUMN agent_id TEXT DEFAULT ''"
+            )
+            logger.info("Migration: added agent_id column to analysis_tasks")
+
+        self._backfill_analysis_task_agent_ids_sqlite(conn)
+
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_idle "
             "ON sessions(status, last_activity_at)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(user_id, agent_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_scope "
+            "ON analysis_tasks(user_id, task_type, agent_id, status, next_attempt_at)"
         )
 
     @staticmethod
@@ -593,6 +610,40 @@ class Database:
         )
 
     @staticmethod
+    def _backfill_analysis_task_agent_ids_sqlite(conn: sqlite3.Connection) -> None:
+        """Populate analysis_tasks.agent_id for legacy rows."""
+        conn.execute(
+            """
+            UPDATE analysis_tasks
+            SET agent_id = COALESCE((
+                SELECT s.agent_id FROM sessions s
+                WHERE s.user_id = analysis_tasks.user_id
+                  AND s.session_id = analysis_tasks.session_id
+            ), '')
+            WHERE session_id IS NOT NULL
+              AND (agent_id IS NULL OR agent_id = '')
+            """
+        )
+
+        cursor = conn.execute(
+            "SELECT id, payload FROM analysis_tasks "
+            "WHERE session_id IS NULL AND (agent_id IS NULL OR agent_id = '')"
+        )
+        rows = cursor.fetchall()
+        for task_id, payload_json in rows:
+            if not payload_json:
+                continue
+            try:
+                payload = json.loads(payload_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            agent_id = str(payload.get("agent_id") or "")
+            conn.execute(
+                "UPDATE analysis_tasks SET agent_id = ? WHERE id = ?",
+                (agent_id, task_id),
+            )
+
+    @staticmethod
     def _migrate_analysis_tasks_check_sqlite(conn: sqlite3.Connection) -> None:
         """Recreate analysis_tasks table if CHECK constraint is outdated (SQLite)."""
         cursor = conn.execute(
@@ -616,6 +667,7 @@ class Database:
                     CHECK (task_type IN ('summary', 'analysis', 'intention_update')),
                 user_id         TEXT NOT NULL,
                 session_id      TEXT,
+                agent_id        TEXT DEFAULT '',
                 status          TEXT NOT NULL DEFAULT 'pending'
                     CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
                 priority        INTEGER NOT NULL DEFAULT 0,
@@ -633,10 +685,10 @@ class Database:
         )
         conn.execute(
             "INSERT INTO analysis_tasks_new "
-            "(id, task_type, user_id, session_id, status, priority, payload, result, "
+            "(id, task_type, user_id, session_id, agent_id, status, priority, payload, result, "
             "retry_count, max_retries, next_attempt_at, created_at, started_at, "
             "heartbeat_at, completed_at) "
-            "SELECT id, task_type, user_id, session_id, status, priority, payload, "
+            "SELECT id, task_type, user_id, session_id, '', status, priority, payload, "
             "result, retry_count, max_retries, next_attempt_at, created_at, NULL, "
             "NULL, completed_at FROM analysis_tasks"
         )
@@ -649,6 +701,10 @@ class Database:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_user "
             "ON analysis_tasks(user_id, task_type, status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_scope "
+            "ON analysis_tasks(user_id, task_type, agent_id, status, next_attempt_at)"
         )
 
     @staticmethod
@@ -768,6 +824,7 @@ class Database:
                 ("sessions", "last_activity_at", "TIMESTAMPTZ"),
                 ("sessions", "parent_session_id", "TEXT"),
                 ("sessions", "summary_count", "INTEGER DEFAULT 0"),
+                ("sessions", "last_summary_attempt_at", "TIMESTAMPTZ"),
                 ("audit_log", "profile_version", "INTEGER"),
                 ("audit_log", "intention", "TEXT"),
                 ("sessions", "intention_source", "TEXT DEFAULT 'initial'"),
@@ -787,6 +844,7 @@ class Database:
                 ("sessions", "title", "TEXT"),
                 ("analysis_tasks", "started_at", "TIMESTAMPTZ"),
                 ("analysis_tasks", "heartbeat_at", "TIMESTAMPTZ"),
+                ("analysis_tasks", "agent_id", "TEXT DEFAULT ''"),
             ]
             for table, column, col_type in migrations:
                 cur.execute(
@@ -836,6 +894,31 @@ class Database:
             cur.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sessions_parent "
                 "ON sessions(user_id, parent_session_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tasks_scope "
+                "ON analysis_tasks(user_id, task_type, agent_id, status, next_attempt_at)"
+            )
+
+            # Backfill analysis_tasks.agent_id for existing rows.
+            cur.execute(
+                """
+                UPDATE analysis_tasks t
+                SET agent_id = COALESCE(s.agent_id, '')
+                FROM sessions s
+                WHERE t.user_id = s.user_id
+                  AND t.session_id = s.session_id
+                  AND (t.agent_id IS NULL OR t.agent_id = '')
+                """
+            )
+            cur.execute(
+                """
+                UPDATE analysis_tasks
+                SET agent_id = COALESCE(payload::json ->> 'agent_id', '')
+                WHERE session_id IS NULL
+                  AND payload IS NOT NULL
+                  AND (agent_id IS NULL OR agent_id = '')
+                """
             )
 
             # Migration: update session_summaries trigger CHECK constraint
@@ -988,6 +1071,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     denied_count INTEGER DEFAULT 0,
     escalated_count INTEGER DEFAULT 0,
     status TEXT DEFAULT 'active',
+    last_summary_attempt_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (user_id, session_id)
@@ -1174,6 +1258,7 @@ CREATE TABLE IF NOT EXISTS analysis_tasks (
         CHECK (task_type IN ('summary', 'analysis', 'intention_update')),
     user_id         TEXT NOT NULL,
     session_id      TEXT,
+    agent_id        TEXT DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
     priority        INTEGER NOT NULL DEFAULT 0,
@@ -1192,6 +1277,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_pending
     ON analysis_tasks(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_user
     ON analysis_tasks(user_id, task_type, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_scope
+    ON analysis_tasks(user_id, task_type, agent_id, status, next_attempt_at);
 
 -- Per-user notification channels for escalation alerts
 CREATE TABLE IF NOT EXISTS notification_channels (
@@ -1252,6 +1339,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_activity_at TIMESTAMPTZ,
     parent_session_id TEXT,
     summary_count INTEGER DEFAULT 0,
+    last_summary_attempt_at TIMESTAMPTZ,
     intention_source TEXT DEFAULT 'initial',
     status_reason TEXT,
     agent_id TEXT,
@@ -1435,6 +1523,7 @@ CREATE TABLE IF NOT EXISTS analysis_tasks (
         CHECK (task_type IN ('summary', 'analysis', 'intention_update')),
     user_id         TEXT NOT NULL,
     session_id      TEXT,
+    agent_id        TEXT DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
     priority        INTEGER NOT NULL DEFAULT 0,
@@ -1453,6 +1542,8 @@ CREATE INDEX IF NOT EXISTS idx_tasks_pending
     ON analysis_tasks(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_user
     ON analysis_tasks(user_id, task_type, status);
+CREATE INDEX IF NOT EXISTS idx_tasks_scope
+    ON analysis_tasks(user_id, task_type, agent_id, status, next_attempt_at);
 
 CREATE TABLE IF NOT EXISTS notification_channels (
     user_id          TEXT NOT NULL,

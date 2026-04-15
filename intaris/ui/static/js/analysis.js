@@ -249,7 +249,7 @@ function analysisTab() {
     backfillForce: false,
     backfillResult: null,
 
-    // Task queue status (always-visible card)
+    // Task queue status (scoped by selected agent, defaults to all agents)
     taskStatus: { summaryPending: 0, summaryRunning: 0, analysisPending: 0, analysisRunning: 0 },
 
     // Backfill progress tracking
@@ -322,6 +322,14 @@ function analysisTab() {
       return f || undefined;
     },
 
+    taskScopeLabel() {
+      return this._agentFilter() ? 'Selected Agent' : 'All Agents';
+    },
+
+    lastUpdatedLabel() {
+      return this._agentFilter() ? 'L3 Last Updated' : 'Latest L3 Update';
+    },
+
     _cancelAllPolls() {
       if (this._cancelBackfillPoll) { this._cancelBackfillPoll(); this._cancelBackfillPoll = null; }
       if (this._cancelAnalysisPoll) { this._cancelAnalysisPoll(); this._cancelAnalysisPoll = null; }
@@ -331,9 +339,10 @@ function analysisTab() {
 
     async loadTaskStatus() {
       try {
+        const agent = this._agentFilter();
         const [summaryStatus, analysisStatus] = await Promise.all([
-          IntarisAPI.getTaskStatus({ task_type: 'summary' }),
-          IntarisAPI.getTaskStatus({ task_type: 'analysis' }),
+          IntarisAPI.getTaskStatus({ task_type: 'summary', agent_id: agent }),
+          IntarisAPI.getTaskStatus({ task_type: 'analysis', agent_id: agent }),
         ]);
         this.taskStatus = {
           summaryPending: summaryStatus.pending || 0,
@@ -385,27 +394,33 @@ function analysisTab() {
         const agent = this._agentFilter();
         if (agent) params.agent_id = agent;
         const since = new Date().toISOString();
-        await IntarisAPI.triggerAnalysis(params);
+        const result = await IntarisAPI.triggerAnalysis(params);
+        const enqueued = Math.max(0, result?.enqueued || 0);
         Alpine.store('notify')?.success('Analysis triggered');
         this.triggeringAnalysis = false;
         this.loadTaskStatus();
-        this.analysisTracking = true;
-        this.analysisProgress = { pending: 1, running: 0, completed: 0, failed: 0, cancelled: 0, processed: 0, pct: 0 };
-        this._cancelAnalysisPoll = pollTaskProgress({
-          taskType: 'analysis',
-          since,
-          total: 1,
-          interval: 3000,
-          maxDuration: 120000,
-          onUpdate: (s) => { this.analysisProgress = s; },
-          onDone: (s) => {
-            this.analysisProgress = s;
-            this.analysisTracking = false;
-            this._cancelAnalysisPoll = null;
-            this.loadTaskStatus();
-            this.loadData();
-          },
-        });
+        if (enqueued > 0) {
+          this.analysisTracking = true;
+          this.analysisProgress = { pending: enqueued, running: 0, completed: 0, failed: 0, cancelled: 0, processed: 0, pct: 0 };
+          this._cancelAnalysisPoll = pollTaskProgress({
+            taskType: 'analysis',
+            agentId: agent,
+            since,
+            total: enqueued,
+            interval: 3000,
+            maxDuration: 120000,
+            onUpdate: (s) => { this.analysisProgress = s; },
+            onDone: (s) => {
+              this.analysisProgress = s;
+              this.analysisTracking = false;
+              this._cancelAnalysisPoll = null;
+              this.loadTaskStatus();
+              this.loadData();
+            },
+          });
+        } else {
+          this.loadData();
+        }
       } catch (e) {
         Alpine.store('notify')?.error(e.message || 'Failed to trigger analysis');
         this.triggeringAnalysis = false;
@@ -437,6 +452,7 @@ function analysisTab() {
           this.backfillProgress = { pending: result.enqueued, running: 0, completed: 0, failed: 0, cancelled: 0, processed: 0, pct: 0 };
           this._cancelBackfillPoll = pollTaskProgress({
             taskType: 'summary',
+            agentId: agent,
             since,
             total: result.enqueued,
             interval: 3000,

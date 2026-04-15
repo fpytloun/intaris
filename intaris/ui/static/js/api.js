@@ -325,7 +325,7 @@ const IntarisAPI = {
 
   /**
    * Get task queue status counts.
-   * @param {Object} params - { task_type, session_id, since }
+   * @param {Object} params - { task_type, session_id, agent_id, since }
    */
   getTaskStatus(params = {}) {
     return this.get('/tasks/status', params);

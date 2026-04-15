@@ -132,6 +132,7 @@ class TaskQueue:
         task_type: str,
         user_id: str,
         session_id: str | None = None,
+        agent_id: str | None = None,
         payload: dict[str, Any] | None = None,
         priority: int = 0,
     ) -> str:
@@ -141,6 +142,8 @@ class TaskQueue:
             task_type: "summary" or "analysis".
             user_id: Tenant identifier.
             session_id: Session ID (for summary tasks).
+            agent_id: Agent scope for the task. Derived from the session
+                when omitted for session-scoped tasks.
             payload: Task-specific parameters.
             priority: Higher priority tasks are claimed first.
 
@@ -149,21 +152,29 @@ class TaskQueue:
         """
         task_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
+        task_agent_id = self._resolve_task_agent_id(
+            task_type=task_type,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            payload=payload,
+        )
 
         with self._db.cursor() as cur:
             cur.execute(
                 """
                 INSERT INTO analysis_tasks
-                    (id, task_type, user_id, session_id, status, priority,
-                     payload, retry_count, max_retries, next_attempt_at,
-                     created_at)
-                VALUES (?, ?, ?, ?, 'pending', ?, ?, 0, 3, ?, ?)
+                    (id, task_type, user_id, session_id, agent_id, status,
+                     priority, payload, retry_count, max_retries,
+                     next_attempt_at, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, 0, 3, ?, ?)
                 """,
                 (
                     task_id,
                     task_type,
                     user_id,
                     session_id,
+                    task_agent_id,
                     priority,
                     json.dumps(payload) if payload else None,
                     now,
@@ -172,13 +183,52 @@ class TaskQueue:
             )
 
         logger.debug(
-            "Enqueued %s task %s for user=%s session=%s",
+            "Enqueued %s task %s for user=%s session=%s agent=%s",
             task_type,
             task_id,
             user_id,
             session_id,
+            task_agent_id,
         )
         return task_id
+
+    def _resolve_task_agent_id(
+        self,
+        *,
+        task_type: str,
+        user_id: str,
+        session_id: str | None,
+        agent_id: str | None,
+        payload: dict[str, Any] | None,
+    ) -> str:
+        """Resolve the agent scope stored on a task row."""
+        if agent_id is not None:
+            return agent_id
+
+        if payload and payload.get("agent_id") is not None:
+            return str(payload.get("agent_id") or "")
+
+        if not session_id:
+            return ""
+
+        with self._db.cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(agent_id, '') FROM sessions "
+                "WHERE user_id = ? AND session_id = ?",
+                (user_id, session_id),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            logger.debug(
+                "Task agent scope fallback: session not found for %s task "
+                "(user=%s session=%s)",
+                task_type,
+                user_id,
+                session_id,
+            )
+            return ""
+        return row[0] if not isinstance(row, dict) else row.get("agent_id", "")
 
     def claim_next(self) -> dict[str, Any] | None:
         """Atomically claim the next pending task.
@@ -200,15 +250,29 @@ class TaskQueue:
                     heartbeat_at = ?,
                     completed_at = NULL
                 WHERE id = (
-                    SELECT id FROM analysis_tasks
+                    SELECT id FROM analysis_tasks AS t
                     WHERE status = 'pending'
                       AND next_attempt_at <= ?
+                      AND NOT (
+                            task_type = 'analysis'
+                            AND EXISTS (
+                                SELECT 1 FROM analysis_tasks AS s_block
+                                WHERE s_block.status IN ('pending', 'running')
+                                  AND s_block.task_type = 'summary'
+                                  AND (
+                                        s_block.status = 'running'
+                                        OR s_block.next_attempt_at <= ?
+                                  )
+                                  AND s_block.user_id = t.user_id
+                                  AND COALESCE(s_block.agent_id, '') = COALESCE(t.agent_id, '')
+                            )
+                      )
                     ORDER BY priority DESC, next_attempt_at ASC
                     LIMIT 1
                 )
                 RETURNING *
                 """,
-                (now, now, now),
+                (now, now, now, now),
             )
             row = cur.fetchone()
 
@@ -424,6 +488,7 @@ class TaskQueue:
         task_type: str,
         user_id: str,
         session_id: str | None = None,
+        agent_id: str | None = None,
     ) -> bool:
         """Check if a pending/running task already exists for this scope.
 
@@ -438,6 +503,17 @@ class TaskQueue:
                       AND status IN ('pending', 'running')
                     """,
                     (task_type, user_id, session_id),
+                )
+            elif agent_id is not None:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM analysis_tasks
+                    WHERE task_type = ? AND user_id = ?
+                      AND session_id IS NULL
+                      AND COALESCE(agent_id, '') = ?
+                      AND status IN ('pending', 'running')
+                    """,
+                    (task_type, user_id, agent_id),
                 )
             else:
                 cur.execute(
@@ -456,6 +532,7 @@ class TaskQueue:
         task_type: str,
         user_id: str,
         session_id: str | None = None,
+        agent_id: str | None = None,
         cooldown_seconds: int = 60,
     ) -> bool:
         """Check if a task of this type completed recently (cooldown).
@@ -476,6 +553,17 @@ class TaskQueue:
                       AND status = 'completed' AND completed_at >= ?
                     """,
                     (task_type, user_id, session_id, cutoff),
+                )
+            elif agent_id is not None:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) FROM analysis_tasks
+                    WHERE task_type = ? AND user_id = ?
+                      AND session_id IS NULL
+                      AND COALESCE(agent_id, '') = ?
+                      AND status = 'completed' AND completed_at >= ?
+                    """,
+                    (task_type, user_id, agent_id, cutoff),
                 )
             else:
                 cur.execute(
@@ -815,24 +903,25 @@ class BackgroundWorker:
                     result = await self._execute_summary_task(task)
                     if result.get("status") != "waiting_for_children":
                         self.metrics.summaries_generated_total += 1
-                    # Mark session as "summary attempted" even for skips.
-                    # This prevents parent sessions from endlessly
-                    # re-enqueuing child tasks that will always be skipped.
+                    skip_reason = result.get("reason", "")
                     if (
                         result.get("status") == "skipped"
+                        and skip_reason
+                        in {
+                            "Insufficient data in window",
+                            "Single window exists, no compaction needed",
+                        }
                         and task.get("session_id")
                         and task.get("user_id")
                     ):
                         try:
-                            from intaris.session import SessionStore
-
-                            SessionStore(self._db).increment_summary_count(
+                            SessionStore(self._db).mark_summary_attempt(
                                 task["session_id"],
                                 user_id=task["user_id"],
                             )
                         except Exception:
                             logger.debug(
-                                "Failed to increment summary_count for skipped task",
+                                "Failed to record skipped summary attempt",
                                 exc_info=True,
                             )
                     if result.get("compacted"):
@@ -914,6 +1003,7 @@ class BackgroundWorker:
                             "task_id": task_id,
                             "user_id": task.get("user_id", ""),
                             "session_id": task.get("session_id"),
+                            "agent_id": task.get("agent_id", ""),
                         }
                     )
             except Exception as e:
@@ -950,6 +1040,7 @@ class BackgroundWorker:
                             "task_id": task_id,
                             "user_id": task.get("user_id", ""),
                             "session_id": task.get("session_id"),
+                            "agent_id": task.get("agent_id", ""),
                         }
                     )
             finally:
@@ -1520,15 +1611,19 @@ class BackgroundWorker:
 
             enqueued = 0
             for user_id, agent_id in pairs:
-                if not self._task_queue.cancel_duplicate("analysis", user_id):
+                if not self._task_queue.cancel_duplicate(
+                    "analysis", user_id, agent_id=agent_id
+                ):
                     self._task_queue.enqueue(
                         "analysis",
                         user_id,
+                        agent_id=agent_id,
                         payload={
                             "triggered_by": "periodic",
                             "agent_id": agent_id,
                             "lookback_days": self._config.lookback_days,
                         },
+                        priority=2,
                     )
                     enqueued += 1
 
@@ -1552,6 +1647,12 @@ class BackgroundWorker:
                         WHERE status IN ('idle', 'completed',
                                          'terminated', 'suspended')
                           AND summary_count = 0
+                          AND last_activity_at > created_at
+                          AND (
+                                last_summary_attempt_at IS NULL
+                                OR last_activity_at IS NULL
+                                OR last_summary_attempt_at < last_activity_at
+                          )
                         """
                     )
                     row = cur.fetchone()
@@ -1594,6 +1695,12 @@ class BackgroundWorker:
                         WHERE status IN ('idle', 'completed',
                                          'terminated', 'suspended')
                           AND summary_count = 0
+                          AND last_activity_at > created_at
+                          AND (
+                                last_summary_attempt_at IS NULL
+                                OR last_activity_at IS NULL
+                                OR last_summary_attempt_at < last_activity_at
+                          )
                           AND last_activity_at >= ?
                         """,
                         (cutoff,),

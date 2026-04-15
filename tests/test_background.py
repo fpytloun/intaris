@@ -82,10 +82,42 @@ class TestTaskQueue:
         assert task is None
 
     def test_claim_next_respects_priority(self, task_queue):
-        task_queue.enqueue("analysis", "user-1", priority=0)
-        task_queue.enqueue("summary", "user-1", session_id="sess-1", priority=1)
+        task_queue.enqueue("analysis", "user-1", agent_id="agent-a", priority=0)
+        task_queue.enqueue("analysis", "user-1", agent_id="agent-b", priority=1)
         task = task_queue.claim_next()
-        assert task["task_type"] == "summary"  # Higher priority
+        assert task["task_type"] == "analysis"
+        assert task["agent_id"] == "agent-b"  # Higher priority within type
+
+    def test_claim_next_prioritizes_analysis_over_summary_backlog(
+        self, task_queue, session_store
+    ):
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-1",
+            intention="Test",
+            agent_id="agent-b",
+        )
+        task_queue.enqueue("summary", "user-1", session_id="sess-1", priority=1)
+        task_queue.enqueue("analysis", "user-1", agent_id="agent-a", priority=2)
+
+        task = task_queue.claim_next()
+        assert task["task_type"] == "analysis"
+        assert task["agent_id"] == "agent-a"
+
+    def test_claim_next_waits_for_same_scope_summary(self, task_queue, session_store):
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-1",
+            intention="Test",
+            agent_id="agent-a",
+        )
+        task_queue.enqueue("summary", "user-1", session_id="sess-1", priority=3)
+        task_queue.enqueue("analysis", "user-1", agent_id="agent-a", priority=2)
+
+        task = task_queue.claim_next()
+        assert task["task_type"] == "summary"
+        assert task["agent_id"] == "agent-a"
+        assert task_queue.claim_next() is None
 
     def test_complete_task(self, task_queue):
         task_queue.enqueue("summary", "user-1", session_id="sess-1")
@@ -201,6 +233,50 @@ class TestTaskQueue:
         task_queue.complete(task["id"])
         assert task_queue.cancel_duplicate("summary", "user-1", "sess-1") is False
 
+    def test_cancel_duplicate_scopes_analysis_by_agent(self, task_queue):
+        task_queue.enqueue("analysis", "user-1", agent_id="agent-a")
+
+        assert (
+            task_queue.cancel_duplicate("analysis", "user-1", agent_id="agent-a")
+            is True
+        )
+        assert (
+            task_queue.cancel_duplicate("analysis", "user-1", agent_id="agent-b")
+            is False
+        )
+
+    def test_recently_completed_scopes_analysis_by_agent(self, task_queue):
+        task_queue.enqueue("analysis", "user-1", agent_id="agent-a")
+        task = task_queue.claim_next()
+        task_queue.complete(task["id"])
+
+        assert (
+            task_queue.recently_completed("analysis", "user-1", agent_id="agent-a")
+            is True
+        )
+        assert (
+            task_queue.recently_completed("analysis", "user-1", agent_id="agent-b")
+            is False
+        )
+
+    def test_enqueue_summary_backfills_agent_from_session(
+        self, task_queue, session_store
+    ):
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-1",
+            intention="Test",
+            agent_id="agent-a",
+        )
+
+        task_id = task_queue.enqueue("summary", "user-1", session_id="sess-1")
+
+        with task_queue._db.cursor() as cur:
+            cur.execute("SELECT agent_id FROM analysis_tasks WHERE id = ?", (task_id,))
+            row = cur.fetchone()
+
+        assert row[0] == "agent-a"
+
     def test_get_queue_stats(self, task_queue):
         task_queue.enqueue("summary", "user-1", session_id="sess-1")
         task_queue.enqueue("analysis", "user-1")
@@ -228,11 +304,12 @@ class TestTaskQueue:
         assert count == 1
 
     def test_analysis_task_without_session(self, task_queue):
-        task_queue.enqueue("analysis", "user-1")
+        task_queue.enqueue("analysis", "user-1", agent_id="agent-a")
         task = task_queue.claim_next()
         assert task is not None
         assert task["session_id"] is None
         assert task["task_type"] == "analysis"
+        assert task["agent_id"] == "agent-a"
 
 
 class TestSessionSweep:
@@ -751,6 +828,198 @@ class TestSessionActivity:
         session_store.increment_summary_count("sess-1", user_id="user-1")
         session = session_store.get("sess-1", user_id="user-1")
         assert session["summary_count"] == 1
+
+    def test_worker_skipped_summary_does_not_increment_summary_count(
+        self, db, session_store, monkeypatch
+    ):
+        import asyncio
+
+        from intaris.background import BackgroundWorker
+
+        worker = BackgroundWorker(db, AnalysisConfig(enabled=True))
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-1",
+            intention="Test",
+            agent_id="agent-a",
+        )
+
+        task = {
+            "id": "task-1",
+            "task_type": "summary",
+            "user_id": "user-1",
+            "session_id": "sess-1",
+            "agent_id": "agent-a",
+            "payload": {},
+        }
+        claims = [task, None]
+
+        def _claim_next():
+            next_task = claims.pop(0)
+            if next_task is None:
+                worker._running = False
+            return next_task
+
+        async def _fake_summary(_task):
+            return {"status": "skipped", "reason": "Insufficient data in window"}
+
+        async def _fake_sleep(_seconds):
+            return None
+
+        async def _fake_heartbeat(_task_id):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(worker, "_execute_summary_task", _fake_summary)
+        monkeypatch.setattr(worker, "_task_heartbeat_loop", _fake_heartbeat)
+        monkeypatch.setattr(worker._task_queue, "claim_next", _claim_next)
+        monkeypatch.setattr(
+            worker._task_queue, "complete", lambda *_args, **_kwargs: None
+        )
+        monkeypatch.setattr(worker._task_queue, "get_queue_stats", lambda: {})
+        monkeypatch.setattr("intaris.background.asyncio.sleep", _fake_sleep)
+
+        worker._running = True
+        worker._catchup_event = asyncio.Event()
+        worker._catchup_event.set()
+
+        asyncio.run(worker._worker_loop())
+
+        session = session_store.get("sess-1", user_id="user-1")
+        assert session["summary_count"] == 0
+        assert session["last_summary_attempt_at"] is not None
+
+    def test_worker_transient_skipped_summary_does_not_record_attempt(
+        self, db, session_store, monkeypatch
+    ):
+        import asyncio
+
+        from intaris.background import BackgroundWorker
+
+        worker = BackgroundWorker(db, AnalysisConfig(enabled=True))
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-3",
+            intention="Test",
+            agent_id="agent-a",
+        )
+
+        task = {
+            "id": "task-3",
+            "task_type": "summary",
+            "user_id": "user-1",
+            "session_id": "sess-3",
+            "agent_id": "agent-a",
+            "payload": {},
+        }
+        claims = [task, None]
+
+        def _claim_next():
+            next_task = claims.pop(0)
+            if next_task is None:
+                worker._running = False
+            return next_task
+
+        async def _fake_summary(_task):
+            return {"status": "skipped", "reason": "No LLM client configured"}
+
+        async def _fake_sleep(_seconds):
+            return None
+
+        async def _fake_heartbeat(_task_id):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(worker, "_execute_summary_task", _fake_summary)
+        monkeypatch.setattr(worker, "_task_heartbeat_loop", _fake_heartbeat)
+        monkeypatch.setattr(worker._task_queue, "claim_next", _claim_next)
+        monkeypatch.setattr(worker._task_queue, "fail", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(worker._task_queue, "get_queue_stats", lambda: {})
+        monkeypatch.setattr("intaris.background.asyncio.sleep", _fake_sleep)
+
+        worker._running = True
+        worker._catchup_event = asyncio.Event()
+        worker._catchup_event.set()
+
+        asyncio.run(worker._worker_loop())
+
+        session = session_store.get("sess-3", user_id="user-1")
+        assert session["last_summary_attempt_at"] is None
+
+    def test_mark_summary_attempt(self, session_store):
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-2",
+            intention="Test",
+        )
+
+        session_store.mark_summary_attempt("sess-2", user_id="user-1")
+        session = session_store.get("sess-2", user_id="user-1")
+
+        assert session["summary_count"] == 0
+        assert session["last_summary_attempt_at"] is not None
+
+
+class TestStartupCatchup:
+    """Test startup catch-up behavior for skipped summaries."""
+
+    def test_skipped_no_data_session_is_not_reenqueued_without_new_activity(
+        self, db, session_store
+    ):
+        import asyncio
+
+        from intaris.background import BackgroundWorker
+
+        worker = BackgroundWorker(db, AnalysisConfig(enabled=True))
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-no-data",
+            intention="Test",
+            agent_id="agent-a",
+        )
+        session_store.update_status("sess-no-data", "completed", user_id="user-1")
+        session_store.mark_summary_attempt("sess-no-data", user_id="user-1")
+
+        session = session_store.get("sess-no-data", user_id="user-1")
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_activity_at = ?, last_summary_attempt_at = ? "
+                "WHERE user_id = ? AND session_id = ?",
+                (
+                    session["last_activity_at"],
+                    session["last_activity_at"],
+                    "user-1",
+                    "sess-no-data",
+                ),
+            )
+
+        asyncio.run(worker._startup_catchup())
+
+        with db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM analysis_tasks")
+            row = cur.fetchone()
+
+        assert row[0] == 0
+
+    def test_empty_completed_session_is_not_enqueued(self, db, session_store):
+        import asyncio
+
+        from intaris.background import BackgroundWorker
+
+        worker = BackgroundWorker(db, AnalysisConfig(enabled=True))
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-empty",
+            intention="Test",
+            agent_id="agent-a",
+        )
+        session_store.update_status("sess-empty", "completed", user_id="user-1")
+
+        asyncio.run(worker._startup_catchup())
+
+        with db.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM analysis_tasks")
+            row = cur.fetchone()
+
+        assert row[0] == 0
 
 
 class TestMetrics:

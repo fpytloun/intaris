@@ -456,6 +456,7 @@ class AnalysisTriggerResponse(BaseModel):
 
     ok: bool = True
     task_id: str | None = Field(None, description="Enqueued task ID")
+    enqueued: int = Field(0, description="Number of analysis tasks enqueued")
 
 
 class AnalysisRecord(BaseModel):

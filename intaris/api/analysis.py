@@ -575,17 +575,19 @@ async def trigger_analysis(
 
         if agent_id:
             # Single agent — check for duplicate, enqueue one task
-            if task_queue.cancel_duplicate("analysis", ctx.user_id):
-                return AnalysisTriggerResponse(ok=True, task_id=None)
+            if task_queue.cancel_duplicate("analysis", ctx.user_id, agent_id=agent_id):
+                return AnalysisTriggerResponse(ok=True, task_id=None, enqueued=0)
             task_id = task_queue.enqueue(
                 "analysis",
                 ctx.user_id,
+                agent_id=agent_id,
                 payload={
                     "triggered_by": "manual",
                     "agent_id": agent_id,
                 },
+                priority=2,
             )
-            return AnalysisTriggerResponse(ok=True, task_id=task_id)
+            return AnalysisTriggerResponse(ok=True, task_id=task_id, enqueued=1)
 
         # All agents — enumerate distinct agents for this user and
         # enqueue a separate analysis task for each, matching the
@@ -606,14 +608,16 @@ async def trigger_analysis(
         # task for one agent doesn't block others from being enqueued.
         enqueued = 0
         for aid in agents:
-            if not task_queue.cancel_duplicate("analysis", ctx.user_id):
+            if not task_queue.cancel_duplicate("analysis", ctx.user_id, agent_id=aid):
                 task_queue.enqueue(
                     "analysis",
                     ctx.user_id,
+                    agent_id=aid,
                     payload={
                         "triggered_by": "manual",
                         "agent_id": aid,
                     },
+                    priority=2,
                 )
                 enqueued += 1
 
@@ -623,7 +627,7 @@ async def trigger_analysis(
             len(agents),
             enqueued,
         )
-        return AnalysisTriggerResponse(ok=True, task_id=None)
+        return AnalysisTriggerResponse(ok=True, task_id=None, enqueued=enqueued)
     except Exception:
         logger.exception("Error in /analysis/trigger")
         raise HTTPException(
@@ -733,6 +737,7 @@ async def get_task_status(
     ctx: SessionContext = Depends(get_session_context),
     task_type: str | None = Query(None, description="Filter: summary, analysis"),
     session_id: str | None = Query(None, description="Filter by session"),
+    agent_id: str | None = Query(None, description="Filter by agent ID"),
     since: datetime | None = Query(
         None, description="ISO 8601 cutoff (only count tasks created after this)"
     ),
@@ -764,6 +769,10 @@ async def get_task_status(
         if session_id:
             conditions.append("session_id = ?")
             params.append(session_id)
+
+        if agent_id is not None:
+            conditions.append("COALESCE(agent_id, '') = ?")
+            params.append(agent_id)
 
         where = " AND ".join(conditions)
         with db.cursor() as cur:

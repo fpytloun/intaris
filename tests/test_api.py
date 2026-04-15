@@ -1788,6 +1788,76 @@ class TestAnalysisEndpoints:
                 assert data["risk_level"] == 1
                 assert data["profile_version"] == 0
 
+    def test_trigger_analysis_all_agents_enqueues_per_agent(self, client_no_auth):
+        """Manual all-agent trigger enqueues one L3 task per agent scope."""
+        from intaris.background import TaskQueue
+        from intaris.server import _get_db
+
+        user_id = "user-analysis-trigger"
+        headers_a = {"X-User-Id": user_id, "X-Agent-Id": "agent-a"}
+        headers_b = {"X-User-Id": user_id, "X-Agent-Id": "agent-b"}
+        _create_session(client_no_auth, "sess-analysis-a", headers_a)
+        _create_session(client_no_auth, "sess-analysis-b", headers_b)
+
+        task_queue = TaskQueue(_get_db())
+        task_queue.enqueue("analysis", user_id, agent_id="agent-a")
+
+        resp = client_no_auth.post(
+            "/api/v1/analysis/trigger", headers={"X-User-Id": user_id}
+        )
+
+        assert resp.status_code == 200
+        with _get_db().cursor() as cur:
+            cur.execute(
+                "SELECT agent_id, COUNT(*) FROM analysis_tasks "
+                "WHERE user_id = ? AND task_type = 'analysis' "
+                "GROUP BY agent_id ORDER BY agent_id",
+                (user_id,),
+            )
+            rows = cur.fetchall()
+
+        assert [(row[0], row[1]) for row in rows] == [("agent-a", 1), ("agent-b", 1)]
+
+    def test_task_status_filters_by_agent(self, client_no_auth):
+        """GET /tasks/status scopes summary and analysis counts by agent."""
+        from intaris.background import TaskQueue
+        from intaris.server import _get_db
+
+        user_id = "user-task-status"
+        headers_a = {"X-User-Id": user_id, "X-Agent-Id": "agent-a"}
+        headers_b = {"X-User-Id": user_id, "X-Agent-Id": "agent-b"}
+        _create_session(client_no_auth, "sess-task-a", headers_a)
+        _create_session(client_no_auth, "sess-task-b", headers_b)
+
+        task_queue = TaskQueue(_get_db())
+        task_queue.enqueue("summary", user_id, session_id="sess-task-a")
+        task_queue.enqueue("summary", user_id, session_id="sess-task-b")
+        task_queue.enqueue("analysis", user_id, agent_id="agent-a")
+        task_queue.enqueue("analysis", user_id, agent_id="agent-b")
+
+        resp_summary_a = client_no_auth.get(
+            "/api/v1/tasks/status",
+            params={"task_type": "summary", "agent_id": "agent-a"},
+            headers={"X-User-Id": user_id},
+        )
+        resp_analysis_a = client_no_auth.get(
+            "/api/v1/tasks/status",
+            params={"task_type": "analysis", "agent_id": "agent-a"},
+            headers={"X-User-Id": user_id},
+        )
+        resp_summary_all = client_no_auth.get(
+            "/api/v1/tasks/status",
+            params={"task_type": "summary"},
+            headers={"X-User-Id": user_id},
+        )
+
+        assert resp_summary_a.status_code == 200
+        assert resp_analysis_a.status_code == 200
+        assert resp_summary_all.status_code == 200
+        assert resp_summary_a.json()["pending"] == 1
+        assert resp_analysis_a.json()["pending"] == 1
+        assert resp_summary_all.json()["pending"] == 2
+
     def test_reasoning_updates_activity(self, client_no_auth):
         """POST /reasoning updates session last_activity_at."""
         headers = {"X-User-Id": "user-act"}

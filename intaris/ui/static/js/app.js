@@ -106,6 +106,7 @@ function riskTooltip(name) {
  * @param {Object} opts
  * @param {string}   [opts.taskType]    - Filter by task type (summary/analysis)
  * @param {string}   [opts.sessionId]   - Filter by session ID
+ * @param {string}   [opts.agentId]     - Filter by agent ID
  * @param {string}   [opts.since]       - ISO 8601 cutoff for created_at
  * @param {number}   [opts.total]       - Total expected tasks (for percentage calc)
  * @param {number}   [opts.interval]    - Poll interval in ms (default 3000)
@@ -132,6 +133,7 @@ function pollTaskProgress(opts) {
       const params = {};
       if (opts.taskType) params.task_type = opts.taskType;
       if (opts.sessionId) params.session_id = opts.sessionId;
+      if (opts.agentId !== undefined) params.agent_id = opts.agentId;
       if (opts.since) params.since = opts.since;
       const status = await IntarisAPI.getTaskStatus(params);
       const processed = (status.completed || 0) + (status.failed || 0) + (status.cancelled || 0);

@@ -383,10 +383,30 @@ class SessionStore:
                 """
                 UPDATE sessions
                 SET summary_count = COALESCE(summary_count, 0) + 1,
+                    last_summary_attempt_at = ?,
                     updated_at = ?
                 WHERE session_id = ? AND user_id = ?
                 """,
-                (now, session_id, user_id),
+                (now, now, session_id, user_id),
+            )
+
+    def mark_summary_attempt(self, session_id: str, *, user_id: str) -> None:
+        """Record that summary generation was attempted for a session.
+
+        Used when a summary task is skipped due to insufficient data so
+        startup catch-up and parent orchestration do not retry the same
+        stale no-data window until new session activity arrives.
+        """
+
+        now = datetime.now(timezone.utc).isoformat()
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET last_summary_attempt_at = ?, updated_at = ?
+                WHERE session_id = ? AND user_id = ?
+                """,
+                (now, now, session_id, user_id),
             )
 
     def set_alignment_overridden(
