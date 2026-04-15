@@ -936,8 +936,8 @@ class TestConnectionManagerEvict:
 
         asyncio.run(_test())
 
-    def test_start_preconnects_on_lifecycle_task(self, server_store):
-        """Eager startup should create connections on the lifecycle task."""
+    def test_start_preconnects_servers(self, server_store):
+        """Eager startup should create cached connections for enabled servers."""
 
         async def _test():
             from unittest.mock import AsyncMock, MagicMock
@@ -970,10 +970,72 @@ class TestConnectionManagerEvict:
             await mgr.start()
 
             conn = mgr._connections[(TEST_USER, "startup-server")]
-            assert conn.owner_task_id == id(mgr._lifecycle_task)
+            assert conn.server_name == "startup-server"
+            assert conn.owner_task_id == id(
+                mgr._lifecycle_tasks[(TEST_USER, "startup-server")]
+            )
 
             await mgr.shutdown()
             conn.exit_stack.aclose.assert_awaited_once()
+
+        asyncio.run(_test())
+
+    def test_hung_connect_does_not_block_other_server_connects(self):
+        """One slow connect should not head-of-line block another server."""
+
+        async def _test():
+            mgr = MCPConnectionManager()
+            from unittest.mock import AsyncMock, MagicMock
+
+            gate = asyncio.Event()
+
+            from intaris.mcp.client import _Connection
+
+            async def _fake_connect(server_config, *, user_id=""):
+                if server_config["name"] == "slow-server":
+                    await gate.wait()
+                mock_session = MagicMock(spec=["call_tool", "list_tools"])
+                mock_exit_stack = AsyncMock()
+                mock_exit_stack.aclose = AsyncMock()
+                return _Connection(
+                    session=mock_session,
+                    exit_stack=mock_exit_stack,
+                    server_name=server_config["name"],
+                    user_id=user_id,
+                    transport=server_config.get("transport", "streamable-http"),
+                    owner_task_id=id(asyncio.current_task()),
+                )
+
+            mgr._connect = _fake_connect  # type: ignore[method-assign]
+
+            slow_task = asyncio.create_task(
+                mgr.get_or_connect(
+                    server_config={
+                        "name": "slow-server",
+                        "transport": "streamable-http",
+                    },
+                    user_id="user1",
+                )
+            )
+            await asyncio.sleep(0)
+
+            fast_session = await asyncio.wait_for(
+                mgr.get_or_connect(
+                    server_config={
+                        "name": "fast-server",
+                        "transport": "streamable-http",
+                    },
+                    user_id="user1",
+                ),
+                timeout=0.1,
+            )
+
+            assert fast_session is not None
+            assert ("user1", "fast-server") in mgr._connections
+
+            gate.set()
+            await slow_task
+            await mgr.shutdown()
 
         asyncio.run(_test())
 
@@ -982,7 +1044,8 @@ class TestConnectionManagerEvict:
 
         async def _test():
             mgr = MCPConnectionManager()
-            await mgr._ensure_lifecycle_task()
+            key = ("user1", "server1")
+            await mgr._ensure_lifecycle_task(key)
 
             gate = asyncio.Event()
 
@@ -990,15 +1053,15 @@ class TestConnectionManagerEvict:
                 await gate.wait()
 
             with pytest.raises(asyncio.TimeoutError):
-                await mgr._run_in_lifecycle_task(_hang, timeout=0.01)
+                await mgr._run_in_lifecycle_task(key, _hang, timeout=0.01)
 
             result = await mgr._run_in_lifecycle_task(
-                lambda: asyncio.sleep(0, result="ok")
+                key, lambda: asyncio.sleep(0, result="ok")
             )
             assert result == "ok"
 
             gate.set()
-            await mgr._stop_lifecycle_task()
+            await mgr._stop_lifecycle_task(key)
 
         asyncio.run(_test())
 
@@ -1032,15 +1095,44 @@ class TestConnectionManagerEvict:
                 user_id="user1",
                 transport="streamable-http",
             )
-            await mgr._ensure_lifecycle_task()
-            conn.owner_task_id = id(mgr._lifecycle_task)
+            key = ("user1", "test-server")
+            await mgr._ensure_lifecycle_task(key)
+            conn.owner_task_id = id(mgr._lifecycle_tasks[key])
             mgr._connections[("user1", "test-server")] = conn
 
             await mgr.evict("user1", "test-server")
-            await mgr._stop_lifecycle_task()
+            await mgr._stop_lifecycle_task(key)
 
             assert mgr.connection_count() == 0
             mock_exit_stack.aclose.assert_awaited_once()
+            assert key not in mgr._lifecycle_tasks
+            assert key not in mgr._lifecycle_queues
+
+        asyncio.run(_test())
+
+    def test_failed_connect_cleans_up_lifecycle_task(self):
+        """Failed connects should not leave orphaned lifecycle runners."""
+
+        async def _test():
+            mgr = MCPConnectionManager()
+
+            async def _fail_connect(server_config, *, user_id=""):
+                raise ConnectionError(f"boom:{server_config['name']}:{user_id}")
+
+            mgr._connect = _fail_connect  # type: ignore[method-assign]
+            key = ("user1", "broken-server")
+
+            with pytest.raises(ConnectionError):
+                await mgr.get_or_connect(
+                    server_config={
+                        "name": "broken-server",
+                        "transport": "streamable-http",
+                    },
+                    user_id="user1",
+                )
+
+            assert key not in mgr._lifecycle_tasks
+            assert key not in mgr._lifecycle_queues
 
         asyncio.run(_test())
 
