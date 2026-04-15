@@ -95,7 +95,12 @@ class MCPProxy:
         self._register_handlers()
 
         # Create the session manager (ASGI handler).
-        self._session_manager = StreamableHTTPSessionManager(
+        self._session_manager = self._create_session_manager()
+        self._session_manager_running = False
+
+    def _create_session_manager(self) -> StreamableHTTPSessionManager:
+        """Create a fresh MCP StreamableHTTP session manager."""
+        return StreamableHTTPSessionManager(
             app=self._server,
             json_response=False,
             stateless=False,
@@ -105,6 +110,28 @@ class MCPProxy:
     def session_manager(self) -> StreamableHTTPSessionManager:
         """ASGI handler for mounting at /mcp."""
         return self._session_manager
+
+    def reset_session_manager(self) -> None:
+        """Replace the MCP session manager after an unexpected shutdown.
+
+        The StreamableHTTPSessionManager owns internal task groups. If one of
+        those task groups tears down unexpectedly, the safest recovery path is
+        to create a fresh manager around the same MCP server instance.
+        """
+
+        self._session_manager_running = False
+        self._session_manager = self._create_session_manager()
+
+    @property
+    def session_manager_running(self) -> bool:
+        """Whether the inner StreamableHTTP session manager is live."""
+
+        return self._session_manager_running
+
+    def set_session_manager_running(self, running: bool) -> None:
+        """Update the inner StreamableHTTP session manager liveness flag."""
+
+        self._session_manager_running = running
 
     @property
     def server(self) -> Server:

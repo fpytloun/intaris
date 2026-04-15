@@ -6,6 +6,8 @@ in-memory SQLite database and mock LLM client.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import time
 from unittest.mock import patch
@@ -209,6 +211,104 @@ class TestHealth:
         """Health endpoint works without auth."""
         resp = client_with_auth.get("/health")
         assert resp.status_code == 200
+
+    def test_health_reports_background_worker_status(self, client_no_auth):
+        resp = client_no_auth.get("/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["analysis"]["running"] is True
+
+    def test_health_unhealthy_when_background_worker_stops(self, client_no_auth):
+        client_no_auth.app.state.background_worker._running = False
+
+        resp = client_no_auth.get("/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["healthy"] is False
+        assert data["analysis"]["running"] is False
+
+    def test_health_unhealthy_when_mcp_session_manager_stops(self, client_no_auth):
+        client_no_auth.app.state.mcp_proxy.set_session_manager_running(False)
+
+        resp = client_no_auth.get("/health")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["healthy"] is False
+        assert data["mcp"]["session_manager_running"] is False
+
+    def test_mcp_endpoint_returns_503_while_session_manager_restarting(
+        self, client_no_auth
+    ):
+        client_no_auth.app.state.mcp_proxy.set_session_manager_running(False)
+
+        resp = client_no_auth.get("/mcp")
+
+        assert resp.status_code == 503
+        assert "restarting" in resp.json()["error"].lower()
+
+
+class TestServerHelpers:
+    """Tests for server lifecycle helpers."""
+
+    def test_mcp_session_manager_restarts_after_unexpected_cancel(self):
+        from intaris.server import _run_mcp_session_manager
+
+        class _FakeSessionManager:
+            def __init__(self, proxy):
+                self._proxy = proxy
+
+            @contextlib.asynccontextmanager
+            async def run(self):
+                self._proxy.run_attempts += 1
+                if self._proxy.run_attempts == 1:
+                    raise asyncio.CancelledError()
+                try:
+                    yield
+                finally:
+                    self._proxy.exit_count += 1
+
+        class _FakeProxy:
+            def __init__(self):
+                self.run_attempts = 0
+                self.reset_calls = 0
+                self.exit_count = 0
+                self.session_manager_running = False
+                self.session_manager = _FakeSessionManager(self)
+
+            def reset_session_manager(self):
+                self.reset_calls += 1
+                self.session_manager_running = False
+                self.session_manager = _FakeSessionManager(self)
+
+            def set_session_manager_running(self, running: bool):
+                self.session_manager_running = running
+
+        async def _test():
+            proxy = _FakeProxy()
+            stop_event = asyncio.Event()
+            ready_event = asyncio.Event()
+
+            async def _trigger_stop():
+                await asyncio.sleep(0.01)
+                stop_event.set()
+
+            stopper = asyncio.create_task(_trigger_stop())
+            await _run_mcp_session_manager(
+                proxy,
+                stop_event=stop_event,
+                ready_event=ready_event,
+                restart_delay_s=0,
+            )
+            await stopper
+
+            assert proxy.run_attempts == 2
+            assert proxy.reset_calls == 1
+            assert proxy.exit_count == 1
+            assert ready_event.is_set() is True
+
+        asyncio.run(_test())
 
 
 # ── Auth ──────────────────────────────────────────────────────────────

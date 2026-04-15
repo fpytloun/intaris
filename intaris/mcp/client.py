@@ -102,6 +102,8 @@ class _Connection:
     exit_stack: AsyncExitStack
     server_name: str
     user_id: str
+    transport: str = ""
+    owner_task_id: int | None = None
     server_instructions: str | None = None
     last_used: float = field(default_factory=time.monotonic)
 
@@ -143,6 +145,8 @@ class MCPConnectionManager:
         # Per-server connect locks to prevent concurrent subprocess spawns.
         self._connect_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._sweep_task: asyncio.Task[None] | None = None
+        self._lifecycle_queue: asyncio.Queue[Any] | None = None
+        self._lifecycle_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start the background idle sweep and eagerly connect configured servers.
@@ -157,6 +161,7 @@ class MCPConnectionManager:
                 "MCPConnectionManager started (sweep interval=%ds)",
                 _SWEEP_INTERVAL_SECONDS,
             )
+        await self._ensure_lifecycle_task()
 
         # Eager startup: pre-connect all enabled servers.
         if self._server_store is not None:
@@ -184,7 +189,11 @@ class MCPConnectionManager:
                         decrypt_secrets=True,
                     )
 
-                    conn = await self._connect(server_cfg, user_id=user_id)
+                    conn = await self._run_in_lifecycle_task(
+                        lambda server_cfg=server_cfg, user_id=user_id: self._connect(
+                            server_cfg, user_id=user_id
+                        )
+                    )
 
                     async with self._lock:
                         key = (user_id, server_name)
@@ -231,13 +240,18 @@ class MCPConnectionManager:
             keys = list(self._connections.keys())
             for key in keys:
                 try:
-                    await asyncio.wait_for(self._close_connection(key), timeout=3.0)
+                    await self._run_in_lifecycle_task(
+                        lambda key=key: self._close_connection(key),
+                        timeout=3.0,
+                    )
                 except (asyncio.TimeoutError, Exception):
                     logger.warning("MCP connection %s close timed out or failed", key)
             self._connect_locks.clear()
             logger.info(
                 "MCPConnectionManager shutdown: closed %d connections", len(keys)
             )
+
+        await self._stop_lifecycle_task()
 
     async def get_or_connect(
         self,
@@ -298,7 +312,9 @@ class MCPConnectionManager:
                     return conn.session
 
             # Connect outside the main lock.
-            new_conn = await self._connect(server_config, user_id=user_id)
+            new_conn = await self._run_in_lifecycle_task(
+                lambda: self._connect(server_config, user_id=user_id)
+            )
 
             async with self._lock:
                 self._connections[key] = new_conn
@@ -319,7 +335,10 @@ class MCPConnectionManager:
         async with self._lock:
             if key in self._connections:
                 try:
-                    await asyncio.wait_for(self._close_connection(key), timeout=3.0)
+                    await self._run_in_lifecycle_task(
+                        lambda: self._close_connection(key),
+                        timeout=3.0,
+                    )
                 except (asyncio.TimeoutError, Exception):
                     # Force-remove on timeout or error to avoid stale entries.
                     self._connections.pop(key, None)
@@ -463,6 +482,12 @@ class MCPConnectionManager:
                 exit_stack=exit_stack,
                 server_name=server_name,
                 user_id=user_id,
+                transport=transport,
+                owner_task_id=(
+                    id(asyncio.current_task())
+                    if asyncio.current_task() is not None
+                    else None
+                ),
                 server_instructions=server_instructions,
             )
 
@@ -648,6 +673,20 @@ class MCPConnectionManager:
         conn = self._connections.pop(key, None)
         if conn is None:
             return
+        current_task = asyncio.current_task()
+        current_task_id = id(current_task) if current_task is not None else None
+        if conn.owner_task_id is not None and conn.owner_task_id != current_task_id:
+            logger.debug(
+                "Skipping explicit close for '%s' (user=%s, transport=%s): "
+                "connection was opened in task %s and cannot be safely "
+                "closed from task %s; evicting from cache only",
+                key[1],
+                key[0],
+                conn.transport,
+                conn.owner_task_id,
+                current_task_id,
+            )
+            return
         try:
             await conn.exit_stack.aclose()
             logger.debug("Closed connection to '%s' (user=%s)", key[1], key[0])
@@ -682,7 +721,10 @@ class MCPConnectionManager:
                     now - self._connections[key].last_used,
                 )
                 try:
-                    await asyncio.wait_for(self._close_connection(key), timeout=3.0)
+                    await self._run_in_lifecycle_task(
+                        lambda key=key: self._close_connection(key),
+                        timeout=3.0,
+                    )
                 except (asyncio.TimeoutError, Exception):
                     self._connections.pop(key, None)
                     logger.warning("Idle close of '%s' timed out or failed", key[1])
@@ -695,6 +737,83 @@ class MCPConnectionManager:
                 lock = self._connect_locks[k]
                 if not lock.locked():
                     del self._connect_locks[k]
+
+    async def _ensure_lifecycle_task(self) -> None:
+        """Start the task-affine connection lifecycle runner if needed."""
+
+        if self._lifecycle_queue is None:
+            self._lifecycle_queue = asyncio.Queue()
+        if self._lifecycle_task is None or self._lifecycle_task.done():
+            self._lifecycle_task = asyncio.create_task(self._lifecycle_loop())
+
+    async def _run_in_lifecycle_task(
+        self, operation, *, timeout: float | None = None
+    ) -> Any:
+        """Execute connect/close work on the lifecycle task.
+
+        Some MCP SDK async context managers require __aexit__ to run on the same
+        task that entered them. Routing both open and close through one dedicated
+        task keeps that invariant while still allowing sessions to be shared
+        across normal request tasks.
+        """
+
+        await self._ensure_lifecycle_task()
+        if asyncio.current_task() is self._lifecycle_task:
+            if timeout is None:
+                return await operation()
+            async with asyncio.timeout(timeout):
+                return await operation()
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        assert self._lifecycle_queue is not None
+        await self._lifecycle_queue.put((operation, fut, timeout))
+        return await fut
+
+    async def _lifecycle_loop(self) -> None:
+        """Run queued connection lifecycle operations serially."""
+
+        assert self._lifecycle_queue is not None
+        while True:
+            item = await self._lifecycle_queue.get()
+            if item is None:
+                return
+            operation, fut, timeout = item
+            if fut.cancelled():
+                continue
+            try:
+                if timeout is None:
+                    result = await operation()
+                else:
+                    async with asyncio.timeout(timeout):
+                        result = await operation()
+            except asyncio.CancelledError as exc:
+                if (
+                    asyncio.current_task() is not None
+                    and asyncio.current_task().cancelled()
+                ):
+                    raise
+                if not fut.cancelled():
+                    fut.set_exception(exc)
+            except Exception as exc:
+                if not fut.cancelled():
+                    fut.set_exception(exc)
+            else:
+                if not fut.cancelled():
+                    fut.set_result(result)
+
+    async def _stop_lifecycle_task(self) -> None:
+        """Stop the task-affine connection lifecycle runner."""
+
+        if self._lifecycle_task is None:
+            return
+        if self._lifecycle_queue is not None:
+            await self._lifecycle_queue.put(None)
+        try:
+            await self._lifecycle_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._lifecycle_task = None
 
 
 class _StderrLogger(io.RawIOBase):

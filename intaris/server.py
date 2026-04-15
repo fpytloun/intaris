@@ -120,6 +120,7 @@ async def health_check(request: Request) -> JSONResponse:
         cfg = _get_config()
         if cfg.analysis.enabled:
             worker = getattr(request.app.state, "background_worker", None)
+            worker_running = bool(worker is not None and worker._running)
             if worker is not None:
                 stats = worker._task_queue.get_queue_stats()
             else:
@@ -128,10 +129,26 @@ async def health_check(request: Request) -> JSONResponse:
                 stats = TaskQueue(_get_db()).get_queue_stats()
             response["analysis"] = {
                 "enabled": True,
+                "running": worker_running,
                 "queue": stats,
             }
+            if worker is not None and not worker_running:
+                response["healthy"] = False
     except Exception:
         pass  # Health check should never fail due to analysis
+
+    try:
+        mcp_proxy = getattr(request.app.state, "mcp_proxy", None)
+        if mcp_proxy is not None:
+            session_manager_running = bool(mcp_proxy.session_manager_running)
+            response["mcp"] = {
+                "enabled": True,
+                "session_manager_running": session_manager_running,
+            }
+            if not session_manager_running:
+                response["healthy"] = False
+    except Exception:
+        pass
 
     # Include intention barrier metrics if available
     try:
@@ -356,8 +373,83 @@ class _MCPEndpoint:
                 )
             return
 
+        if not mcp_proxy.session_manager_running:
+            if scope["type"] == "http":
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 503,
+                        "headers": [
+                            [b"content-type", b"application/json"],
+                        ],
+                    }
+                )
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": b'{"error": "MCP session manager restarting"}',
+                    }
+                )
+            return
+
         # Delegate to the session manager's ASGI handler.
         await mcp_proxy.session_manager.handle_request(scope, receive, send)
+
+
+async def _run_mcp_session_manager(
+    mcp_proxy,
+    *,
+    stop_event: asyncio.Event,
+    ready_event: asyncio.Event | None = None,
+    restart_delay_s: float = 1.0,
+) -> None:
+    """Keep the MCP session manager alive independently of app lifespan.
+
+    The StreamableHTTPSessionManager owns its own AnyIO task groups. If one of
+    those task groups shuts down unexpectedly, we recreate the manager and keep
+    the rest of Intaris alive instead of tearing down the whole application
+    lifespan, which would also stop the background worker.
+    """
+
+    while not stop_event.is_set():
+        try:
+            mcp_proxy.set_session_manager_running(False)
+            async with mcp_proxy.session_manager.run():
+                mcp_proxy.set_session_manager_running(True)
+                if ready_event is not None:
+                    ready_event.set()
+                logger.info("MCP session manager started")
+                await stop_event.wait()
+                return
+        except asyncio.CancelledError:
+            if stop_event.is_set():
+                raise
+            logger.warning("MCP session manager cancelled unexpectedly; restarting")
+        except Exception:
+            if stop_event.is_set():
+                return
+            logger.exception("MCP session manager failed unexpectedly; restarting")
+        finally:
+            mcp_proxy.set_session_manager_running(False)
+
+        if stop_event.is_set():
+            return
+
+        mcp_proxy.reset_session_manager()
+        await asyncio.sleep(restart_delay_s)
+
+
+async def _stop_task(task: asyncio.Task[None] | None, *, timeout: float) -> None:
+    """Wait for a background task to stop, then cancel if needed."""
+
+    if task is None:
+        return
+    try:
+        await asyncio.wait_for(task, timeout=timeout)
+    except asyncio.TimeoutError:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
 
 # ── Application Factory ──────────────────────────────────────────────
@@ -602,54 +694,80 @@ async def lifespan(app):
         api_app.state.event_store = app.state.event_store
         api_app.state.judge_reviewer = app.state.judge_reviewer
 
+    mcp_session_stop = None
+    mcp_session_task = None
+    mcp_ready = None
     try:
         if mcp_proxy is not None:
             await mcp_proxy.start()
-            # The session manager requires run() as an async context manager
-            # to manage its internal task group for handling MCP sessions.
-            async with mcp_proxy.session_manager.run():
-                logger.info("MCP proxy initialized")
-                yield
-                # Cleanup MCP proxy before exiting the session manager context.
-                # Timeout prevents hanging on unresponsive upstream servers.
-                try:
-                    await asyncio.wait_for(mcp_proxy.shutdown(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    logger.warning("MCP proxy shutdown timed out (5s)")
+            mcp_session_stop = asyncio.Event()
+            mcp_ready = asyncio.Event()
+            mcp_session_task = asyncio.create_task(
+                _run_mcp_session_manager(
+                    mcp_proxy,
+                    stop_event=mcp_session_stop,
+                    ready_event=mcp_ready,
+                )
+            )
+            app.state.mcp_session_manager_stop = mcp_session_stop
+            app.state.mcp_session_manager_task = mcp_session_task
+            app.state.mcp_session_manager_ready = mcp_ready
+            try:
+                await asyncio.wait_for(mcp_ready.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "MCP session manager did not report ready within 5s; continuing"
+                )
+            logger.info("MCP proxy initialized")
         else:
-            yield
+            app.state.mcp_session_manager_stop = None
+            app.state.mcp_session_manager_task = None
+            app.state.mcp_session_manager_ready = None
+
+        yield
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Shutdown interrupted — running cleanup")
-        # Best-effort MCP proxy cleanup if interrupted before normal exit
-        if mcp_proxy is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(mcp_proxy.shutdown(), timeout=3.0)
     finally:
         # Cleanup always runs, even on CancelledError/KeyboardInterrupt.
         # Each step is individually guarded with timeouts so one failure
         # or hang doesn't block the rest.
         _mcp_proxy_ref = None
 
+        if mcp_session_stop is not None:
+            mcp_session_stop.set()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await _stop_task(mcp_session_task, timeout=3.0)
+
+        # Cleanup MCP proxy before stopping unrelated background services.
+        # Timeout prevents hanging on unresponsive upstream servers.
+        if mcp_proxy is not None:
+            try:
+                await asyncio.wait_for(mcp_proxy.shutdown(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("MCP proxy shutdown timed out (5s)")
+            except asyncio.CancelledError:
+                pass
+
         # Flush event store buffers (synchronous — fast)
         if app.state.event_store is not None:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 app.state.event_store.flush_all()
                 logger.info("Event store flushed")
 
         # Stop background worker (5s timeout — has its own internal timeout)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await asyncio.wait_for(background_worker.stop(), timeout=5.0)
 
         # Close webhook client (2s timeout)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await asyncio.wait_for(app.state.webhook.close(), timeout=2.0)
 
         # Close notification dispatcher (2s timeout)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await asyncio.wait_for(notification_dispatcher.close(), timeout=2.0)
 
         # Close database (synchronous)
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             db = _get_db()
             db.close()
 

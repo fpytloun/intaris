@@ -936,6 +936,72 @@ class TestConnectionManagerEvict:
 
         asyncio.run(_test())
 
+    def test_start_preconnects_on_lifecycle_task(self, server_store):
+        """Eager startup should create connections on the lifecycle task."""
+
+        async def _test():
+            from unittest.mock import AsyncMock, MagicMock
+
+            from intaris.mcp.client import _Connection
+
+            server_store.upsert_server(
+                user_id=TEST_USER,
+                name="startup-server",
+                transport="streamable-http",
+                url="https://example.com/mcp",
+            )
+            mgr = MCPConnectionManager(server_store=server_store)
+
+            async def _fake_connect(server_config, *, user_id=""):
+                mock_session = MagicMock(spec=["call_tool", "list_tools"])
+                mock_exit_stack = AsyncMock()
+                mock_exit_stack.aclose = AsyncMock()
+                return _Connection(
+                    session=mock_session,
+                    exit_stack=mock_exit_stack,
+                    server_name=server_config["name"],
+                    user_id=user_id,
+                    transport=server_config["transport"],
+                    owner_task_id=id(asyncio.current_task()),
+                )
+
+            mgr._connect = _fake_connect  # type: ignore[method-assign]
+
+            await mgr.start()
+
+            conn = mgr._connections[(TEST_USER, "startup-server")]
+            assert conn.owner_task_id == id(mgr._lifecycle_task)
+
+            await mgr.shutdown()
+            conn.exit_stack.aclose.assert_awaited_once()
+
+        asyncio.run(_test())
+
+    def test_lifecycle_task_survives_timed_out_operation(self):
+        """A timed-out close/connect should not wedge the lifecycle queue."""
+
+        async def _test():
+            mgr = MCPConnectionManager()
+            await mgr._ensure_lifecycle_task()
+
+            gate = asyncio.Event()
+
+            async def _hang():
+                await gate.wait()
+
+            with pytest.raises(asyncio.TimeoutError):
+                await mgr._run_in_lifecycle_task(_hang, timeout=0.01)
+
+            result = await mgr._run_in_lifecycle_task(
+                lambda: asyncio.sleep(0, result="ok")
+            )
+            assert result == "ok"
+
+            gate.set()
+            await mgr._stop_lifecycle_task()
+
+        asyncio.run(_test())
+
     def test_evict_nonexistent_is_noop(self):
         """evict() on a non-existent connection should be a no-op."""
 
@@ -943,6 +1009,38 @@ class TestConnectionManagerEvict:
             mgr = MCPConnectionManager()
             await mgr.evict("user1", "nonexistent")
             assert mgr.connection_count() == 0
+
+        asyncio.run(_test())
+
+    def test_evict_routes_close_through_lifecycle_task(self):
+        """evict() should close connections on the lifecycle task."""
+
+        async def _test():
+            mgr = MCPConnectionManager()
+            from unittest.mock import AsyncMock, MagicMock
+
+            mock_session = MagicMock(spec=["call_tool", "list_tools"])
+            mock_exit_stack = AsyncMock()
+            mock_exit_stack.aclose = AsyncMock()
+
+            from intaris.mcp.client import _Connection
+
+            conn = _Connection(
+                session=mock_session,
+                exit_stack=mock_exit_stack,
+                server_name="test-server",
+                user_id="user1",
+                transport="streamable-http",
+            )
+            await mgr._ensure_lifecycle_task()
+            conn.owner_task_id = id(mgr._lifecycle_task)
+            mgr._connections[("user1", "test-server")] = conn
+
+            await mgr.evict("user1", "test-server")
+            await mgr._stop_lifecycle_task()
+
+            assert mgr.connection_count() == 0
+            mock_exit_stack.aclose.assert_awaited_once()
 
         asyncio.run(_test())
 
