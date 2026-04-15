@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-04-15
+
+### Fixed
+
+- **Claude Code context** -- Preserve reasoning context across turns so follow-up evaluations keep the right conversational state.
+- **Analysis task tracking** -- Scope L2 and L3 task tracking by agent to avoid cross-agent interference in analysis scheduling.
+- **PostgreSQL migrations** -- Avoid creating the pre-migration analysis task index on PostgreSQL before the required schema is in place.
+- **Server shutdown isolation** -- Prevent MCP restart failures from cascading into background worker shutdown.
+
+### Changed
+
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.4.3`.
+
 ## [0.4.2] - 2026-04-14
 
 ### Added
@@ -157,6 +170,7 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.4.3]: https://github.com/fpytloun/intaris/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/fpytloun/intaris/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/fpytloun/intaris/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/fpytloun/intaris/compare/v0.3.2...v0.4.0
