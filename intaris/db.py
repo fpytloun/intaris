@@ -1277,8 +1277,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_pending
     ON analysis_tasks(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_user
     ON analysis_tasks(user_id, task_type, status);
-CREATE INDEX IF NOT EXISTS idx_tasks_scope
-    ON analysis_tasks(user_id, task_type, agent_id, status, next_attempt_at);
+-- idx_tasks_scope created by migration (after agent_id column is added)
 
 -- Per-user notification channels for escalation alerts
 CREATE TABLE IF NOT EXISTS notification_channels (
@@ -1542,8 +1541,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_pending
     ON analysis_tasks(status, next_attempt_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_user
     ON analysis_tasks(user_id, task_type, status);
-CREATE INDEX IF NOT EXISTS idx_tasks_scope
-    ON analysis_tasks(user_id, task_type, agent_id, status, next_attempt_at);
+-- idx_tasks_scope created by migration (after agent_id column is added)
 
 CREATE TABLE IF NOT EXISTS notification_channels (
     user_id          TEXT NOT NULL,
