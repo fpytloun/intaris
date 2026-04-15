@@ -21,7 +21,7 @@ intaris/
 │   │   ├── opencode.json  # MCP proxy config example
 │   │   └── README.md      # Setup and usage guide
 │   └── claude-code/
-│       ├── hooks.json     # Hook configuration (SessionStart + PreToolUse + PostToolUse + Stop)
+│       ├── hooks.json     # Hook configuration (SessionStart + UserPromptSubmit + PreToolUse + PostToolUse + SubagentStart + SubagentStop + Stop + StopFailure + SessionEnd)
 │       ├── scripts/
 │       │   ├── session.sh # SessionStart handler (creates Intaris session)
 │       │   ├── evaluate.sh # PreToolUse handler (calls /api/v1/evaluate + checkpoints + recording)
@@ -186,7 +186,7 @@ The middleware sets three ContextVars (`_session_user_id`, `_session_agent_id`, 
 | `MCP_UPSTREAM_TIMEOUT_MS` | Timeout for upstream MCP server calls in milliseconds (default `30000`) |
 | `MCP_CACHE_DIR` | Base directory for per-server package caches (npx, uvx). Defaults to `{DATA_DIR}/mcp-cache`. Per-server subdirectories are created automatically to isolate concurrent installs and prevent cache corruption. |
 | `INTENTION_BARRIER_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for a pending intention update (default `1000`) |
-| `INTENTION_BARRIER_POLL_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for `/reasoning` to arrive when `intention_pending=true` (default `2000`) |
+| `INTENTION_BARRIER_POLL_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for `/reasoning` to arrive when `/evaluate` races ahead of the user-message trigger (default `10000`) |
 | `ALIGNMENT_BARRIER_TIMEOUT_MS` | Max time (ms) the evaluate endpoint waits for a pending alignment check (default `15000`) |
 | `ANALYSIS_ENABLED` | Enable behavioral analysis pipeline (default `true`) |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | Minutes of inactivity before session transitions to idle (default `30`) |
@@ -322,11 +322,11 @@ The `IntentionBarrier` (`intention.py`) coordinates between the `/reasoning` and
 
 1. **Trigger**: When `POST /reasoning` receives a user message (content starts with `"User message:"`), it calls `barrier.trigger()` which starts an async LLM task to regenerate the intention.
 2. **Wait**: When `POST /evaluate` runs, it calls `await barrier.wait()` before invoking the evaluator. If an intention update is pending, it blocks up to `INTENTION_BARRIER_TIMEOUT_MS` (default 1s).
-3. **Arrival wait**: When the client sends `intention_pending=true` in the evaluate request but `/reasoning` hasn't arrived yet (race condition), the barrier waits up to `INTENTION_BARRIER_POLL_TIMEOUT_MS` (default 2s) for `trigger()` to be called. Uses `asyncio.Event` for zero-latency wakeup — no polling.
+3. **Arrival wait**: If `/evaluate` arrives before `/reasoning` has triggered the barrier for a recent user message, the barrier waits up to `INTENTION_BARRIER_POLL_TIMEOUT_MS` (default 10s) for `trigger()` to be called. Uses `asyncio.Event` for zero-latency wakeup — no polling. The legacy `intention_pending` request field is deprecated and retained only for backward compatibility.
 4. **Cancel-and-restart**: If a new user message arrives while an update is running, the old task is cancelled and a fresh one starts. Only the latest message's update runs to completion.
 
-Budget (Claude Code hooks): 1s barrier + 4s LLM eval = 5s max (within the circuit breaker constraint).
-Budget (OpenCode plugin): 2s arrival wait + 1s barrier + 4s LLM eval = 7s max (within 30s plugin timeout).
+Budget (Claude Code hooks): 1s barrier + 4s LLM eval = 5s max when `/reasoning` already arrived.
+Budget (worst-case arrival race): 10s arrival wait + 1s barrier + 4s LLM eval = 15s max.
 
 ### Intention sources
 
@@ -340,7 +340,7 @@ The `intention_source` column on sessions tracks how the intention was set:
 
 ### One-time bootstrap
 
-Sessions that never receive user messages (e.g., Claude Code, MCP proxy) keep their generic initial intention. At evaluate call 10, if `intention_source` is still `"initial"`, a single refinement fires via the background task queue. This is capped at exactly one update to prevent agent drift from rewriting the intention.
+Sessions that never receive user messages (e.g., MCP proxy sessions or clients without prompt forwarding) keep their generic initial intention. At evaluate call 10, if `intention_source` is still `"initial"`, a single refinement fires via the background task queue. This is capped at exactly one update to prevent agent drift from rewriting the intention.
 
 ### generate_intention()
 

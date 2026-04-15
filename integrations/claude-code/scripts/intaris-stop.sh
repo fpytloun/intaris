@@ -8,11 +8,10 @@
 #   - Signal session completion (PATCH status + POST agent-summary)
 #   - Complete child sessions
 #   - Upload transcript (if recording enabled)
-#   - Clean up state file
 #
 # stop_hook_active=true (Claude continuing from another stop hook):
 #   - Store last_assistant_message in state file only
-#   - Do NOT signal completion or clean up
+#   - Do NOT signal completion
 #
 # Environment variables:
 #   INTARIS_URL                - Intaris server URL (default: http://localhost:8060)
@@ -266,9 +265,6 @@ if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
         log "No transcript path available or file not found"
     fi
 fi
-
-# Clean up state file
-rm -f "$SESSION_FILE"
 
 # Output empty (no modifications to Claude's behavior)
 echo '{}'

@@ -75,6 +75,7 @@ cp integrations/claude-code/scripts/intaris-subagent.sh ~/.claude/scripts/intari
 cp integrations/claude-code/scripts/intaris-subagent-stop.sh ~/.claude/scripts/intaris-subagent-stop.sh
 cp integrations/claude-code/scripts/intaris-stop.sh ~/.claude/scripts/intaris-stop.sh
 cp integrations/claude-code/scripts/intaris-stop-failure.sh ~/.claude/scripts/intaris-stop-failure.sh
+cp integrations/claude-code/scripts/intaris-session-end.sh ~/.claude/scripts/intaris-session-end.sh
 chmod +x ~/.claude/scripts/intaris-*.sh
 
 # Copy hooks config
@@ -82,7 +83,7 @@ cp integrations/claude-code/hooks.json ~/.claude/settings.json
 # Or merge with existing settings.json if you have other hooks
 ```
 
-The hooks section includes `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`, and `StopFailure` hooks.
+The hooks section includes `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`, `StopFailure`, and `SessionEnd` hooks.
 
 ### 3. Prerequisites
 
@@ -145,19 +146,24 @@ See the [MCP Proxy Guide](../mcp-proxy.md) for full details.
 ### Hooks Flow
 
 1. **`SessionStart`** (on startup/resume/clear/compact): Creates or re-activates an Intaris session via `POST /api/v1/intention` with the working directory as context. Stores session state as JSON in a temp file.
-2. **`PreToolUse`** (before every tool call):
-   - Loads session state from the JSON temp file (or creates one lazily)
-   - Calls `POST /api/v1/evaluate` with the tool name and arguments
-   - **approve**: outputs `{}` (allow)
-   - **deny**: outputs Claude's `hookSpecificOutput.permissionDecision="deny"` format (blocks execution)
-   - **escalate**: polls `GET /api/v1/audit/{call_id}` for judge or human resolution, then blocks with retry instructions if still unresolved
-   - Updates session statistics and sends periodic checkpoints
-3. **`PostToolUse`** (after tool execution): Records tool results when session recording is enabled.
-4. **`Stop`** (on session end):
-   - Transitions the parent session to `idle`: `PATCH /api/v1/session/{id}/status`
-   - Sends agent summary: `POST /api/v1/session/{id}/agent-summary` with session statistics
-   - Completes any leftover child sessions and sends their summaries before cleanup
-   - Cleans up the temp state file
+2. **`UserPromptSubmit`** (on every user message): Forwards the user's prompt to `POST /api/v1/reasoning` with the assistant's last response as context. When session recording is enabled, the hook records the user message event, flushes it, then calls `/reasoning` with `from_events=true`.
+3. **`PreToolUse`** (before every tool call):
+    - Loads session state from the JSON temp file (or creates one lazily)
+    - Calls `POST /api/v1/evaluate` with the tool name and arguments
+    - **approve**: outputs `{}` (allow)
+    - **deny**: outputs Claude's `hookSpecificOutput.permissionDecision="deny"` format (blocks execution)
+    - **escalate**: polls `GET /api/v1/audit/{call_id}` for judge or human resolution, then blocks with retry instructions if still unresolved
+    - Updates session statistics and sends periodic checkpoints
+4. **`PostToolUse`** (after tool execution): Records tool results when session recording is enabled.
+5. **`SubagentStart`** (when a sub-agent spawns): Creates a child Intaris session linked to the parent via `parent_session_id`.
+6. **`SubagentStop`** (when a sub-agent finishes): Signals child session completion and sends a sub-agent summary.
+7. **`Stop`** (when Claude finishes responding):
+     - Transitions the parent session to `idle`: `PATCH /api/v1/session/{id}/status`
+     - Sends agent summary: `POST /api/v1/session/{id}/agent-summary` with session statistics
+     - Completes any leftover child sessions and sends their summaries
+     - Stores the last assistant response for the next `UserPromptSubmit` hook
+8. **`StopFailure`** (on API errors): Saves the assistant's last response to the state file so intention context is preserved even after errors.
+9. **`SessionEnd`** (when the session terminates): Cleans up the temp state file.
 
 ### MCP Proxy Flow
 
@@ -171,6 +177,7 @@ When `INTARIS_SESSION_RECORDING=true`, the hooks record tool calls and results t
 
 ### What's Recorded
 
+- **`UserPromptSubmit`**: `message` events with user prompt text
 - **`PreToolUse`**: `tool_call` events with tool name, arguments, and evaluation decision
 - **`PostToolUse`**: `tool_result` events with tool output and error status
 - **`Stop`**: Full Claude Code transcript (JSONL) as `transcript` events
@@ -187,6 +194,7 @@ Built-in cross-project read defaults for the hooks are always present: `/tmp/*`,
 
 The hooks support Intaris's behavioral analysis pipeline:
 
+- **User message forwarding**: Every user prompt is forwarded to `POST /api/v1/reasoning` with the assistant's last response as context. This enables the IntentionBarrier to track what the user is asking Claude Code to do.
 - **Periodic checkpoints**: Every `INTARIS_CHECKPOINT_INTERVAL` evaluate calls, sends a checkpoint with call counts, decision breakdown, and recent tool names
 - **Session completion**: The `Stop` hook signals completion and sends an agent summary with session statistics
 - **Session state tracking**: State persisted as JSON in `/tmp/intaris_state_*.json` files
@@ -225,11 +233,13 @@ The hooks use JSON state files (`/tmp/intaris_state_*.json`) to track session st
   "denied": 3,
   "escalated": 1,
   "recent_tools": ["Bash", "Edit", "Read"],
-  "cwd": "/path/to/project"
+  "cwd": "/path/to/project",
+  "last_assistant_text": "I updated the integration scripts...",
+  "subagents": {}
 }
 ```
 
-State files are created by `SessionStart` and cleaned up by `Stop`. They accumulate if Claude Code exits abnormally:
+State files are created by `SessionStart` and cleaned up by `SessionEnd`. They accumulate if Claude Code exits abnormally:
 
 ```bash
 # Manual cleanup
@@ -246,4 +256,4 @@ rm /tmp/intaris_state_*
 - **Double evaluation**: Both hooks and MCP proxy configured. Use only one approach.
 - **`jq` not found**: Install it: `brew install jq` (macOS) or `apt install jq` (Linux).
 - **Checkpoints not appearing**: Verify `INTARIS_CHECKPOINT_INTERVAL` is not `0`. Check rate limit budget.
-- **Stop hook not firing**: If Claude Code crashes, the `Stop` hook may not fire. The server's background sweep transitions idle sessions after `SESSION_IDLE_TIMEOUT_MINUTES`.
+- **Stop or SessionEnd hook not firing**: If Claude Code crashes, either hook may not fire. The server's background sweep transitions idle sessions after `SESSION_IDLE_TIMEOUT_MINUTES`.

@@ -95,7 +95,7 @@ When `mcpTools` is enabled (default), the plugin registers a tool factory that:
 
 The plugin supports Intaris's behavioral analysis pipeline:
 
-- **Intention tracking**: User messages are forwarded as reasoning context. When session recording is enabled, the plugin uses `from_events=true` on `/reasoning` to avoid duplicate data transmission — Intaris resolves the user message and assistant context from the event store. The `intention_pending` flag coordinates with the IntentionBarrier so the server waits for reasoning before evaluating.
+- **Intention tracking**: User messages are forwarded as reasoning context. When session recording is enabled, the plugin uses `from_events=true` on `/reasoning` to avoid duplicate data transmission — Intaris resolves the user message and assistant context from the event store. Intaris now tracks recent user-message arrival server-side, so evaluation waits for the barrier without requiring client-managed state. The legacy `intention_pending` flag remains as backward-compatible redundancy.
 - **Periodic checkpoints**: Every `checkpointInterval` evaluate calls, sends a checkpoint with call counts, decision breakdown, and recent tool names.
 - **Session completion**: On session end, sends completion status and agent summary with session statistics.
 - **Hierarchical sessions**: Sub-agent sessions are created with `parent_session_id` and depth tracking for chain analysis.

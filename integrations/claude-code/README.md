@@ -79,6 +79,7 @@ cp integrations/claude-code/scripts/intaris-subagent.sh ~/.claude/scripts/intari
 cp integrations/claude-code/scripts/intaris-subagent-stop.sh ~/.claude/scripts/intaris-subagent-stop.sh
 cp integrations/claude-code/scripts/intaris-stop.sh ~/.claude/scripts/intaris-stop.sh
 cp integrations/claude-code/scripts/intaris-stop-failure.sh ~/.claude/scripts/intaris-stop-failure.sh
+cp integrations/claude-code/scripts/intaris-session-end.sh ~/.claude/scripts/intaris-session-end.sh
 chmod +x ~/.claude/scripts/intaris-*.sh
 
 # Copy hooks config
@@ -86,7 +87,7 @@ cp integrations/claude-code/hooks.json ~/.claude/settings.json
 # Or merge with existing settings.json if you have other hooks
 ```
 
-If you already have a `~/.claude/settings.json`, merge the `hooks` section from `hooks.json` into it. The hooks section includes `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`, and `StopFailure` hooks.
+If you already have a `~/.claude/settings.json`, merge the `hooks` section from `hooks.json` into it. The hooks section includes `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`, `Stop`, `StopFailure`, and `SessionEnd` hooks.
 
 ### 3. Verify
 
@@ -114,7 +115,7 @@ Look for `[intaris]` messages in stderr:
 If upgrading from the previous 4-script integration:
 
 1. Copy the new `intaris-lib.sh` shared library (required by all scripts)
-2. Copy the 4 new scripts (`intaris-prompt.sh`, `intaris-subagent.sh`, `intaris-subagent-stop.sh`, `intaris-stop-failure.sh`)
+2. Copy the 5 new scripts (`intaris-prompt.sh`, `intaris-subagent.sh`, `intaris-subagent-stop.sh`, `intaris-stop-failure.sh`, `intaris-session-end.sh`)
 3. Replace the 4 existing scripts (they have been rewritten)
 4. Update `hooks.json` / `settings.json` with the new hook entries
 5. Existing state files are backward-compatible -- the evaluate script handles both old and new formats
@@ -161,10 +162,11 @@ Configure upstream MCP servers in Intaris (via the UI, REST API, or `MCP_CONFIG_
 5. **`SubagentStart`** (when a sub-agent spawns): Creates a child Intaris session linked to the parent via `parent_session_id`. Enables hierarchical session tracking and AlignmentBarrier enforcement.
 6. **`SubagentStop`** (when a sub-agent finishes): Signals child session completion and sends an agent summary with sub-agent statistics.
 7. **`Stop`** (when Claude finishes responding):
-   - Stores the assistant's last response for intention context
-   - On genuine final stop: transitions the parent session to `idle`, completes child sessions, uploads transcript, cleans up
-   - On intermediate stop (Claude continuing): stores assistant text only
+    - Stores the assistant's last response for intention context
+    - On genuine final stop: transitions the parent session to `idle`, completes child sessions, uploads transcript
+    - On intermediate stop (Claude continuing): stores assistant text only
 8. **`StopFailure`** (on API errors): Saves the assistant's last response to the state file so intention context is preserved even after errors.
+9. **`SessionEnd`** (when the session terminates): Cleans up the temp state file.
 
 ### MCP Proxy Flow
 
@@ -272,7 +274,7 @@ The hooks use JSON state files to track session state across hook invocations. S
 }
 ```
 
-State files are created by `SessionStart` and cleaned up by `Stop`. Sub-agent state files follow the pattern `intaris_state_{session_id}_{agent_id}.json`.
+State files are created by `SessionStart` and cleaned up by `SessionEnd`. Sub-agent state files follow the pattern `intaris_state_{session_id}_{agent_id}.json`.
 
 ### Concurrency
 
@@ -291,7 +293,7 @@ The evaluate hook supports backward compatibility with legacy state files (plain
 ## Architecture
 
 ```
-hooks.json                    Hook configuration (8 hooks)
+hooks.json                    Hook configuration (9 hooks)
 scripts/
   intaris-lib.sh              Shared library (logging, locking, headers, validation)
   intaris-session.sh          SessionStart handler (creates/re-activates session)
@@ -302,6 +304,7 @@ scripts/
   intaris-subagent-stop.sh    SubagentStop handler (child session completion)
   intaris-stop.sh             Stop handler (assistant text + session completion)
   intaris-stop-failure.sh     StopFailure handler (save assistant text on errors)
+  intaris-session-end.sh      SessionEnd handler (local state cleanup)
 ```
 
 ## Troubleshooting
@@ -314,7 +317,7 @@ scripts/
 - **Double evaluation**: If you see each tool call evaluated twice, you may have both hooks and MCP proxy configured. Use only one approach.
 - **`jq` not found**: The scripts require `jq` for JSON processing. Install it: `brew install jq` (macOS) or `apt install jq` (Linux). All hooks exit gracefully if `jq` is not available.
 - **Checkpoints not appearing**: Verify `INTARIS_CHECKPOINT_INTERVAL` is not set to `0`. Check that the rate limit is not exhausted (checkpoints share the budget with evaluate calls).
-- **Stop hook not firing**: If Claude Code crashes or is killed, the `Stop` hook may not fire. The `StopFailure` hook handles API errors. The server's background sweep handles abnormal exits by transitioning idle sessions after `SESSION_IDLE_TIMEOUT_MINUTES`.
+- **Stop or SessionEnd hook not firing**: If Claude Code crashes or is killed, either hook may not fire. The `StopFailure` hook handles API errors. The server's background sweep handles abnormal exits by transitioning idle sessions after `SESSION_IDLE_TIMEOUT_MINUTES`.
 - **Escalation timeout**: If escalations always time out, check that the judge is configured (`JUDGE_MODE`) or that you can access the Intaris UI to approve/deny. The default 55s timeout can be adjusted via `INTARIS_ESCALATION_TIMEOUT`.
 - **Sub-agent tool calls using wrong session**: If the first sub-agent tool call evaluates against the parent session, the `SubagentStart` hook may not have completed yet. The evaluate hook waits up to 2s for the child state file to appear.
 - **Stale lock files**: If hooks hang, check for stale lock files: `ls ${TMPDIR:-/tmp}/intaris_state_*.lock.d`. Locks older than 30s are automatically cleaned up.

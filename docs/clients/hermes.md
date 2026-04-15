@@ -98,7 +98,7 @@ When `INTARIS_MCP_TOOLS=true` (default), the plugin:
 
 The plugin supports Intaris's behavioral analysis pipeline:
 
-- **Intention tracking**: User messages are forwarded as reasoning context. The `intention_pending` flag coordinates with the IntentionBarrier so the server waits for reasoning before evaluating.
+- **Intention tracking**: User messages are forwarded as reasoning context. Intaris now tracks recent user-message arrival server-side, so evaluation waits for the IntentionBarrier without requiring client-managed state. The legacy `intention_pending` flag remains as backward-compatible redundancy.
 - **Periodic checkpoints**: Every `INTARIS_CHECKPOINT_INTERVAL` evaluate calls, sends a checkpoint with call counts, decision breakdown, and recent tool names.
 - **Session completion**: On session end, sends completion status and agent summary with session statistics.
 

@@ -103,7 +103,7 @@ Separate LLM configuration for L3 cross-session behavioral analysis. L3 detects 
 | Variable | Default | Description |
 |---|---|---|
 | `INTENTION_BARRIER_TIMEOUT_MS` | `1000` | Max time (ms) the evaluate endpoint waits for a pending intention update |
-| `INTENTION_BARRIER_POLL_TIMEOUT_MS` | `2000` | Max time (ms) the evaluate endpoint waits for `/reasoning` to arrive when `intention_pending=true` |
+| `INTENTION_BARRIER_POLL_TIMEOUT_MS` | `10000` | Max time (ms) the evaluate endpoint waits for `/reasoning` to arrive when `/evaluate` races ahead of the user-message trigger |
 | `ALIGNMENT_BARRIER_TIMEOUT_MS` | `15000` | Max time (ms) the evaluate endpoint waits for a pending alignment check |
 
 ## Webhook

@@ -68,9 +68,10 @@ build_headers
 
 # -- Record user message event FIRST (before the slow /reasoning call) -------
 # This ensures the event is recorded even if the hook times out during
-# the /reasoning POST. We capture the HTTP status to decide whether
-# from_events=true is safe — if the event POST failed, we fall back to
-# sending content directly in the reasoning request body.
+# the /reasoning POST. When recording is enabled, /reasoning with
+# from_events=true only works after the event store buffer is flushed.
+# If either append or flush fails, fall back to sending the content
+# directly in the reasoning request body.
 
 EVENT_RECORDED=false
 if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
@@ -86,7 +87,16 @@ if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
         "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" 2>/dev/null || echo "000")
 
     if [ "$EVENT_STATUS" = "200" ]; then
-        EVENT_RECORDED=true
+        FLUSH_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 \
+            -X POST \
+            "${HEADERS[@]}" \
+            "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events/flush" 2>/dev/null || echo "000")
+
+        if [ "$FLUSH_STATUS" = "200" ]; then
+            EVENT_RECORDED=true
+        else
+            log "Event flush failed (HTTP $FLUSH_STATUS), will send content directly"
+        fi
     else
         log "Event recording failed (HTTP $EVENT_STATUS), will send content directly"
     fi
@@ -97,11 +107,12 @@ fi
 log "Forwarding user message to /reasoning (session: $INTARIS_SESSION_ID)"
 
 # Build reasoning request body.
-# When event recording succeeded, the user message is already in the event
-# store. Use from_events=true so Intaris reads it back instead of
-# re-sending the content. If recording failed or is disabled, send the
-# content directly in the request body.
-if [ "$EVENT_RECORDED" = "true" ]; then
+# Only use from_events=true when the user message event is safely flushed
+# and we do not need local assistant context. If we still have
+# last_assistant_text, prefer the direct path so short follow-up prompts
+# keep their context even when the previous assistant message event never
+# made it to the event store.
+if [ "$EVENT_RECORDED" = "true" ] && [ -z "$LAST_ASSISTANT_TEXT" ]; then
     REASONING_BODY=$(jq -n \
         --arg sid "$INTARIS_SESSION_ID" \
         '{session_id: $sid, content: "", from_events: true}')
