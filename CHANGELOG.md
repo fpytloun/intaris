@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-04-15
+
+### Fixed
+
+- **Analysis scheduling** -- Keep L2/L3 queue state scoped by agent, preserve summary-attempt tracking, and prevent stale per-agent backlog from blocking the wrong analysis runs.
+- **PostgreSQL startup** -- Defer the new analysis task scope index until after migrations so existing PostgreSQL deployments upgrade cleanly.
+- **Server liveness** -- Isolate MCP session-manager restarts from the main app lifespan so background workers keep running through MCP transport failures.
+- **MCP connectivity** -- Remove cross-server connect head-of-line blocking while preserving task-affine transport cleanup so MCP tool refreshes and `/api/v1/mcp/call` requests no longer stall behind unrelated upstream reconnects.
+
+### Changed
+
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.4.4`.
+
 ## [0.4.3] - 2026-04-15
 
 ### Fixed
@@ -170,6 +183,7 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.4.4]: https://github.com/fpytloun/intaris/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/fpytloun/intaris/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/fpytloun/intaris/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/fpytloun/intaris/compare/v0.4.0...v0.4.1
