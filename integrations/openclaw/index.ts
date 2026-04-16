@@ -134,6 +134,7 @@ function createSessionState(): SessionState {
     isIdle: false,
     recordingBuffer: [],
     lastAssistantText: "",
+    toolCallAuditIds: new Map(),
   };
 }
 
@@ -882,6 +883,7 @@ const intarisPlugin = {
         data: {
           tool: event.toolName,
           args: event.params,
+          call_id: event.toolCallId,
           toolCallId: event.toolCallId,
           sessionKey,
         },
@@ -941,6 +943,9 @@ const intarisPlugin = {
 
       // Track decision statistics
       state.callCount++;
+      if (event.toolCallId && result.call_id) {
+        state.toolCallAuditIds?.set(event.toolCallId, result.call_id);
+      }
       if (result.decision === "approve") state.approvedCount++;
       else if (result.decision === "deny") state.deniedCount++;
       else if (result.decision === "escalate") state.escalatedCount++;
@@ -1106,6 +1111,9 @@ const intarisPlugin = {
                   blockReason: `[intaris] DENIED: ${reResult.reasoning || "Tool call denied after session reactivation"}`,
                 };
               }
+              if (event.toolCallId && reResult.call_id) {
+                state.toolCallAuditIds?.set(event.toolCallId, reResult.call_id);
+              }
               if (reResult.decision === "escalate") {
                 return await waitForEscalation(
                   reResult.call_id,
@@ -1164,13 +1172,25 @@ const intarisPlugin = {
         }
       }
 
+      const state = sessions.get(sessionKey);
+      const auditCallId = event.toolCallId
+        ? state?.toolCallAuditIds?.get(event.toolCallId) || event.toolCallId
+        : undefined;
+      if (event.toolCallId) {
+        state?.toolCallAuditIds?.delete(event.toolCallId);
+      }
+
       recordEvent(sessionKey, {
         type: "tool_result",
         data: {
           tool: event.toolName,
+          audit_call_id: auditCallId,
+          call_id: event.toolCallId,
           toolCallId: event.toolCallId,
           sessionKey,
           error: event.error,
+          is_error: Boolean(event.error),
+          isError: Boolean(event.error),
           durationMs: event.durationMs,
           ...(cfg.recordToolOutput && event.result
             ? { output: extractToolOutput(event.result) }

@@ -248,6 +248,7 @@ const IntarisAPI = {
     const qs = new URLSearchParams();
     if (params.after_seq) qs.set('after_seq', params.after_seq);
     if (params.limit) qs.set('limit', params.limit);
+    if (params.last_n) qs.set('last_n', params.last_n);
     if (params.type) qs.set('type', params.type);
     if (params.source) qs.set('source', params.source);
     if (params.exclude_source) qs.set('exclude_source', params.exclude_source);

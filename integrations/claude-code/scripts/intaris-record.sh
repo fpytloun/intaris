@@ -45,6 +45,7 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 TOOL_INPUT=$(echo "$INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
 TOOL_RESPONSE=$(echo "$INPUT" | jq -c '.tool_response // null' 2>/dev/null || echo 'null')
+CALL_ID=$(echo "$INPUT" | jq -r '.call_id // empty' 2>/dev/null || true)
 # Subagent context
 HOOK_AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
 
@@ -60,10 +61,12 @@ fi
 
 # Resolve Intaris session ID (child or parent)
 INTARIS_SESSION_ID=""
+SESSION_FILE=""
 
 if [ -n "$HOOK_AGENT_ID" ]; then
     CHILD_FILE=$(state_file_for_subagent "$SESSION_ID" "$HOOK_AGENT_ID")
     if [ -f "$CHILD_FILE" ]; then
+        SESSION_FILE="$CHILD_FILE"
         INTARIS_SESSION_ID=$(jq -r '.session_id // empty' "$CHILD_FILE" 2>/dev/null || true)
     fi
 fi
@@ -84,19 +87,29 @@ if [ -z "$INTARIS_SESSION_ID" ]; then
     exit 0
 fi
 
+if [ -z "$CALL_ID" ] && [ -f "$SESSION_FILE" ]; then
+    STATE_TOOL_NAME=$(jq -r '.last_tool_name // empty' "$SESSION_FILE" 2>/dev/null || true)
+    STATE_TOOL_INPUT=$(jq -c '.last_tool_input // {}' "$SESSION_FILE" 2>/dev/null || echo '{}')
+    if [ "$STATE_TOOL_NAME" = "$TOOL_NAME" ] && [ "$STATE_TOOL_INPUT" = "$TOOL_INPUT" ]; then
+        CALL_ID=$(jq -r '.last_call_id // empty' "$SESSION_FILE" 2>/dev/null || true)
+    fi
+fi
+
 build_headers
 
 # Build tool_result event
 EVENT_BODY=$(jq -n \
     --arg tool "$TOOL_NAME" \
+    --arg call_id "$CALL_ID" \
     --argjson args "$TOOL_INPUT" \
-    --argjson result "$TOOL_RESPONSE" \
+    --argjson output "$TOOL_RESPONSE" \
     '[{
         type: "tool_result",
         data: {
             tool: $tool,
+            call_id: $call_id,
             args: $args,
-            result: $result
+            output: $output
         }
     }]')
 

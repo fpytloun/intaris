@@ -135,6 +135,8 @@ export interface SessionState {
   evaluatedToolCalls?: Set<string>;
   /** Dedup: tool call IDs already recorded (prevents double recording from dual plugin instances). */
   recordedToolResults?: Set<string>;
+  /** Maps runtime tool call IDs to Intaris audit call IDs for output correlation. */
+  toolCallAuditIds?: Map<string, string>;
   /** Dedup: last assistant text recorded (prevents double recording from dual plugin instances). */
   lastRecordedAssistantText?: string;
   /** Parent Intaris session ID for sub-agent sessions. */

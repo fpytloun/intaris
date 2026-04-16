@@ -764,7 +764,12 @@
                           <!-- Redacted Args -->
                           <template x-if="expandedAuditRecord?.args_redacted">
                             <div class="mb-2">
-                              <div class="text-xs text-muted mb-1">Arguments (redacted)</div>
+                              <div class="flex items-center gap-2 mb-1">
+                                <div class="text-xs text-muted">Arguments (redacted)</div>
+                                <button x-show="expandedAuditRecord?.record_type === 'tool_call'"
+                                        @click.stop="$store.nav.openToolOutput(expandedAuditRecord)"
+                                        class="text-xs text-brand-accent hover:underline cursor-pointer">View output</button>
+                              </div>
                               <pre class="text-xs bg-brand-bg rounded p-2 overflow-x-auto" x-text="formatArgs(expandedAuditRecord.args_redacted)"></pre>
                             </div>
                           </template>
@@ -949,7 +954,12 @@
                 <!-- Redacted Args -->
                 <template x-if="expandedRecord?.args_redacted">
                   <div class="mb-3">
-                    <div class="text-xs text-muted mb-1">Arguments (redacted)</div>
+                    <div class="flex items-center gap-2 mb-1">
+                      <div class="text-xs text-muted">Arguments (redacted)</div>
+                      <button x-show="expandedRecord?.record_type === 'tool_call'"
+                              @click.stop="$store.nav.openToolOutput(expandedRecord)"
+                              class="text-xs text-brand-accent hover:underline cursor-pointer">View output</button>
+                    </div>
                     <pre class="text-xs bg-brand-elevated rounded p-3 overflow-x-auto" x-text="formatArgs(expandedRecord.args_redacted)"></pre>
                   </div>
                 </template>
@@ -1129,12 +1139,15 @@
               </template>
 
               <!-- Args (expandable) -->
-              <div x-show="item.args_redacted" class="mb-3">
-                <div class="flex items-center gap-2 mb-1">
-                  <div class="text-xs text-muted">Arguments</div>
-                  <button @click.stop="expandedArgs === item.call_id ? (expandedArgs = null) : (expandedArgs = item.call_id)"
-                          class="text-xs text-brand-accent hover:underline cursor-pointer"
-                          x-text="expandedArgs === item.call_id ? 'Collapse' : 'Expand'"></button>
+                <div x-show="item.args_redacted" class="mb-3">
+                  <div class="flex items-center gap-2 mb-1">
+                    <div class="text-xs text-muted">Arguments</div>
+                    <button x-show="item.record_type === 'tool_call'"
+                            @click.stop="$store.nav.openToolOutput(item)"
+                            class="text-xs text-brand-accent hover:underline cursor-pointer">View output</button>
+                    <button @click.stop="expandedArgs === item.call_id ? (expandedArgs = null) : (expandedArgs = item.call_id)"
+                            class="text-xs text-brand-accent hover:underline cursor-pointer"
+                            x-text="expandedArgs === item.call_id ? 'Collapse' : 'Expand'"></button>
                 </div>
                 <pre x-show="expandedArgs !== item.call_id"
                      class="text-xs bg-brand-elevated rounded p-2 overflow-x-auto cursor-pointer"
@@ -1210,6 +1223,9 @@
                   <div x-show="expandedDenialRecord?.args_redacted" class="mb-3">
                     <div class="flex items-center gap-2 mb-1">
                       <div class="text-xs text-muted">Arguments</div>
+                      <button x-show="expandedDenialRecord?.record_type === 'tool_call'"
+                              @click.stop="$store.nav.openToolOutput(expandedDenialRecord)"
+                              class="text-xs text-brand-accent hover:underline cursor-pointer">View output</button>
                       <button @click.stop="expandedDenialArgs === item.call_id ? (expandedDenialArgs = null) : (expandedDenialArgs = item.call_id)"
                               class="text-xs text-brand-accent hover:underline cursor-pointer"
                               x-text="expandedDenialArgs === item.call_id ? 'Collapse' : 'Expand'"></button>
@@ -1311,6 +1327,9 @@
                   <div x-show="expandedResolvedRecord?.args_redacted" class="mb-3">
                     <div class="flex items-center gap-2 mb-1">
                       <div class="text-xs text-muted">Arguments</div>
+                      <button x-show="expandedResolvedRecord?.record_type === 'tool_call'"
+                              @click.stop="$store.nav.openToolOutput(expandedResolvedRecord)"
+                              class="text-xs text-brand-accent hover:underline cursor-pointer">View output</button>
                       <button @click.stop="expandedResolvedArgs === item.call_id ? (expandedResolvedArgs = null) : (expandedResolvedArgs = item.call_id)"
                               class="text-xs text-brand-accent hover:underline cursor-pointer"
                               x-text="expandedResolvedArgs === item.call_id ? 'Collapse' : 'Expand'"></button>
@@ -2646,7 +2665,12 @@
                     </template>
                     <template x-if="$store.nav.sessionModalAuditRecord?.args_redacted">
                       <div class="mb-2">
-                        <div class="text-xs text-muted mb-1">Arguments (redacted)</div>
+                        <div class="flex items-center gap-2 mb-1">
+                          <div class="text-xs text-muted">Arguments (redacted)</div>
+                          <button x-show="$store.nav.sessionModalAuditRecord?.record_type === 'tool_call'"
+                                  @click.stop="$store.nav.openToolOutput($store.nav.sessionModalAuditRecord)"
+                                  class="text-xs text-brand-accent hover:underline cursor-pointer">View output</button>
+                        </div>
                         <pre class="text-xs bg-brand-bg rounded p-2 overflow-x-auto" x-text="typeof $store.nav.sessionModalAuditRecord.args_redacted === 'string' ? $store.nav.sessionModalAuditRecord.args_redacted : JSON.stringify($store.nav.sessionModalAuditRecord.args_redacted, null, 2)"></pre>
                       </div>
                     </template>
@@ -2714,6 +2738,59 @@
               </template>
             </div>
           </div>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- ── Tool Output Modal ──────────────────────────────────── -->
+  <div x-data x-show="$store.nav.toolOutputModalVisible" x-cloak
+       @keydown.escape.window="if ($store.nav.toolOutputModalVisible) $store.nav.closeToolOutput()"
+       class="modal-overlay" @click.self="$store.nav.closeToolOutput()">
+    <div class="modal-content max-w-5xl" @click.stop>
+      <div class="flex items-center justify-between mb-4 gap-4">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-lg font-semibold">Tool Output</span>
+            <span x-show="$store.nav.toolOutputModalRecord?.tool" class="font-mono text-sm text-brand-accent"
+                  x-text="$store.nav.toolOutputModalRecord?.tool"></span>
+            <span x-show="$store.nav.toolOutputModalData?.matchMode"
+                  class="text-xs text-muted"
+                  x-text="$store.nav.toolOutputMatchLabel($store.nav.toolOutputModalData?.matchMode)"></span>
+          </div>
+          <div class="text-xs text-muted mt-1 flex items-center gap-3 flex-wrap">
+            <span x-show="$store.nav.toolOutputModalRecord?.session_id">
+              Session: <span class="font-mono" x-text="$store.nav.toolOutputModalRecord?.session_id"></span>
+            </span>
+            <span x-show="$store.nav.toolOutputModalRecord?.call_id">
+              Call: <span class="font-mono" x-text="$store.nav.toolOutputModalRecord?.call_id"></span>
+            </span>
+          </div>
+        </div>
+        <button @click="$store.nav.closeToolOutput()" class="text-muted hover:text-[#E6EDF3] text-lg leading-none px-1">&times;</button>
+      </div>
+
+      <div x-show="$store.nav.toolOutputModalLoading" class="text-sm text-secondary py-8 text-center">Loading tool output...</div>
+
+      <template x-if="!$store.nav.toolOutputModalLoading && !$store.nav.toolOutputModalData?.found">
+        <div class="rounded border border-brand-border bg-brand-elevated p-4 text-sm text-muted"
+             x-text="$store.nav.toolOutputModalData?.reason || 'No recorded tool output'"></div>
+      </template>
+
+      <template x-if="!$store.nav.toolOutputModalLoading && $store.nav.toolOutputModalData?.found">
+        <div>
+          <div class="flex items-center gap-2 mb-2 text-xs text-muted flex-wrap">
+            <span :class="$store.nav.toolOutputModalData?.isError ? 'badge badge-deny' : 'badge badge-fast'"
+                  x-text="$store.nav.toolOutputModalData?.isError ? 'error' : 'output'"></span>
+            <span x-show="$store.nav.toolOutputModalData?.title" x-text="$store.nav.toolOutputModalData?.title"></span>
+          </div>
+          <pre class="console-code max-h-[70vh] overflow-auto" :class="$store.nav.toolOutputModalData?.isError ? 'console-code-error' : ''"><code x-html="$store.nav.toolOutputModalData?.outputHtml || ''"></code></pre>
+          <template x-if="$store.nav.toolOutputModalData?.metadata">
+            <div class="mt-3">
+              <div class="text-xs text-muted mb-1">Metadata</div>
+              <pre class="text-xs bg-brand-elevated rounded p-3 overflow-x-auto" x-text="JSON.stringify($store.nav.toolOutputModalData?.metadata, null, 2)"></pre>
+            </div>
+          </template>
         </div>
       </template>
     </div>

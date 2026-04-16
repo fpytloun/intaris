@@ -141,6 +141,7 @@ class SessionState:
     is_idle: bool = False
     recording_buffer: list[dict[str, Any]] = field(default_factory=list)
     last_assistant_text: str = ""
+    pending_tool_results: list[dict[str, str]] = field(default_factory=list)
     # Lock for session creation dedup
     _creating: bool = False
 
@@ -172,6 +173,31 @@ def _get_or_create_state(task_id: str) -> SessionState:
                 for k in keys:
                     _sessions.pop(k, None)
         return state
+
+
+def _args_fingerprint(args: dict[str, Any] | None) -> str:
+    """Return a stable string fingerprint for a tool args payload."""
+    try:
+        return json.dumps(
+            args or {}, sort_keys=True, separators=(",", ":"), default=str
+        )
+    except Exception:
+        return repr(args or {})
+
+
+def _queue_pending_tool_result(
+    state: SessionState, tool_name: str, args: dict[str, Any] | None, call_id: str
+) -> None:
+    """Remember the audit call id for the next executed post_tool_call hook."""
+    if not call_id:
+        return
+    state.pending_tool_results.append(
+        {
+            "tool": tool_name,
+            "args": _args_fingerprint(args),
+            "call_id": str(call_id),
+        }
+    )
 
 
 # ============================================================================
@@ -677,6 +703,12 @@ def _make_guarded_handler(
                         state.intaris_session_id, tool_name, args
                     )
                     if re_result.data and re_result.data.get("decision") == "approve":
+                        _queue_pending_tool_result(
+                            state,
+                            tool_name,
+                            args,
+                            str(re_result.data.get("call_id") or ""),
+                        )
                         return original_handler(args, **kwargs)
                     if re_result.data and re_result.data.get("decision") == "escalate":
                         re_call_id = str(re_result.data.get("call_id") or "")
@@ -687,6 +719,9 @@ def _make_guarded_handler(
                         )
                         poll_result = _poll_escalation(re_call_id, tool_name)
                         if poll_result == "approve":
+                            _queue_pending_tool_result(
+                                state, tool_name, args, re_call_id
+                            )
                             return original_handler(args, **kwargs)
                         if poll_result == "deny":
                             return json.dumps(
@@ -750,6 +785,7 @@ def _make_guarded_handler(
             )
             poll_result = _poll_escalation(call_id, tool_name)
             if poll_result == "approve":
+                _queue_pending_tool_result(state, tool_name, args, call_id)
                 return original_handler(args, **kwargs)
             if poll_result == "deny":
                 return json.dumps(
@@ -767,6 +803,7 @@ def _make_guarded_handler(
             )
 
         # -- APPROVE -----------------------------------------------------------
+        _queue_pending_tool_result(state, tool_name, args, call_id)
         return original_handler(args, **kwargs)
 
     return guarded_handler
@@ -1002,7 +1039,18 @@ def _on_pre_tool_call(
         task_id,
         {
             "type": "tool_call",
-            "data": {"tool": tool_name, "args": args or {}, "session_key": task_id},
+            "data": {
+                "tool": tool_name,
+                "args": args or {},
+                "call_id": str(
+                    kwargs.get("call_id")
+                    or kwargs.get("tool_call_id")
+                    or kwargs.get("toolCallId")
+                    or ""
+                )
+                or None,
+                "session_key": task_id,
+            },
         },
     )
 
@@ -1010,18 +1058,52 @@ def _on_pre_tool_call(
 def _on_post_tool_call(
     tool_name: str = "",
     args: dict | None = None,
-    result: str = "",
+    result: Any = "",
     task_id: str = "",
     **kwargs: Any,
 ) -> None:
     """post_tool_call: Record tool result."""
     if not task_id:
         return
+    state = _sessions.get(task_id)
+    args_key = _args_fingerprint(args)
+    mapped_call_id: str | None = None
+    if state:
+        # Oldest-match first keeps correlation stable for repeated identical calls.
+        for i, candidate in enumerate(state.pending_tool_results):
+            if candidate.get("tool") == tool_name and candidate.get("args") == args_key:
+                mapped_call_id = candidate.get("call_id")
+                del state.pending_tool_results[i]
+                break
     _record_event(
         task_id,
         {
             "type": "tool_result",
-            "data": {"tool": tool_name, "session_key": task_id},
+            "data": {
+                "tool": tool_name,
+                "args": args or {},
+                "call_id": mapped_call_id
+                or str(
+                    kwargs.get("call_id")
+                    or kwargs.get("tool_call_id")
+                    or kwargs.get("toolCallId")
+                    or ""
+                )
+                or None,
+                "output": result,
+                "is_error": bool(
+                    kwargs.get("is_error")
+                    or kwargs.get("isError")
+                    or kwargs.get("error")
+                ),
+                "isError": bool(
+                    kwargs.get("is_error")
+                    or kwargs.get("isError")
+                    or kwargs.get("error")
+                ),
+                "error": kwargs.get("error"),
+                "session_key": task_id,
+            },
         },
     )
 

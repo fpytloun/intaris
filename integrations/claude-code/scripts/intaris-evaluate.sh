@@ -297,7 +297,10 @@ if [ -f "$SESSION_FILE" ]; then
         --argjson dn "$DENIED" \
         --argjson es "$ESCALATED" \
         --argjson rt "$RECENT_TOOLS" \
-        '.call_count = $cc | .approved = $ap | .denied = $dn | .escalated = $es | .recent_tools = $rt' \
+        --arg tool "$TOOL_NAME" \
+        --argjson tool_input "$TOOL_INPUT" \
+        --arg call_id "$CALL_ID" \
+        '.call_count = $cc | .approved = $ap | .denied = $dn | .escalated = $es | .recent_tools = $rt | .last_tool_name = $tool | .last_tool_input = $tool_input | .last_call_id = $call_id' \
         "$SESSION_FILE" 2>/dev/null)
     if [ -n "$UPDATED_STATE" ]; then
         write_state "$SESSION_FILE" "$UPDATED_STATE"
@@ -311,8 +314,11 @@ else
         --argjson dn "$DENIED" \
         --argjson es "$ESCALATED" \
         --argjson rt "$RECENT_TOOLS" \
+        --arg tool "$TOOL_NAME" \
+        --argjson tool_input "$TOOL_INPUT" \
+        --arg call_id "$CALL_ID" \
         --arg cwd "$CWD" \
-        '{session_id: $sid, call_count: $cc, approved: $ap, denied: $dn, escalated: $es, recent_tools: $rt, cwd: $cwd, last_assistant_text: "", subagents: {}}')"
+        '{session_id: $sid, call_count: $cc, approved: $ap, denied: $dn, escalated: $es, recent_tools: $rt, cwd: $cwd, last_assistant_text: "", last_tool_name: $tool, last_tool_input: $tool_input, last_call_id: $call_id, subagents: {}}')"
 fi
 release_lock "$SESSION_FILE"
 
@@ -380,6 +386,23 @@ check_timing_budget() {
     return 0
 }
 
+persist_last_recorded_call() {
+    local persisted_call_id="$1"
+    acquire_lock "$SESSION_FILE" || true
+    if [ -f "$SESSION_FILE" ]; then
+        UPDATED_STATE=$(jq \
+            --arg tool "$TOOL_NAME" \
+            --argjson tool_input "$TOOL_INPUT" \
+            --arg call_id "$persisted_call_id" \
+            '.last_tool_name = $tool | .last_tool_input = $tool_input | .last_call_id = $call_id' \
+            "$SESSION_FILE" 2>/dev/null)
+        if [ -n "$UPDATED_STATE" ]; then
+            write_state "$SESSION_FILE" "$UPDATED_STATE"
+        fi
+    fi
+    release_lock "$SESSION_FILE"
+}
+
 handle_reactivation_decision() {
     local re_decision="$1"
     local re_reasoning="$2"
@@ -388,11 +411,17 @@ handle_reactivation_decision() {
     local re_status_reason="$5"
 
     if [ "$re_decision" = "approve" ]; then
+        if [ -n "$re_call_id" ]; then
+            persist_last_recorded_call "$re_call_id"
+        fi
         allow_tool
         exit 0
     fi
 
     if [ "$re_decision" = "escalate" ]; then
+        if [ -n "$re_call_id" ]; then
+            persist_last_recorded_call "$re_call_id"
+        fi
         handle_escalation "$re_call_id" "$re_reasoning"
     fi
 

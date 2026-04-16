@@ -98,6 +98,184 @@ function riskTooltip(name) {
   return RISK_TOOLTIPS[name] || '';
 }
 
+function escapeTextHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function formatToolOutputText(output) {
+  if (output == null) return '';
+  if (typeof output === 'string') return output;
+  try {
+    return JSON.stringify(output, null, 2);
+  } catch (_) {
+    return String(output);
+  }
+}
+
+function stableJson(value) {
+  function sortValue(input) {
+    if (Array.isArray(input)) return input.map(sortValue);
+    if (!input || typeof input !== 'object') return input;
+    return Object.keys(input).sort().reduce((acc, key) => {
+      acc[key] = sortValue(input[key]);
+      return acc;
+    }, {});
+  }
+  try {
+    return JSON.stringify(sortValue(value));
+  } catch (_) {
+    return '';
+  }
+}
+
+function renderToolOutputHtml(output) {
+  const text = formatToolOutputText(output);
+  if (!text) return '';
+  if (typeof highlightCode === 'function') {
+    try {
+      return highlightCode(text);
+    } catch (_) {}
+  }
+  return escapeTextHtml(text);
+}
+
+function shiftIsoTimestamp(ts, deltaMs) {
+  const base = Date.parse(ts || '');
+  if (Number.isNaN(base)) return '';
+  return new Date(base + deltaMs).toISOString();
+}
+
+function normalizeToolResultEvent(event) {
+  const data = event?.data || {};
+  const errorValue = data.error;
+  const output = data.output !== undefined
+    ? data.output
+    : data.result !== undefined
+      ? data.result
+      : errorValue !== undefined
+        ? errorValue
+        : null;
+  return {
+    event,
+    tsMs: Date.parse(event?.ts || ''),
+    tool: data.tool || data.name || '',
+    callId: data.audit_call_id || data.call_id || data.callID || data.toolCallId || null,
+    argsFingerprint: stableJson(data.args || {}),
+    output,
+    isError: Boolean(
+      data.is_error ?? data.isError ?? (errorValue !== undefined && errorValue !== null && errorValue !== '')
+    ),
+    title: data.title || '',
+    metadata: data.metadata || null,
+  };
+}
+
+function findToolResultMatch(record, events) {
+  const normalized = (events || []).map(normalizeToolResultEvent);
+  const recordCallId = record?.call_id || null;
+  const recordTool = record?.tool || '';
+  const recordTsMs = Date.parse(record?.timestamp || '');
+  const recordArgsFingerprint = stableJson(record?.args_redacted || {});
+  let exactMatchAttempted = false;
+
+  if (recordCallId) {
+    exactMatchAttempted = true;
+    const exact = normalized.find((item) => item.callId === recordCallId);
+    if (exact) return { ...exact, matchMode: 'call_id' };
+  }
+
+  if (!recordTool) return null;
+
+  const sameTool = normalized.filter((item) => item.tool === recordTool);
+  const fingerprintMatches = recordArgsFingerprint
+    ? sameTool.filter((item) => item.argsFingerprint === recordArgsFingerprint)
+    : [];
+  if (record?.args_redacted && !fingerprintMatches.length && sameTool.length !== 1) {
+    return null;
+  }
+  const fallbackPool = fingerprintMatches.length ? fingerprintMatches : sameTool;
+
+  const fallbackCandidates = fallbackPool
+    .sort((a, b) => {
+      const aDelta = Number.isNaN(recordTsMs) || Number.isNaN(a.tsMs)
+        ? Number.MAX_SAFE_INTEGER
+        : Math.abs(a.tsMs - recordTsMs);
+      const bDelta = Number.isNaN(recordTsMs) || Number.isNaN(b.tsMs)
+        ? Number.MAX_SAFE_INTEGER
+        : Math.abs(b.tsMs - recordTsMs);
+      return aDelta - bDelta;
+    });
+
+  if (!fallbackCandidates.length) return null;
+  if (!fingerprintMatches.length && sameTool.length !== 1) return null;
+  if (exactMatchAttempted && !fingerprintMatches.length && sameTool.length !== 1) return null;
+
+  const best = fallbackCandidates[0];
+  const maxDeltaMs = 15 * 60 * 1000;
+  if (!Number.isNaN(recordTsMs) && !Number.isNaN(best.tsMs) && Math.abs(best.tsMs - recordTsMs) > maxDeltaMs) {
+    return null;
+  }
+  return { ...best, matchMode: 'fallback' };
+}
+
+async function resolveToolOutput(record) {
+  if (!record?.session_id || record?.record_type !== 'tool_call') {
+    return {
+      found: false,
+      reason: 'No tool output is available for this record.',
+    };
+  }
+
+  const requestSets = [];
+  if (record.timestamp) {
+    requestSets.push({
+      type: 'tool_result',
+      limit: 200,
+      after_ts: shiftIsoTimestamp(record.timestamp, -5 * 60 * 1000),
+      before_ts: shiftIsoTimestamp(record.timestamp, 30 * 60 * 1000),
+    });
+  }
+  requestSets.push({ type: 'tool_result', last_n: 200 });
+
+  let unavailableReason = '';
+  for (const params of requestSets) {
+    try {
+      const response = await IntarisAPI.getSessionEvents(record.session_id, params);
+      const match = findToolResultMatch(record, response?.events || []);
+      if (!match) continue;
+      return {
+        found: true,
+        matchMode: match.matchMode,
+        title: match.title || '',
+        metadata: match.metadata,
+        isError: match.isError,
+        output: formatToolOutputText(match.output),
+        outputHtml: renderToolOutputHtml(match.output),
+      };
+    } catch (e) {
+      const message = e?.message || String(e);
+      if (message.includes('Event store is not enabled')) {
+        unavailableReason = 'Session recording is not enabled on this Intaris instance.';
+        break;
+      }
+      if (message.includes('Session') && message.includes('not found')) {
+        unavailableReason = 'Session recording is not available for this session.';
+        break;
+      }
+      unavailableReason = 'Failed to load tool output from the session recording.';
+    }
+  }
+
+  return {
+    found: false,
+    reason: unavailableReason || 'No recorded tool output could be matched for this tool call.',
+  };
+}
+
 // ── Task progress polling helper ─────────────────────────────────────
 
 /**
@@ -345,6 +523,11 @@ document.addEventListener('alpine:init', () => {
     sessionModalAuditRecord: null,
     sessionModalResolving: {},
     sessionModalNoteText: {},
+    toolOutputModalVisible: false,
+    toolOutputModalLoading: false,
+    toolOutputModalRecord: null,
+    toolOutputModalData: null,
+    toolOutputModalRequestId: 0,
 
     setTab(tab) {
       this.activeTab = tab;
@@ -428,6 +611,43 @@ document.addEventListener('alpine:init', () => {
       this.sessionModalLoading = false;
       this.sessionModalAuditExpandedId = null;
       this.sessionModalAuditRecord = null;
+    },
+
+    async openToolOutput(record) {
+      const requestId = this.toolOutputModalRequestId + 1;
+      this.toolOutputModalRequestId = requestId;
+      this.toolOutputModalVisible = true;
+      this.toolOutputModalLoading = true;
+      this.toolOutputModalRecord = record || null;
+      this.toolOutputModalData = null;
+      try {
+        const data = await resolveToolOutput(record);
+        if (this.toolOutputModalRequestId !== requestId) return;
+        this.toolOutputModalData = data;
+      } catch (e) {
+        if (this.toolOutputModalRequestId !== requestId) return;
+        this.toolOutputModalData = {
+          found: false,
+          reason: e?.message || String(e),
+        };
+      } finally {
+        if (this.toolOutputModalRequestId !== requestId) return;
+        this.toolOutputModalLoading = false;
+      }
+    },
+
+    closeToolOutput() {
+      this.toolOutputModalRequestId += 1;
+      this.toolOutputModalVisible = false;
+      this.toolOutputModalLoading = false;
+      this.toolOutputModalRecord = null;
+      this.toolOutputModalData = null;
+    },
+
+    toolOutputMatchLabel(mode) {
+      if (mode === 'call_id') return 'matched by call id';
+      if (mode === 'fallback') return 'best-effort match';
+      return '';
     },
 
     async toggleModalAuditExpand(record) {

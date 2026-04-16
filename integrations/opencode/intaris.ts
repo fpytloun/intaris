@@ -67,6 +67,7 @@ interface SessionState {
   reasoningSentForMessageId: string | null
   // Recording buffer
   recordingBuffer: RecordingEvent[]
+  toolCallAuditIds: Map<string, string>
 }
 
 interface EvaluateResponse {
@@ -382,6 +383,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         pendingUserText: "",
         reasoningSentForMessageId: null,
         recordingBuffer: [],
+        toolCallAuditIds: new Map(),
       }
       sessions.set(sessionId, state)
       // Evict oldest entries if over limit
@@ -1218,6 +1220,7 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
         data: {
           tool,
           args: _output.args || {},
+          call_id: input.callID,
           callID: input.callID,
           sessionID,
         },
@@ -1272,6 +1275,9 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
 
       // Track decision statistics
       state.callCount++
+      if (input.callID && result.call_id) {
+        state.toolCallAuditIds.set(input.callID, result.call_id)
+      }
       if (result.decision === "approve") state.approvedCount++
       else if (result.decision === "deny") state.deniedCount++
       else if (result.decision === "escalate") state.escalatedCount++
@@ -1403,6 +1409,9 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
               if (reResult.decision === "deny") {
                 throw new Error(`[intaris] DENIED: ${reResult.reasoning || "Tool call denied after session reactivation"}`)
               }
+              if (input.callID && reResult.call_id) {
+                state.toolCallAuditIds.set(input.callID, reResult.call_id)
+              }
               if (reResult.decision === "escalate") {
                 await waitForEscalationResolution(
                   tool,
@@ -1466,13 +1475,20 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
     ) => {
       if (!input.sessionID) return
 
+      const state = sessions.get(input.sessionID)
+      const auditCallId = state?.toolCallAuditIds.get(input.callID) || input.callID
+      state?.toolCallAuditIds.delete(input.callID)
+
       recordEvent(input.sessionID, {
         type: "tool_result",
         data: {
           tool: input.tool,
+          audit_call_id: auditCallId,
+          call_id: input.callID,
           callID: input.callID,
           sessionID: input.sessionID,
           output: output.output,
+          is_error: output.isError || false,
           isError: output.isError || false,
           title: output.title,
           metadata: output.metadata,
