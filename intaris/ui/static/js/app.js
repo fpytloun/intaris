@@ -163,7 +163,13 @@ function normalizeToolResultEvent(event) {
     event,
     tsMs: Date.parse(event?.ts || ''),
     tool: data.tool || data.name || '',
-    callId: data.audit_call_id || data.call_id || data.callID || data.toolCallId || null,
+    callId:
+      data.audit_call_id ||
+      data.evaluation?.call_id ||
+      data.call_id ||
+      data.callID ||
+      data.toolCallId ||
+      null,
     argsFingerprint: stableJson(data.args || {}),
     output,
     isError: Boolean(
