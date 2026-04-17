@@ -2858,7 +2858,10 @@
             <template x-if="block.type === 'user-message'">
               <div class="console-user-msg">
                 <div class="flex items-center justify-between">
-                  <div class="console-role-label">User</div>
+                  <div class="min-w-0">
+                    <div class="console-role-label">User</div>
+                    <div class="text-[11px] text-muted" x-show="block.meta" x-text="block.meta"></div>
+                  </div>
                   <span class="console-ts" x-text="formatTime(block.ts)"></span>
                 </div>
                 <div class="console-user-text" x-text="block.text"></div>
@@ -2868,8 +2871,50 @@
             <!-- Assistant text (markdown) -->
             <template x-if="block.type === 'assistant-text'">
               <div class="console-assistant-text">
-                <div class="flex justify-end mb-1"><span class="console-ts" x-text="formatTime(block.ts)"></span></div>
+                <div class="flex items-center justify-between mb-1 gap-3">
+                  <div class="text-[11px] text-muted min-w-0" x-show="block.meta" x-text="block.meta"></div>
+                  <span class="console-ts" x-text="formatTime(block.ts)"></span>
+                </div>
                 <div x-html="block.html"></div>
+              </div>
+            </template>
+
+            <template x-if="block.type === 'system-message'">
+              <div class="console-user-msg" style="border-color: rgba(245, 158, 11, 0.7)">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="console-role-label" style="color: rgba(251, 191, 36, 0.95)">System</div>
+                    <div class="text-[11px] text-muted" x-show="block.meta" x-text="block.meta"></div>
+                  </div>
+                  <span class="console-ts" x-text="formatTime(block.ts)"></span>
+                </div>
+                <div class="console-assistant-text mt-2" x-html="block.html"></div>
+              </div>
+            </template>
+
+            <template x-if="block.type === 'developer-message'">
+              <div class="console-user-msg" style="border-color: rgba(168, 85, 247, 0.65)">
+                <div class="flex items-center justify-between gap-3">
+                  <div class="min-w-0">
+                    <div class="console-role-label" style="color: rgba(192, 132, 252, 0.95)">Developer</div>
+                    <div class="text-[11px] text-muted" x-show="block.meta" x-text="block.meta"></div>
+                  </div>
+                  <span class="console-ts" x-text="formatTime(block.ts)"></span>
+                </div>
+                <div class="console-assistant-text mt-2" x-html="block.html"></div>
+              </div>
+            </template>
+
+            <template x-if="block.type === 'context-snapshot'">
+              <div class="console-lifecycle flex items-center justify-center gap-2">
+                <span>
+                  <span>Context snapshot</span>
+                  <span x-text="'[' + block.snapshotSource + ']'" class="text-brand-accent/70"></span>
+                  <span x-text="'· ' + block.entryCount + ' entries'"></span>
+                  <span x-show="block.turnId" x-text="'· ' + block.turnId"></span>
+                  <span x-show="block.summary" x-text="'· ' + block.summary"></span>
+                </span>
+                <span class="console-ts" x-text="formatTime(block.ts)"></span>
               </div>
             </template>
 
@@ -3008,6 +3053,14 @@
             </template>
           </select>
 
+          <input x-model="dataSourceFilter" @change="applyFilter()"
+                 class="input text-xs py-1 px-2 w-44"
+                 placeholder="Payload source">
+
+          <input x-model="turnIdFilter" @change="applyFilter()"
+                 class="input text-xs py-1 px-2 w-40"
+                 placeholder="Turn ID">
+
           <!-- Live tail toggle -->
           <button @click.stop="toggleLiveTail()"
                   :class="liveTail ? 'btn-success' : 'btn-secondary'"
@@ -3068,6 +3121,8 @@
                 <span class="truncate text-secondary" x-text="eventSummary(event)"></span>
               </div>
               <div class="flex items-center gap-2 flex-shrink-0 ml-2">
+                <span class="text-brand-accent/70" x-show="payloadSource(event)" x-text="payloadSource(event)"></span>
+                <span class="text-brand-accent/50 font-mono whitespace-nowrap" x-show="payloadMeta(event)" x-text="payloadMeta(event)"></span>
                 <span class="text-muted" x-text="event.source || ''"></span>
                 <span class="text-brand-accent/60 font-mono whitespace-nowrap" x-show="eventDuration(idx)" x-text="eventDuration(idx)"></span>
                 <span class="text-muted whitespace-nowrap" x-text="formatTime(event.ts)"></span>

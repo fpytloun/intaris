@@ -373,6 +373,16 @@ Or a single event:
 }
 ```
 
+Canonical types include `message`, `system_message`, `developer_message`,
+`user_message`, `assistant_message`, `context_snapshot`, `tool_call`,
+`tool_result`, `evaluation`, `delegation`, `compaction_summary`, `part`,
+`lifecycle`, `checkpoint`, `reasoning`, and `transcript`.
+
+For Cognis LLM-exposure auditing, `system_message`, `developer_message`,
+`user_message`, and `assistant_message` carry metadata like `role`, `content`,
+`content_type`, `source`, `turn_id`, `position`, and `hash` inside `data`.
+`context_snapshot` stores `entries`, `extras`, and `captured_at` inside `data`.
+
 **Response:**
 
 ```json
@@ -396,6 +406,12 @@ Read events with pagination and filtering.
 | `limit` | `0` | Max events to return (`0` = all) |
 | `last_n` | `0` | Return the last N matching events in chronological order |
 | `type` | (all) | Filter by event type |
+| `source` | (all) | Filter by writer source (`X-Intaris-Source`) |
+| `exclude_source` | (none) | Exclude writer sources |
+| `data_source` | (all) | Filter by payload `data.source` (for example `memory_instructions`) |
+| `turn_id` | (all) | Filter by payload `data.turn_id` |
+| `min_position` | (none) | Filter by payload `data.position >= min_position` |
+| `max_position` | (none) | Filter by payload `data.position <= max_position` |
 | `after_ts` | (none) | Return events after this ISO 8601 timestamp |
 | `before_ts` | (none) | Return events before this ISO 8601 timestamp |
 

@@ -167,10 +167,14 @@ The UI maintains a WebSocket connection to `/api/v1/stream` for real-time update
 The Sessions tab includes a session recording player in the session detail expansion:
 
 - Scrollable event list with type badges and expandable JSON details
-- Event type filtering
+- Event type, writer source, payload source, and turn-id filtering
 - Live tailing via WebSocket
 - Play/pause mode with configurable speed (0.5x-10x)
 - Pagination (load more on demand)
+
+The Console view renders message-like events inline, including Cognis
+`system_message` and `developer_message` records, and shows
+`context_snapshot` anchors as structural markers in the conversation stream.
 
 ## Rebuilding CSS
 

@@ -68,11 +68,68 @@ function detectSource(events) {
   const hasParts = events.some(e => e.type === 'part');
   const hasTranscripts = events.some(e => e.type === 'transcript');
   const sources = new Set(events.map(e => e.source).filter(Boolean));
+  const hasCognisMessages = events.some(e => ['system_message', 'developer_message', 'context_snapshot'].includes(e.type));
+  const hasCognisMetadata = events.some(e => ['user_message', 'assistant_message'].includes(e.type) && (e.data?.turn_id || e.data?.source));
 
   if (hasParts || sources.has('opencode')) return 'opencode';
   if (hasTranscripts || sources.has('claude-code')) return 'claude-code';
   if (sources.has('openclaw')) return 'openclaw';
+  if (hasCognisMessages || hasCognisMetadata || [...sources].some(s => typeof s === 'string' && s.startsWith('cognis'))) return 'cognis';
   return null;
+}
+
+function formatMessageMeta(data) {
+  const parts = [];
+  if (data?.source) parts.push(data.source);
+  if (data?.turn_id) {
+    let turn = data.turn_id;
+    if (Number.isInteger(data.position)) turn += '#' + data.position;
+    parts.push(turn);
+  }
+  return parts.join(' · ');
+}
+
+function normalizeMessageContent(rawContent) {
+  if (rawContent == null) return '';
+  if (typeof rawContent === 'string') return rawContent;
+  try {
+    return JSON.stringify(rawContent, null, 2);
+  } catch (_) {
+    return String(rawContent);
+  }
+}
+
+function buildRoleMessageBlock(blockType, label, data, ts, id, seq) {
+  const content = normalizeMessageContent(data?.content ?? data?.text ?? '');
+  if (!content || !content.trim()) return null;
+  return {
+    type: blockType,
+    id,
+    seq,
+    text: content,
+    html: renderMarkdown(content),
+    label,
+    meta: formatMessageMeta(data),
+    ts,
+  };
+}
+
+function buildContextSnapshotBlock(data, ts, id, seq) {
+  const entries = Array.isArray(data?.entries) ? data.entries : [];
+  const firstEntries = entries
+    .slice(0, 3)
+    .map(entry => [entry?.role, entry?.source, entry?.seq].filter(v => v !== undefined && v !== null && v !== '').join(':'))
+    .filter(Boolean);
+  return {
+    type: 'context-snapshot',
+    id,
+    seq,
+    snapshotSource: data?.source || 'unknown',
+    entryCount: entries.length,
+    turnId: data?.turn_id || '',
+    summary: firstEntries.join(' · '),
+    ts: data?.captured_at || ts,
+  };
 }
 
 // ── Tool helpers ─────────────────────────────────────────────────
@@ -250,13 +307,32 @@ function processOpenCode(events) {
     }
 
     if (event.type === 'user_message') {
-      if (!data.content || !data.content.trim()) continue;
+      const content = normalizeMessageContent(data.content);
+      if (!content || !content.trim()) continue;
       blocks.push({
         type: 'user-message',
         id: 'b' + (blockId++),
-        text: data.content,
+        text: content,
+        meta: formatMessageMeta(data),
         ts: event.ts,
       });
+      continue;
+    }
+
+    if (event.type === 'system_message') {
+      const block = buildRoleMessageBlock('system-message', 'System', data, event.ts, 'b' + (blockId++), event.seq);
+      if (block) blocks.push(block);
+      continue;
+    }
+
+    if (event.type === 'developer_message') {
+      const block = buildRoleMessageBlock('developer-message', 'Developer', data, event.ts, 'b' + (blockId++), event.seq);
+      if (block) blocks.push(block);
+      continue;
+    }
+
+    if (event.type === 'context_snapshot') {
+      blocks.push(buildContextSnapshotBlock(data, event.ts, 'b' + (blockId++), event.seq));
       continue;
     }
 
@@ -269,12 +345,14 @@ function processOpenCode(events) {
       if (event.source === 'opencode') {
         continue;
       }
-      if (data.text && data.text.trim()) {
+      const content = normalizeMessageContent(data.text);
+      if (content && content.trim()) {
         blocks.push({
           type: 'assistant-text',
           id: 'b' + (blockId++),
-          text: data.text,
-          html: renderMarkdown(data.text),
+          text: content,
+          html: renderMarkdown(content),
+          meta: formatMessageMeta(data),
           ts: event.ts,
         });
       }
@@ -282,12 +360,14 @@ function processOpenCode(events) {
     }
 
     if (event.type === 'assistant_message') {
-      if (!data.content || !data.content.trim()) continue;
+      const content = normalizeMessageContent(data.content);
+      if (!content || !content.trim()) continue;
       blocks.push({
         type: 'assistant-text',
         id: 'b' + (blockId++),
-        text: data.content,
-        html: renderMarkdown(data.content),
+        text: content,
+        html: renderMarkdown(content),
+        meta: formatMessageMeta(data),
         ts: event.ts,
       });
       continue;
@@ -576,6 +656,7 @@ function processClaudeCode(events) {
             blocks.push({
               type: 'user-message',
               id: 'b' + (blockId++),
+              seq: event.seq,
               text: block.text,
               ts: event.ts,
             });
@@ -586,6 +667,7 @@ function processClaudeCode(events) {
         blocks.push({
           type: 'user-message',
           id: 'b' + (blockId++),
+          seq: event.seq,
           text: content,
           ts: event.ts,
         });
@@ -602,6 +684,7 @@ function processClaudeCode(events) {
             blocks.push({
               type: 'assistant-text',
               id: 'b' + (blockId++),
+              seq: event.seq,
               text: block.text,
               html: renderMarkdown(block.text),
               ts: event.ts,
@@ -613,6 +696,7 @@ function processClaudeCode(events) {
             blocks.push({
               type: 'reasoning',
               id: 'b' + (blockId++),
+              seq: event.seq,
               text: block.thinking,
               ts: event.ts,
             });
@@ -642,6 +726,7 @@ function processClaudeCode(events) {
             blocks.push({
               type: 'tool-group',
               id: 'b' + (blockId++),
+              seq: event.seq,
               tool: toolName,
               subtitle: toolSubtitle(toolName, args),
               args: args,
@@ -666,6 +751,7 @@ function processClaudeCode(events) {
         blocks.push({
           type: 'assistant-meta',
           id: 'b' + (blockId++),
+          seq: event.seq,
           model: msg.model || '',
           tokens: {
             input: usage.input_tokens || 0,
@@ -691,19 +777,71 @@ function processClaudeCode(events) {
 
   // Process any lifecycle events from non-transcript events
   for (const event of otherEvents) {
+    const data = event.data || {};
+
+    if (event.type === 'user_message') {
+      const content = normalizeMessageContent(data.content);
+      if (!content || !content.trim()) continue;
+      blocks.push({
+        type: 'user-message',
+        id: 'b' + (blockId++),
+        seq: event.seq,
+        text: content,
+        meta: formatMessageMeta(data),
+        ts: event.ts,
+      });
+      continue;
+    }
+
+    if (event.type === 'assistant_message') {
+      const content = normalizeMessageContent(data.content);
+      if (!content || !content.trim()) continue;
+      blocks.push({
+        type: 'assistant-text',
+        id: 'b' + (blockId++),
+        seq: event.seq,
+        text: content,
+        html: renderMarkdown(content),
+        meta: formatMessageMeta(data),
+        ts: event.ts,
+      });
+      continue;
+    }
+
+    if (event.type === 'system_message') {
+      const block = buildRoleMessageBlock('system-message', 'System', data, event.ts, 'b' + (blockId++), event.seq);
+      if (block) blocks.push(block);
+      continue;
+    }
+
+    if (event.type === 'developer_message') {
+      const block = buildRoleMessageBlock('developer-message', 'Developer', data, event.ts, 'b' + (blockId++), event.seq);
+      if (block) blocks.push(block);
+      continue;
+    }
+
+    if (event.type === 'context_snapshot') {
+      blocks.push(buildContextSnapshotBlock(data, event.ts, 'b' + (blockId++), event.seq));
+      continue;
+    }
+
     if (event.type === 'lifecycle') {
       blocks.push({
         type: 'lifecycle',
         id: 'b' + (blockId++),
-        event: event.data?.event || '',
-        status: event.data?.status || '',
+        seq: event.seq,
+        event: data.event || '',
+        status: data.status || '',
         ts: event.ts,
       });
     }
   }
 
-  // Sort blocks by timestamp (transcript events may interleave with lifecycle)
+  // Sort by event sequence to preserve the recorded stream order.
   blocks.sort((a, b) => {
+    const seqA = Number.isInteger(a.seq) ? a.seq : Number.MAX_SAFE_INTEGER;
+    const seqB = Number.isInteger(b.seq) ? b.seq : Number.MAX_SAFE_INTEGER;
+    if (seqA !== seqB) return seqA - seqB;
     if (a.ts && b.ts) return new Date(a.ts) - new Date(b.ts);
     return 0;
   });
@@ -1024,6 +1162,7 @@ function consolePlayer() {
       if (this.source === 'opencode') return 'OpenCode';
       if (this.source === 'openclaw') return 'OpenClaw';
       if (this.source === 'claude-code') return 'Claude Code';
+      if (this.source === 'cognis') return 'Cognis';
       return 'Unknown';
     },
   };

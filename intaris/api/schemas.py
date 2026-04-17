@@ -502,15 +502,19 @@ class SessionEvent(BaseModel):
     type: str = Field(
         ...,
         description=(
-            "Canonical event type: message, user_message, assistant_message, "
-            "tool_call, tool_result, evaluation, delegation, "
-            "compaction_summary, part, lifecycle, checkpoint, reasoning, "
-            "transcript"
+            "Canonical event type: message, system_message, developer_message, "
+            "user_message, assistant_message, context_snapshot, tool_call, "
+            "tool_result, evaluation, delegation, compaction_summary, part, "
+            "lifecycle, checkpoint, reasoning, transcript"
         ),
     )
     data: dict[str, Any] = Field(
         default_factory=dict,
-        description="Event payload (client-native for reconstruction)",
+        description=(
+            "Event payload (client-native for reconstruction). Cognis message "
+            "events store role/content/content_type/source/turn_id/position/hash "
+            "inside this object; context_snapshot stores entries/extras/captured_at."
+        ),
         json_schema_extra={"maxProperties": 200},
     )
 

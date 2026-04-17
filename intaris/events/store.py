@@ -31,8 +31,11 @@ logger = logging.getLogger(__name__)
 VALID_EVENT_TYPES = frozenset(
     {
         "message",
+        "system_message",
+        "developer_message",
         "user_message",
         "assistant_message",
+        "context_snapshot",
         "tool_call",
         "tool_result",
         "evaluation",
@@ -185,6 +188,10 @@ class EventStore:
         event_types: set[str] | None = None,
         sources: set[str] | None = None,
         exclude_sources: set[str] | None = None,
+        data_sources: set[str] | None = None,
+        turn_id: str | None = None,
+        min_position: int | None = None,
+        max_position: int | None = None,
         after_ts: str | None = None,
         before_ts: str | None = None,
     ) -> list[dict]:
@@ -200,6 +207,13 @@ class EventStore:
             sources: Include only events from these sources. None = all.
             exclude_sources: Exclude events from these sources. None = no
                 exclusion. Applied after ``sources`` include filter.
+            data_sources: Include only events whose payload ``data.source`` is in
+                this set. None = all payload sources.
+            turn_id: Include only events whose payload ``data.turn_id`` matches.
+            min_position: Include only events whose payload ``data.position`` is
+                >= this value.
+            max_position: Include only events whose payload ``data.position`` is
+                <= this value.
             after_ts: Return events with ts >= this ISO 8601 timestamp.
             before_ts: Return events with ts <= this ISO 8601 timestamp.
 
@@ -247,6 +261,25 @@ class EventStore:
         if exclude_sources:
             events = [e for e in events if e.get("source") not in exclude_sources]
 
+        # Filter by payload metadata (Cognis LLM-exposure audit fields)
+        if (
+            data_sources
+            or turn_id is not None
+            or min_position is not None
+            or max_position is not None
+        ):
+            events = [
+                e
+                for e in events
+                if self._event_matches_payload_filters(
+                    e,
+                    data_sources=data_sources,
+                    turn_id=turn_id,
+                    min_position=min_position,
+                    max_position=max_position,
+                )
+            ]
+
         # Apply limit
         if limit:
             events = events[:limit]
@@ -261,6 +294,10 @@ class EventStore:
         event_types: set[str] | None = None,
         sources: set[str] | None = None,
         exclude_sources: set[str] | None = None,
+        data_sources: set[str] | None = None,
+        turn_id: str | None = None,
+        min_position: int | None = None,
+        max_position: int | None = None,
         after_ts: str | None = None,
         before_ts: str | None = None,
     ) -> list[dict]:
@@ -272,6 +309,92 @@ class EventStore:
         """
         if limit <= 0:
             return []
+
+        # Payload-level filters require inspecting all candidate events because
+        # the backend only filters on top-level fields.
+        if (
+            data_sources
+            or turn_id is not None
+            or min_position is not None
+            or max_position is not None
+        ):
+            with self._lock:
+                key = (user_id, session_id)
+                buffer_events = list(self._buffers.get(key, []))
+
+            filtered_buffer = [
+                event
+                for event in buffer_events
+                if self._event_matches_filters(
+                    event,
+                    event_types=event_types,
+                    sources=sources,
+                    exclude_sources=exclude_sources,
+                    after_ts=after_ts,
+                    before_ts=before_ts,
+                )
+                and self._event_matches_payload_filters(
+                    event,
+                    data_sources=data_sources,
+                    turn_id=turn_id,
+                    min_position=min_position,
+                    max_position=max_position,
+                )
+            ]
+            filtered_buffer.sort(key=lambda e: e.get("seq", 0))
+            if len(filtered_buffer) >= limit:
+                return filtered_buffer[-limit:]
+
+            max_persisted_seq = self._backend.last_seq(user_id, session_id)
+            fetch_limit = max(limit, limit + len(buffer_events))
+            previous_persisted_count = -1
+
+            while max_persisted_seq > 0 and fetch_limit > 0:
+                persisted_events = self._backend.read_tail(
+                    user_id,
+                    session_id,
+                    limit=min(fetch_limit, max_persisted_seq),
+                    event_types=event_types,
+                    sources=sources,
+                    exclude_sources=exclude_sources,
+                    after_ts=after_ts,
+                    before_ts=before_ts,
+                )
+                persisted_matches = [
+                    event
+                    for event in persisted_events
+                    if self._event_matches_payload_filters(
+                        event,
+                        data_sources=data_sources,
+                        turn_id=turn_id,
+                        min_position=min_position,
+                        max_position=max_position,
+                    )
+                ]
+                combined = persisted_matches + filtered_buffer
+                combined.sort(key=lambda e: e.get("seq", 0))
+
+                seen: set[int] = set()
+                deduped: list[dict] = []
+                for event in combined:
+                    seq = event.get("seq", 0)
+                    if seq not in seen:
+                        seen.add(seq)
+                        deduped.append(event)
+
+                if len(deduped) >= limit:
+                    return deduped[-limit:]
+                if len(persisted_events) < min(fetch_limit, max_persisted_seq):
+                    return deduped[-limit:]
+                if len(persisted_events) == previous_persisted_count:
+                    return deduped[-limit:]
+                if fetch_limit >= max_persisted_seq:
+                    return deduped[-limit:]
+
+                previous_persisted_count = len(persisted_events)
+                fetch_limit = min(fetch_limit * 2, max_persisted_seq)
+
+            return filtered_buffer[-limit:]
 
         with self._lock:
             key = (user_id, session_id)
@@ -396,6 +519,39 @@ class EventStore:
         if sources and event.get("source") not in sources:
             return False
         if exclude_sources and event.get("source") in exclude_sources:
+            return False
+        return True
+
+    @staticmethod
+    def _event_matches_payload_filters(
+        event: dict,
+        *,
+        data_sources: set[str] | None = None,
+        turn_id: str | None = None,
+        min_position: int | None = None,
+        max_position: int | None = None,
+    ) -> bool:
+        """Return True when payload metadata matches the requested filters."""
+        data = event.get("data")
+        if not isinstance(data, dict):
+            return False
+
+        payload_source = data.get("source")
+        if data_sources and payload_source not in data_sources:
+            return False
+
+        if turn_id is not None and data.get("turn_id") != turn_id:
+            return False
+
+        if min_position is None and max_position is None:
+            return True
+
+        position = data.get("position")
+        if not isinstance(position, int) or isinstance(position, bool):
+            return False
+        if min_position is not None and position < min_position:
+            return False
+        if max_position is not None and position > max_position:
             return False
         return True
 

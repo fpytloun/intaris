@@ -40,6 +40,8 @@ function sessionPlayer() {
     // Filtering
     typeFilter: '__all__',
     sourceFilter: '__all__',
+    dataSourceFilter: '',
+    turnIdFilter: '',
 
     // Time range filter
     afterTs: '',
@@ -78,6 +80,8 @@ function sessionPlayer() {
       this.expandedSeq = null;
       this.visible = true;
       this.autoScroll = true;
+      this.dataSourceFilter = '';
+      this.turnIdFilter = '';
       this.afterTs = opts.afterTs ? this._toLocalDatetime(opts.afterTs) : '';
       this.beforeTs = opts.beforeTs ? this._toLocalDatetime(opts.beforeTs) : '';
       // Force "All sources" when opened with time range (e.g., from summary card)
@@ -120,6 +124,8 @@ function sessionPlayer() {
         } else if (this.sourceFilter !== '__all__') {
           params.source = this.sourceFilter;
         }
+        if (this.dataSourceFilter.trim()) params.data_source = this.dataSourceFilter.trim();
+        if (this.turnIdFilter.trim()) params.turn_id = this.turnIdFilter.trim();
         if (this.afterTs) params.after_ts = this._toISOString(this.afterTs);
         if (this.beforeTs) params.before_ts = this._toISOString(this.beforeTs);
 
@@ -240,6 +246,8 @@ function sessionPlayer() {
               } else if (this.sourceFilter !== '__all__') {
                 if (event.source !== this.sourceFilter) return;
               }
+              if (this.dataSourceFilter.trim() && (event.data?.source || '') !== this.dataSourceFilter.trim()) return;
+              if (this.turnIdFilter.trim() && (event.data?.turn_id || '') !== this.turnIdFilter.trim()) return;
               this.events.push(event);
               if (event.seq > this.lastSeq) this.lastSeq = event.seq;
               if (this.autoScroll) this.scrollToBottom();
@@ -367,8 +375,11 @@ function sessionPlayer() {
     eventTypeBadge(type) {
       const classes = {
         message: 'badge-approve',
+        system_message: 'badge-medium',
+        developer_message: 'badge-low',
         user_message: 'badge-approve',
         assistant_message: 'badge-low',
+        context_snapshot: 'badge-high',
         tool_call: 'badge-escalate',
         tool_result: 'badge-fast',
         evaluation: 'badge-deny',
@@ -385,6 +396,10 @@ function sessionPlayer() {
 
     eventSummary(event) {
       const data = event.data || {};
+      const roleSource = data.source ? ` [${data.source}]` : '';
+      const turnMeta = data.turn_id
+        ? ` · ${data.turn_id}${Number.isInteger(data.position) ? `#${data.position}` : ''}`
+        : '';
       switch (event.type) {
         case 'tool_call':
           return data.tool || data.name || 'tool call';
@@ -402,9 +417,15 @@ function sessionPlayer() {
           if (data.role === 'user') return 'User: ' + (data.text || '');
           return (data.role || 'message') + (data.model ? ` [${data.model}]` : '');
         case 'user_message':
-          return 'User: ' + (data.content || '');
+          return 'User' + roleSource + turnMeta + ': ' + (data.content || '');
         case 'assistant_message':
-          return 'Assistant: ' + (data.content || '');
+          return 'Assistant' + roleSource + turnMeta + ': ' + (data.content || '');
+        case 'system_message':
+          return 'System' + roleSource + turnMeta + ': ' + (data.content || '');
+        case 'developer_message':
+          return 'Developer' + roleSource + turnMeta + ': ' + (data.content || '');
+        case 'context_snapshot':
+          return `Snapshot [${data.source || 'unknown'}]${turnMeta} · ${(data.entries || []).length} entries`;
         case 'part':
           return (data.part?.type || 'part') + (data.part?.text ? ': ' + data.part.text : '');
         case 'delegation':
@@ -428,6 +449,18 @@ function sessionPlayer() {
 
     eventDetail(event) {
       return JSON.stringify(event.data || {}, null, 2);
+    },
+
+    payloadSource(event) {
+      return event?.data?.source || '';
+    },
+
+    payloadMeta(event) {
+      const turnId = event?.data?.turn_id;
+      const position = event?.data?.position;
+      if (!turnId) return '';
+      if (Number.isInteger(position)) return `${turnId}#${position}`;
+      return turnId;
     },
 
     formatTime(ts) {
@@ -463,14 +496,28 @@ function sessionPlayer() {
 
     get filteredTypes() {
       return [
-        '__all__', 'message', 'user_message', 'assistant_message', 'tool_call',
+        '__all__', 'message', 'system_message', 'developer_message',
+        'user_message', 'assistant_message', 'context_snapshot', 'tool_call',
         'tool_result', 'evaluation', 'delegation', 'compaction_summary',
         'part', 'lifecycle', 'checkpoint', 'reasoning', 'transcript',
       ];
     },
 
     get filteredSources() {
-      return ['__agent__', '__all__', 'intaris'];
+      const values = ['__agent__', '__all__', 'intaris'];
+      for (const event of this.events) {
+        if (!event?.source || values.includes(event.source)) continue;
+        values.push(event.source);
+      }
+      if (
+        this.sourceFilter !== '__agent__' &&
+        this.sourceFilter !== '__all__' &&
+        this.sourceFilter &&
+        !values.includes(this.sourceFilter)
+      ) {
+        values.push(this.sourceFilter);
+      }
+      return values;
     },
 
     sourceLabel(s) {

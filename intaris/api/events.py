@@ -302,6 +302,27 @@ async def read_events(
         None,
         description="Comma-separated source exclude filter (e.g., 'intaris')",
     ),
+    data_source: str | None = Query(
+        None,
+        description=(
+            "Comma-separated payload source filter on event.data.source "
+            "(e.g., 'memory_instructions,environment_info')"
+        ),
+    ),
+    turn_id: str | None = Query(
+        None,
+        description="Return events with event.data.turn_id matching this value",
+    ),
+    min_position: int | None = Query(
+        None,
+        ge=0,
+        description="Return events with event.data.position >= this value",
+    ),
+    max_position: int | None = Query(
+        None,
+        ge=0,
+        description="Return events with event.data.position <= this value",
+    ),
     after_ts: str | None = Query(
         None,
         description="Return events with ts >= this ISO 8601 timestamp",
@@ -323,6 +344,15 @@ async def read_events(
         raise HTTPException(
             status_code=400,
             detail="last_n and limit are mutually exclusive",
+        )
+    if (
+        min_position is not None
+        and max_position is not None
+        and min_position > max_position
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="min_position must be <= max_position",
         )
 
     # Parse type filter
@@ -346,6 +376,9 @@ async def read_events(
     event_exclude_sources: set[str] | None = None
     if exclude_source:
         event_exclude_sources = set(exclude_source.split(","))
+    event_data_sources: set[str] | None = None
+    if data_source:
+        event_data_sources = set(data_source.split(","))
 
     # Validate session exists
     _validate_session_exists(request, ctx.user_id, session_id)
@@ -360,6 +393,10 @@ async def read_events(
                 event_types=event_types,
                 sources=event_sources,
                 exclude_sources=event_exclude_sources,
+                data_sources=event_data_sources,
+                turn_id=turn_id,
+                min_position=min_position,
+                max_position=max_position,
                 after_ts=after_ts,
                 before_ts=before_ts,
             )
@@ -374,6 +411,10 @@ async def read_events(
                 event_types=event_types,
                 sources=event_sources,
                 exclude_sources=event_exclude_sources,
+                data_sources=event_data_sources,
+                turn_id=turn_id,
+                min_position=min_position,
+                max_position=max_position,
                 after_ts=after_ts,
                 before_ts=before_ts,
             )

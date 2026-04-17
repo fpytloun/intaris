@@ -490,6 +490,74 @@ class TestSessionEvents:
         assert events.status_code == 200
         assert len(events.json()["events"]) == 1
 
+    def test_read_events_with_turn_and_payload_filters(self, client_no_auth):
+        headers = {
+            "X-User-Id": "events-user-5",
+            "X-Agent-Id": "agent-1",
+            "X-Intaris-Source": "cognis",
+        }
+        _create_session(client_no_auth, "sess-events-turn-filter", headers)
+
+        resp = client_no_auth.post(
+            "/api/v1/session/sess-events-turn-filter/events",
+            json=[
+                {
+                    "type": "system_message",
+                    "data": {
+                        "role": "system",
+                        "content": "identity",
+                        "source": "identity",
+                        "turn_id": "turn-1",
+                        "position": 0,
+                    },
+                },
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "role": "developer",
+                        "content": "memory search",
+                        "source": "memory_search",
+                        "turn_id": "turn-1",
+                        "position": 1,
+                    },
+                },
+                {
+                    "type": "assistant_message",
+                    "data": {
+                        "content": "reply",
+                        "source": "assistant_reply",
+                        "turn_id": "turn-2",
+                        "position": 0,
+                    },
+                },
+            ],
+            headers=headers,
+        )
+        assert resp.status_code == 200
+
+        filtered = client_no_auth.get(
+            "/api/v1/session/sess-events-turn-filter/events"
+            "?type=developer_message&data_source=memory_search&turn_id=turn-1"
+            "&min_position=1&max_position=1",
+            headers=headers,
+        )
+        assert filtered.status_code == 200
+        payload = filtered.json()
+        assert [event["type"] for event in payload["events"]] == ["developer_message"]
+        assert payload["events"][0]["source"] == "cognis"
+        assert payload["events"][0]["data"]["source"] == "memory_search"
+
+    def test_read_events_rejects_invalid_position_range(self, client_no_auth):
+        headers = {"X-User-Id": "events-user-6", "X-Agent-Id": "agent-1"}
+        _create_session(client_no_auth, "sess-events-position-range", headers)
+
+        resp = client_no_auth.get(
+            "/api/v1/session/sess-events-position-range/events?min_position=3&max_position=1",
+            headers=headers,
+        )
+        assert resp.status_code == 400
+        assert "min_position must be <= max_position" in resp.json()["detail"]
+
     def test_get_session_not_found(self, client_no_auth):
         headers = {"X-User-Id": "user1"}
         resp = client_no_auth.get("/api/v1/session/nonexistent", headers=headers)

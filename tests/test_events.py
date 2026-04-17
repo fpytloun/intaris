@@ -556,6 +556,171 @@ class TestEventStore:
         events = store.read("alice", "sess1", event_types={"message", "evaluation"})
         assert len(events) == 2
 
+    def test_read_with_payload_source_filter(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "type": "system_message",
+                    "data": {"source": "identity", "turn_id": "turn-1", "position": 0},
+                },
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-1",
+                        "position": 1,
+                    },
+                },
+                {
+                    "type": "context_snapshot",
+                    "data": {"source": "bootstrap", "entries": []},
+                },
+            ],
+            source="cognis",
+        )
+
+        events = store.read("alice", "sess1", data_sources={"memory_search"})
+        assert [event["type"] for event in events] == ["developer_message"]
+        assert events[0]["data"]["source"] == "memory_search"
+
+    def test_read_with_turn_and_position_filters(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "type": "system_message",
+                    "data": {"source": "identity", "turn_id": "turn-1", "position": 0},
+                },
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-1",
+                        "position": 2,
+                    },
+                },
+                {
+                    "type": "assistant_message",
+                    "data": {"content": "hi", "turn_id": "turn-2", "position": 0},
+                },
+            ],
+            source="cognis",
+        )
+
+        events = store.read(
+            "alice",
+            "sess1",
+            turn_id="turn-1",
+            min_position=1,
+            max_position=3,
+        )
+        assert [event["type"] for event in events] == ["developer_message"]
+
+    def test_read_tail_with_payload_filters(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "type": "system_message",
+                    "data": {"source": "identity", "turn_id": "turn-1", "position": 0},
+                },
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-1",
+                        "position": 1,
+                    },
+                },
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-2",
+                        "position": 0,
+                    },
+                },
+            ],
+            source="cognis",
+        )
+
+        events = store.read_tail(
+            "alice",
+            "sess1",
+            limit=1,
+            data_sources={"memory_search"},
+            turn_id="turn-2",
+        )
+        assert [event["seq"] for event in events] == [3]
+
+    def test_read_tail_with_payload_filters_across_persisted_and_buffer(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "type": "system_message",
+                    "data": {"source": "identity", "turn_id": "turn-0", "position": 0},
+                },
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-1",
+                        "position": 0,
+                    },
+                },
+                {
+                    "type": "assistant_message",
+                    "data": {"content": "hello", "turn_id": "turn-1", "position": 1},
+                },
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-2",
+                        "position": 0,
+                    },
+                },
+                {
+                    "type": "context_snapshot",
+                    "data": {"source": "bootstrap", "entries": []},
+                },
+            ],
+            source="cognis",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-3",
+                        "position": 0,
+                    },
+                },
+                {
+                    "type": "assistant_message",
+                    "data": {"content": "done", "turn_id": "turn-3", "position": 1},
+                },
+            ],
+            source="cognis",
+        )
+
+        events = store.read_tail(
+            "alice",
+            "sess1",
+            limit=2,
+            data_sources={"memory_search"},
+        )
+        assert [event["seq"] for event in events] == [4, 6]
+
     def test_auto_flush_on_threshold(self, store):
         """Buffer is flushed when flush_size is reached."""
         # flush_size=5, append 5 events to trigger flush
@@ -1025,8 +1190,11 @@ class TestValidEventTypes:
     def test_expected_types(self):
         expected = {
             "message",
+            "system_message",
+            "developer_message",
             "user_message",
             "assistant_message",
+            "context_snapshot",
             "tool_call",
             "tool_result",
             "evaluation",

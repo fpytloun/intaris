@@ -802,7 +802,15 @@ Each ndjson line:
 
 ### Canonical event types
 
-`message`, `tool_call`, `tool_result`, `evaluation`, `part`, `lifecycle`, `checkpoint`, `reasoning`, `transcript`
+`message`, `system_message`, `developer_message`, `user_message`, `assistant_message`, `context_snapshot`, `tool_call`, `tool_result`, `evaluation`, `part`, `delegation`, `compaction_summary`, `lifecycle`, `checkpoint`, `reasoning`, `transcript`
+
+For Cognis LLM-exposure auditing, message events keep the client-native payload in
+`data`, including fields such as `role`, `content`, `content_type`,
+payload-level `source`, `turn_id`, `position`, and `hash`. `context_snapshot`
+anchors immutable prefix state via `data.entries`, `data.extras`, and
+`data.captured_at`. This payload-level `data.source` is distinct from the
+top-level event `source` field, which still comes from the `X-Intaris-Source`
+header and identifies the writer (`cognis`, `opencode`, `intaris`, etc.).
 
 ### Storage
 
@@ -815,6 +823,11 @@ Chunked ndjson files, one chunk per flush. Filename encodes seq range: `{user_id
 | `/api/v1/session/{id}/events` | POST | Append events (single or batch) |
 | `/api/v1/session/{id}/events` | GET | Read events with pagination and filtering |
 | `/api/v1/session/{id}/events/flush` | POST | Force flush buffered events |
+
+`GET /api/v1/session/{id}/events` supports both writer-source filtering
+(`source`, `exclude_source`) and payload-level filters (`data_source`,
+`turn_id`, `min_position`, `max_position`) so Cognis turns can be reconstructed
+from the event stream without a separate index.
 
 ### Auto-append
 

@@ -242,7 +242,9 @@ const IntarisAPI = {
   /**
    * Read events from a session's event log.
    * @param {string} sessionId
-   * @param {Object} params - { after_seq, limit, type }
+   * @param {Object} params - { after_seq, limit, last_n, type, source,
+   *   exclude_source, data_source, turn_id, min_position, max_position,
+   *   after_ts, before_ts }
    */
   getSessionEvents(sessionId, params = {}) {
     const qs = new URLSearchParams();
@@ -252,6 +254,10 @@ const IntarisAPI = {
     if (params.type) qs.set('type', params.type);
     if (params.source) qs.set('source', params.source);
     if (params.exclude_source) qs.set('exclude_source', params.exclude_source);
+    if (params.data_source) qs.set('data_source', params.data_source);
+    if (params.turn_id) qs.set('turn_id', params.turn_id);
+    if (params.min_position != null) qs.set('min_position', params.min_position);
+    if (params.max_position != null) qs.set('max_position', params.max_position);
     if (params.after_ts) qs.set('after_ts', params.after_ts);
     if (params.before_ts) qs.set('before_ts', params.before_ts);
     const query = qs.toString();
