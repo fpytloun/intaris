@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-04-19
+
+### Added
+
+- **Tool output viewer** -- Add on-demand tool output loading in the management UI so audit and session views can fetch and inspect stored outputs without preloading the full payload.
+- **Cognis LLM-exposure audit events** -- Extend event ingestion, filtering, and session playback to capture Cognis message payload metadata for LLM-exposure auditing and turn reconstruction.
+
+### Fixed
+
+- **Cognis tool output matching** -- Match Cognis tool outputs by audit call ID so the UI consistently renders the correct result payload for each tool invocation.
+
+### Changed
+
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.4.5`.
+
 ## [0.4.4] - 2026-04-15
 
 ### Fixed
@@ -183,6 +198,7 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.4.5]: https://github.com/fpytloun/intaris/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/fpytloun/intaris/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/fpytloun/intaris/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/fpytloun/intaris/compare/v0.4.1...v0.4.2
