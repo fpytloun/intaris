@@ -116,6 +116,35 @@ function formatToolOutputText(output) {
   }
 }
 
+function isUserMessageReasoning(record) {
+  return record?.record_type === 'reasoning'
+    && typeof record?.content === 'string'
+    && record.content.startsWith('User message:');
+}
+
+function recordContentLabel(record) {
+  if (!record) return 'Content';
+  if (record.record_type === 'reasoning') {
+    return isUserMessageReasoning(record) ? 'User Message' : 'Agent Reasoning';
+  }
+  if (record.record_type === 'checkpoint') return 'Checkpoint';
+  if (record.record_type === 'summary') return 'Summary';
+  return 'Content';
+}
+
+function recordDisplayContent(record) {
+  const content = typeof record?.content === 'string' ? record.content : '';
+  if (isUserMessageReasoning(record)) {
+    return content.slice('User message:'.length).trim();
+  }
+  return content;
+}
+
+function recordAssistantContext(record) {
+  const context = record?.args_redacted?.context;
+  return typeof context === 'string' && context.trim() ? context : '';
+}
+
 function stableJson(value) {
   function sortValue(input) {
     if (Array.isArray(input)) return input.map(sortValue);

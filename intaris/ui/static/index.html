@@ -740,8 +740,15 @@
                           <!-- Content (for reasoning/checkpoint/summary records) -->
                           <template x-if="expandedAuditRecord?.content">
                             <div class="mb-2">
-                              <div class="text-xs text-muted mb-1" x-text="expandedAuditRecord.record_type === 'reasoning' ? 'Agent Reasoning' : expandedAuditRecord.record_type === 'checkpoint' ? 'Checkpoint' : expandedAuditRecord.record_type === 'summary' ? 'Summary' : 'Content'"></div>
-                              <div class="text-sm bg-brand-bg rounded p-2 whitespace-pre-wrap max-h-64 overflow-y-auto" x-text="expandedAuditRecord.content"></div>
+                              <div class="text-xs text-muted mb-1" x-text="recordContentLabel(expandedAuditRecord)"></div>
+                              <div class="text-sm bg-brand-bg rounded p-2 whitespace-pre-wrap max-h-64 overflow-y-auto" x-text="recordDisplayContent(expandedAuditRecord)"></div>
+                            </div>
+                          </template>
+
+                          <template x-if="recordAssistantContext(expandedAuditRecord)">
+                            <div class="mb-2">
+                              <div class="text-xs text-muted mb-1">Assistant Context</div>
+                              <div class="text-sm bg-brand-bg rounded p-2 whitespace-pre-wrap max-h-64 overflow-y-auto" x-text="recordAssistantContext(expandedAuditRecord)"></div>
                             </div>
                           </template>
 
@@ -762,7 +769,7 @@
                           </template>
 
                           <!-- Redacted Args -->
-                          <template x-if="expandedAuditRecord?.args_redacted">
+                          <template x-if="expandedAuditRecord?.args_redacted && (expandedAuditRecord.record_type !== 'reasoning' || typeof expandedAuditRecord.args_redacted !== 'object' || Object.keys(expandedAuditRecord.args_redacted).some(k => k !== 'context'))">
                             <div class="mb-2">
                               <div class="flex items-center gap-2 mb-1">
                                 <div class="text-xs text-muted">Arguments (redacted)</div>
@@ -930,8 +937,15 @@
                 <!-- Content (for reasoning/checkpoint/summary records) -->
                 <template x-if="expandedRecord?.content">
                   <div class="mb-3">
-                    <div class="text-xs text-muted mb-1" x-text="expandedRecord.record_type === 'reasoning' ? 'Agent Reasoning' : expandedRecord.record_type === 'checkpoint' ? 'Checkpoint' : expandedRecord.record_type === 'summary' ? 'Summary' : 'Content'"></div>
-                    <div class="text-sm bg-brand-elevated rounded p-3 whitespace-pre-wrap max-h-96 overflow-y-auto" x-text="expandedRecord.content"></div>
+                    <div class="text-xs text-muted mb-1" x-text="recordContentLabel(expandedRecord)"></div>
+                    <div class="text-sm bg-brand-elevated rounded p-3 whitespace-pre-wrap max-h-96 overflow-y-auto" x-text="recordDisplayContent(expandedRecord)"></div>
+                  </div>
+                </template>
+
+                <template x-if="recordAssistantContext(expandedRecord)">
+                  <div class="mb-3">
+                    <div class="text-xs text-muted mb-1">Assistant Context</div>
+                    <div class="text-sm bg-brand-elevated rounded p-3 whitespace-pre-wrap max-h-96 overflow-y-auto" x-text="recordAssistantContext(expandedRecord)"></div>
                   </div>
                 </template>
 
@@ -952,7 +966,7 @@
                 </template>
 
                 <!-- Redacted Args -->
-                <template x-if="expandedRecord?.args_redacted">
+                <template x-if="expandedRecord?.args_redacted && (expandedRecord.record_type !== 'reasoning' || typeof expandedRecord.args_redacted !== 'object' || Object.keys(expandedRecord.args_redacted).some(k => k !== 'context'))">
                   <div class="mb-3">
                     <div class="flex items-center gap-2 mb-1">
                       <div class="text-xs text-muted">Arguments (redacted)</div>
@@ -2651,6 +2665,18 @@
                   <!-- Expanded Audit Detail -->
                   <div x-show="$store.nav.sessionModalAuditExpandedId === r.call_id" x-cloak
                        class="ml-4 mt-1 mb-2 p-3 bg-brand-elevated rounded-lg border border-brand-border text-sm">
+                    <template x-if="$store.nav.sessionModalAuditRecord?.content">
+                      <div class="mb-2">
+                        <div class="text-xs text-muted mb-1" x-text="recordContentLabel($store.nav.sessionModalAuditRecord)"></div>
+                        <div class="text-sm bg-brand-bg rounded p-2 whitespace-pre-wrap max-h-64 overflow-y-auto" x-text="recordDisplayContent($store.nav.sessionModalAuditRecord)"></div>
+                      </div>
+                    </template>
+                    <template x-if="recordAssistantContext($store.nav.sessionModalAuditRecord)">
+                      <div class="mb-2">
+                        <div class="text-xs text-muted mb-1">Assistant Context</div>
+                        <div class="text-sm bg-brand-bg rounded p-2 whitespace-pre-wrap max-h-64 overflow-y-auto" x-text="recordAssistantContext($store.nav.sessionModalAuditRecord)"></div>
+                      </div>
+                    </template>
                     <template x-if="$store.nav.sessionModalAuditRecord?.reasoning">
                       <div class="mb-2">
                         <div class="text-xs text-muted mb-1">Reasoning</div>
@@ -2663,7 +2689,7 @@
                         <div class="text-sm" x-text="$store.nav.sessionModalAuditRecord.intention"></div>
                       </div>
                     </template>
-                    <template x-if="$store.nav.sessionModalAuditRecord?.args_redacted">
+                    <template x-if="$store.nav.sessionModalAuditRecord?.args_redacted && ($store.nav.sessionModalAuditRecord.record_type !== 'reasoning' || typeof $store.nav.sessionModalAuditRecord.args_redacted !== 'object' || Object.keys($store.nav.sessionModalAuditRecord.args_redacted).some(k => k !== 'context'))">
                       <div class="mb-2">
                         <div class="flex items-center gap-2 mb-1">
                           <div class="text-xs text-muted">Arguments (redacted)</div>

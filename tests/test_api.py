@@ -1760,6 +1760,69 @@ class TestAnalysisEndpoints:
         assert data["intention"] == "Test session for unit tests"
         assert data["updated_at"]
 
+    def test_submit_reasoning_from_events_resolves_content_and_appends_event(
+        self, client_no_auth
+    ):
+        """from_events resolves payload/context and still records a reasoning event."""
+        from intaris.audit import AuditStore
+        from intaris.server import _get_db
+
+        headers = {"X-User-Id": "user-reason-events"}
+        _create_session(client_no_auth, "sess-reason-events", headers)
+
+        event_store = client_no_auth.app.state.event_store
+        event_store.append(
+            "user-reason-events",
+            "sess-reason-events",
+            [
+                {
+                    "type": "assistant_message",
+                    "data": {"content": "I can push ainews into origin/main for you."},
+                },
+                {
+                    "type": "user_message",
+                    "data": {
+                        "content": "Ok I allow to push ainews into origin:main. Try again"
+                    },
+                },
+            ],
+            source="cognis",
+        )
+
+        resp = client_no_auth.post(
+            "/api/v1/reasoning",
+            json={
+                "session_id": "sess-reason-events",
+                "content": "",
+                "from_events": True,
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        call_id = resp.json()["call_id"]
+
+        audit = AuditStore(_get_db())
+        record = audit.get_by_call_id(call_id, user_id="user-reason-events")
+        assert record["content"] == (
+            "User message: Ok I allow to push ainews into origin:main. Try again"
+        )
+        assert record["args_redacted"] == {
+            "context": "I can push ainews into origin/main for you."
+        }
+
+        events_resp = client_no_auth.get(
+            "/api/v1/session/sess-reason-events/events",
+            params={"type": "reasoning"},
+            headers=headers,
+        )
+        assert events_resp.status_code == 200
+        events = events_resp.json()["events"]
+        assert len(events) == 1
+        assert events[0]["data"]["call_id"] == call_id
+        assert events[0]["data"]["content"] == record["content"]
+        assert events[0]["data"]["from_events"] is True
+
     def test_submit_checkpoint(self, client_no_auth):
         """POST /checkpoint stores checkpoint in audit log."""
         headers = {"X-User-Id": "user-chk"}

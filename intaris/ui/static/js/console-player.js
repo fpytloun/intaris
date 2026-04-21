@@ -287,6 +287,9 @@ function processOpenCode(events) {
   // Track which user messageIDs already have a rendered user-message block
   // (used to deduplicate text parts that echo user input)
   const renderedUserMessages = new Set();
+  // Track the latest rendered user text so a reasoning record derived from
+  // the same user turn can be suppressed without hiding unrelated repeats.
+  let latestRenderedUserText = null;
 
   // Step 3: Walk events in order, generate blocks
   for (const event of events) {
@@ -297,6 +300,7 @@ function processOpenCode(events) {
       // Skip empty user messages
       if (!data.text || !data.text.trim()) continue;
       if (data.messageID) renderedUserMessages.add(data.messageID);
+      latestRenderedUserText = data.text.trim();
       blocks.push({
         type: 'user-message',
         id: 'b' + (blockId++),
@@ -309,6 +313,7 @@ function processOpenCode(events) {
     if (event.type === 'user_message') {
       const content = normalizeMessageContent(data.content);
       if (!content || !content.trim()) continue;
+      latestRenderedUserText = content.trim();
       blocks.push({
         type: 'user-message',
         id: 'b' + (blockId++),
@@ -394,6 +399,7 @@ function processOpenCode(events) {
           if (renderedUserMessages.has(part.messageID)) continue;
           if (!part.text || !part.text.trim()) continue;
           renderedUserMessages.add(part.messageID);
+          latestRenderedUserText = part.text.trim();
           blocks.push({
             type: 'user-message',
             id: 'b' + (blockId++),
@@ -564,8 +570,20 @@ function processOpenCode(events) {
 
     // ── Reasoning (server-side, from /reasoning endpoint) ──
     if (event.type === 'reasoning') {
-      // Skip user message reasoning (already captured as user-message from chat.message hook)
-      if (data.content && data.content.startsWith('User message:')) continue;
+      if (data.content && data.content.startsWith('User message:')) {
+        const userText = data.content.slice('User message:'.length).trim();
+        if (!userText) continue;
+        if (latestRenderedUserText && userText === latestRenderedUserText) continue;
+        latestRenderedUserText = userText;
+        blocks.push({
+          type: 'user-message',
+          id: 'b' + (blockId++),
+          text: userText,
+          meta: data.from_events ? 'derived from events' : 'via /reasoning',
+          ts: event.ts,
+        });
+        continue;
+      }
       if (data.content) {
         blocks.push({
           type: 'reasoning',

@@ -25,6 +25,8 @@ def resolve_last_user_message(
       ``data.content``
     - **OpenClaw / OpenCode / Claude Code**: ``message`` event type with
       ``data.role`` (``"user"`` / ``"assistant"``) and ``data.text``
+    - **OpenCode fallback**: ``part`` events for assistant text when the
+      assistant ``message`` event only carries metadata
 
     Flushes the session buffer before reading to ensure events appended
     by a different worker (or buffered locally) are visible.
@@ -52,35 +54,30 @@ def resolve_last_user_message(
         )
 
     # Read recent events — fetch enough to find both a user message and
-    # an assistant message even with interleaved tool_call/evaluation events.
+    # an assistant context even with interleaved tool_call/evaluation events.
     events = event_store.read_tail(
         user_id,
         session_id,
-        limit=20,
-        event_types={"user_message", "assistant_message", "message"},
+        limit=50,
+        event_types={"user_message", "assistant_message", "message", "part"},
     )
 
     user_content: str | None = None
-    assistant_context: str | None = None
+    user_seq: int | None = None
+    user_message_id: str | None = None
 
-    # Walk events in reverse chronological order (newest first)
+    # Walk events in reverse chronological order (newest first) to find
+    # the latest user message first.
     for event in reversed(events):
         event_type = event.get("type")
         data = event.get("data") or {}
-
-        if user_content is None:
-            content = _extract_user_text(event_type, data)
-            if content:
-                user_content = content
-                continue
-
-        if assistant_context is None:
-            content = _extract_assistant_text(event_type, data)
-            if content:
-                assistant_context = content
-
-        # Stop once we have both
-        if user_content is not None and assistant_context is not None:
+        content = _extract_user_text(event_type, data)
+        if content:
+            user_content = content
+            user_seq = int(event.get("seq", 0) or 0)
+            user_message_id = (
+                str(data.get("messageID") or data.get("message_id") or "") or None
+            )
             break
 
     if user_content is None:
@@ -92,6 +89,12 @@ def resolve_last_user_message(
         )
         return None
 
+    assistant_context = _resolve_assistant_context(
+        events,
+        before_seq=user_seq or 0,
+        latest_user_message_id=user_message_id,
+    )
+
     logger.info(
         "Resolved user message from events for %s/%s "
         "(user_len=%d, context_len=%d, events_checked=%d)",
@@ -102,6 +105,87 @@ def resolve_last_user_message(
         len(events),
     )
     return user_content, assistant_context
+
+
+def _resolve_assistant_context(
+    events: list[dict[str, Any]],
+    *,
+    before_seq: int,
+    latest_user_message_id: str | None,
+) -> str | None:
+    """Resolve assistant context preceding the latest user message.
+
+    Prefers canonical assistant message events. Falls back to OpenCode text
+    parts when the assistant message event only contains metadata.
+    """
+    latest_assistant: tuple[int, str] | None = None
+    assistant_message_ids: set[str] = set()
+    user_message_ids: set[str] = set()
+    latest_part_by_id: dict[str, dict[str, Any]] = {}
+
+    for event in events:
+        seq = int(event.get("seq", 0) or 0)
+        if seq >= before_seq:
+            continue
+        event_type = event.get("type")
+        data = event.get("data") or {}
+
+        if event_type == "message":
+            message_id = str(data.get("messageID") or data.get("message_id") or "")
+            role = data.get("role")
+            if message_id:
+                if role == "assistant":
+                    assistant_message_ids.add(message_id)
+                elif role == "user":
+                    user_message_ids.add(message_id)
+
+        assistant_text = _extract_assistant_text(event_type, data)
+        if assistant_text:
+            latest_assistant = (seq, assistant_text)
+
+        if event_type != "part":
+            continue
+
+        part = data.get("part") or {}
+        if part.get("type") != "text":
+            continue
+        part_id = str(part.get("id") or "")
+        key = part_id or f"_noid_{seq}"
+        existing = latest_part_by_id.get(key)
+        if existing is None or seq > int(existing.get("seq", 0) or 0):
+            latest_part_by_id[key] = event
+
+    if latest_assistant is not None:
+        return latest_assistant[1]
+
+    latest_part: tuple[int, str] | None = None
+    for event in latest_part_by_id.values():
+        seq = int(event.get("seq", 0) or 0)
+        if seq >= before_seq:
+            continue
+        part = (event.get("data") or {}).get("part") or {}
+        text = str(part.get("text") or "").strip()
+        if not text:
+            continue
+        if part.get("synthetic"):
+            continue
+
+        message_id = str(part.get("messageID") or part.get("messageId") or "")
+        if latest_user_message_id and message_id == latest_user_message_id:
+            continue
+        if message_id and message_id in user_message_ids:
+            continue
+        if (
+            assistant_message_ids
+            and message_id
+            and message_id not in assistant_message_ids
+        ):
+            continue
+
+        if latest_part is None or seq > latest_part[0]:
+            latest_part = (seq, text)
+
+    return None if latest_part is None else latest_part[1]
 
 
 def _extract_user_text(event_type: str, data: dict[str, Any]) -> str | None:

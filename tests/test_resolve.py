@@ -233,3 +233,42 @@ class TestResolveLastUserMessage:
         user_content, assistant_context = result
         assert user_content == "check the file"
         assert assistant_context == "I'll check"
+
+    def test_opencode_part_fallback_for_assistant_context(self, store):
+        """Falls back to assistant text parts when assistant messages are metadata-only."""
+        store.append(
+            USER_ID,
+            SESSION_ID,
+            [
+                {
+                    "type": "message",
+                    "data": {"role": "assistant", "messageID": "msg-a"},
+                },
+                {
+                    "type": "part",
+                    "data": {
+                        "part": {
+                            "id": "part-a",
+                            "type": "text",
+                            "messageID": "msg-a",
+                            "text": "I can push ainews to origin/main for you.",
+                        }
+                    },
+                },
+                {
+                    "type": "message",
+                    "data": {
+                        "role": "user",
+                        "messageID": "msg-u",
+                        "text": "ok do it",
+                    },
+                },
+            ],
+            source="opencode",
+        )
+
+        result = resolve_last_user_message(store, USER_ID, SESSION_ID)
+        assert result is not None
+        user_content, assistant_context = result
+        assert user_content == "ok do it"
+        assert assistant_context == "I can push ainews to origin/main for you."

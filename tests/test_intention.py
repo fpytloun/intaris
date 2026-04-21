@@ -257,6 +257,77 @@ class TestGenerateIntention:
         assert "Fix the login bug" in user_prompt
         assert "primary signal" in messages[0]["content"]
 
+    def test_excludes_agent_reasoning_from_user_message_prompt(
+        self, db, session_store, mock_llm
+    ):
+        """Only prefixed user messages feed the intention prompt."""
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_reasoning(db, "user-1", "sess-1", "User message: Fix the login bug")
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "I should inspect the repo and maybe rewrite the intention",
+            call_id="call-r2",
+        )
+
+        generate_intention(
+            llm=mock_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+        )
+
+        user_prompt = mock_llm.generate.call_args[0][0][1]["content"]
+        assert "Fix the login bug" in user_prompt
+        assert "rewrite the intention" not in user_prompt
+
+    def test_prioritizes_latest_user_message_over_prior_intention(
+        self, db, session_store, mock_llm
+    ):
+        """Latest user message appears before prior session state in the prompt."""
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-1",
+            intention="Select three sweet medium-roast coffees and save a skill",
+            title="Coffee selection",
+        )
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: Select three sweet medium-roast coffees",
+            call_id="call-r1",
+        )
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: Ok I allow to push ainews into origin:main. Try again",
+            call_id="call-r2",
+        )
+
+        generate_intention(
+            llm=mock_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+            context="I can push ainews into origin/main for you if you want.",
+        )
+
+        messages = mock_llm.generate.call_args[0][0]
+        system_prompt = messages[0]["content"]
+        user_prompt = messages[1]["content"]
+        assert "Ok I allow to push ainews into origin:main. Try again" in user_prompt
+        assert user_prompt.index("Latest user message") < user_prompt.index(
+            "Prior session state"
+        )
+        assert "I can push ainews into origin/main for you if you want." in user_prompt
+        assert "keep at most two active goals" in system_prompt
+        assert "fade out" in system_prompt
+
     def test_includes_parent_intention_for_sub_sessions(
         self, db, session_store, mock_llm
     ):

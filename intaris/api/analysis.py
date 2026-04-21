@@ -223,30 +223,30 @@ async def submit_reasoning(
                         exc_info=True,
                     )
 
-        # Auto-append to event store (session recording).
-        # Skip when content was resolved from events — the data is
-        # already in the event store and appending would duplicate it.
-        if not resolved_from_events:
-            event_store = getattr(http_request.app.state, "event_store", None)
-            if event_store is not None:
-                try:
-                    event_store.append(
-                        ctx.user_id,
-                        request.session_id,
-                        [
-                            {
-                                "type": "reasoning",
-                                "data": {
-                                    "call_id": call_id,
-                                    "content": sanitized,
-                                    "record_type": "reasoning",
-                                },
-                            }
-                        ],
-                        source="intaris",
-                    )
-                except Exception:
-                    logger.debug("Failed to auto-append reasoning event", exc_info=True)
+        # Auto-append to event store (session recording).  Reasoning events
+        # are always appended, including the from_events path, so the raw
+        # event log shows the server-side reasoning/intention-refresh step.
+        event_store = getattr(http_request.app.state, "event_store", None)
+        if event_store is not None:
+            try:
+                event_store.append(
+                    ctx.user_id,
+                    request.session_id,
+                    [
+                        {
+                            "type": "reasoning",
+                            "data": {
+                                "call_id": call_id,
+                                "content": sanitized,
+                                "record_type": "reasoning",
+                                "from_events": resolved_from_events,
+                            },
+                        }
+                    ],
+                    source="intaris",
+                )
+            except Exception:
+                logger.debug("Failed to auto-append reasoning event", exc_info=True)
 
         response = ReasoningResponse(ok=True, call_id=call_id)
         if request.wait_for_intention:
