@@ -126,8 +126,20 @@ class LLMClient:
                 return result
             except LLMTemporaryError:
                 raise
-            except BadRequestError:
-                if self._supports_structured is None:
+            except BadRequestError as exc:
+                recovered = _recover_failed_generation(exc, json_schema)
+                if recovered is not None:
+                    self._supports_structured = True
+                    return recovered
+
+                if _is_schema_validation_error(exc):
+                    logger.warning(
+                        "Structured output failed schema validation for model %s; "
+                        "retrying in JSON mode.",
+                        self._model,
+                    )
+                    self._supports_structured = True
+                elif self._supports_structured is None:
                     logger.warning(
                         "Structured outputs not supported by provider, "
                         "falling back to JSON mode. Schema enum constraints "
@@ -509,6 +521,131 @@ def _parse_retry_after_value(value: str) -> float | None:
     return None
 
 
+def _is_schema_validation_error(error: BadRequestError) -> bool:
+    """Return True when the provider rejected malformed structured output."""
+    error_body = getattr(error, "body", None)
+    if not isinstance(error_body, dict):
+        return False
+
+    provider_error = error_body.get("error")
+    if not isinstance(provider_error, dict):
+        provider_error = error_body
+
+    code = str(provider_error.get("code", ""))
+    message = str(provider_error.get("message", ""))
+    return (
+        code == "json_validate_failed"
+        or "Generated JSON does not match the expected schema" in message
+    )
+
+
+def _schema_expected_keys(schema: dict[str, Any]) -> set[str] | None:
+    """Extract required keys from a structured-output schema."""
+    raw_schema = schema.get("schema") if isinstance(schema, dict) else None
+    if not isinstance(raw_schema, dict):
+        return None
+    required = raw_schema.get("required")
+    if not isinstance(required, list):
+        return None
+    keys = {key for key in required if isinstance(key, str)}
+    return keys or None
+
+
+def _matches_schema(value: Any, schema: dict[str, Any]) -> bool:
+    """Validate a recovered payload against the supported schema subset."""
+    raw_schema = schema.get("schema", schema) if isinstance(schema, dict) else schema
+    if not isinstance(raw_schema, dict):
+        return False
+
+    expected_type = raw_schema.get("type")
+    if expected_type == "object":
+        if not isinstance(value, dict):
+            return False
+
+        required = raw_schema.get("required", [])
+        if any(key not in value for key in required if isinstance(key, str)):
+            return False
+
+        properties = raw_schema.get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
+
+        if raw_schema.get("additionalProperties") is False:
+            allowed = set(properties.keys())
+            if any(key not in allowed for key in value):
+                return False
+
+        for key, item in value.items():
+            item_schema = properties.get(key)
+            if item_schema is None:
+                continue
+            if not _matches_schema(item, item_schema):
+                return False
+        return True
+
+    if expected_type == "array":
+        if not isinstance(value, list):
+            return False
+        item_schema = raw_schema.get("items")
+        if item_schema is None:
+            return True
+        return all(_matches_schema(item, item_schema) for item in value)
+
+    if expected_type == "string":
+        if not isinstance(value, str):
+            return False
+        enum_values = raw_schema.get("enum")
+        if isinstance(enum_values, list) and value not in enum_values:
+            return False
+        return True
+
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+
+    return True
+
+
+def _recover_failed_generation(
+    error: BadRequestError,
+    schema: dict[str, Any],
+) -> str | None:
+    """Recover provider-reported failed_generation JSON when repairable."""
+    if not _is_schema_validation_error(error):
+        return None
+
+    error_body = getattr(error, "body", None)
+    if not isinstance(error_body, dict):
+        return None
+
+    provider_error = error_body.get("error")
+    if not isinstance(provider_error, dict):
+        provider_error = error_body
+
+    failed_generation = provider_error.get("failed_generation")
+    if not isinstance(failed_generation, str):
+        return None
+
+    try:
+        repaired = parse_json_response(
+            failed_generation,
+            expected_keys=_schema_expected_keys(schema),
+        )
+    except ValueError:
+        return None
+
+    if not _matches_schema(repaired, schema):
+        return None
+
+    logger.warning("Recovered structured output from provider failed_generation")
+    return json.dumps(repaired)
+
+
 def parse_json_response(
     text: str,
     *,
@@ -530,6 +667,7 @@ def parse_json_response(
     try:
         result = json.loads(text)
         if isinstance(result, dict):
+            result = _normalize_values(result)
             return _validate_keys(result, expected_keys)
     except json.JSONDecodeError:
         pass
@@ -539,6 +677,7 @@ def parse_json_response(
         try:
             result = json.loads(match.group())
             if isinstance(result, dict):
+                result = _normalize_values(result)
                 return _validate_keys(result, expected_keys)
         except json.JSONDecodeError:
             pass
@@ -571,6 +710,40 @@ _KEY_ALIASES: dict[str, list[str]] = {
     "risk_score": ["risk_level"],
     "summary": ["context_summary"],
 }
+
+# Common enum/value hallucinations when structured outputs are not strictly
+# enforced, or when providers expose the invalid generation for recovery.
+_VALUE_ALIASES: dict[str, dict[str, Any]] = {
+    "intent_alignment": {
+        "partial_aligned": "partially_aligned",
+        "partially aligned": "partially_aligned",
+    },
+}
+
+
+def _normalize_values(result: Any) -> Any:
+    """Recursively normalize known field-value aliases in parsed JSON."""
+    if isinstance(result, dict):
+        normalized: dict[str, Any] = {}
+        for key, value in result.items():
+            normalized_value = _normalize_values(value)
+            if isinstance(normalized_value, str):
+                replacement = _VALUE_ALIASES.get(key, {}).get(normalized_value)
+                if replacement is not None:
+                    logger.info(
+                        "Normalized LLM JSON value for %s: %r -> %r",
+                        key,
+                        normalized_value,
+                        replacement,
+                    )
+                    normalized_value = replacement
+            normalized[key] = normalized_value
+        return normalized
+
+    if isinstance(result, list):
+        return [_normalize_values(item) for item in result]
+
+    return result
 
 
 def _validate_keys(

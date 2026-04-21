@@ -19,6 +19,7 @@ from intaris.llm import (
     _validate_keys,
     parse_json_response,
 )
+from intaris.prompts_analysis import SESSION_SUMMARY_SCHEMA
 
 # ── _validate_keys: basic behavior ────────────────────────────────────
 
@@ -236,6 +237,26 @@ class TestParseJsonResponse:
         result = parse_json_response(text)
         assert result == {"any": "keys", "are": "fine"}
 
+    def test_parse_normalizes_intent_alignment_alias(self):
+        text = json.dumps(
+            {
+                "summary": "ok",
+                "intent_alignment": "partial_aligned",
+                "tools_used": ["read"],
+                "risk_indicators": [],
+            }
+        )
+        result = parse_json_response(
+            text,
+            expected_keys={
+                "summary",
+                "intent_alignment",
+                "tools_used",
+                "risk_indicators",
+            },
+        )
+        assert result["intent_alignment"] == "partially_aligned"
+
 
 # ── _KEY_ALIASES coverage ─────────────────────────────────────────────
 
@@ -373,3 +394,109 @@ class TestTransientLLMFailures:
             )
 
         assert client._supports_structured is None
+
+    def test_generate_recovers_failed_generation_schema_error(self, monkeypatch):
+        class _FakeBadRequestError(Exception):
+            def __init__(self, body):
+                super().__init__("schema validation failed")
+                self.body = body
+
+        class _FakeCompletions:
+            def create(self, **params):
+                raise _FakeBadRequestError(
+                    {
+                        "error": {
+                            "code": "json_validate_failed",
+                            "message": "Generated JSON does not match the expected schema",
+                            "failed_generation": json.dumps(
+                                {
+                                    "summary": "ok",
+                                    "intent_alignment": "partial_aligned",
+                                    "tools_used": ["read"],
+                                    "risk_indicators": [],
+                                }
+                            ),
+                        }
+                    }
+                )
+
+        class _FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr("intaris.llm.BadRequestError", _FakeBadRequestError)
+        monkeypatch.setattr("intaris.llm.OpenAI", _FakeOpenAI)
+
+        client = LLMClient(
+            LLMConfig(api_key="test-key", base_url="http://example.test"),
+        )
+
+        raw = client.generate(
+            [{"role": "user", "content": "hi"}],
+            json_schema=SESSION_SUMMARY_SCHEMA,
+        )
+        result = json.loads(raw)
+
+        assert result["intent_alignment"] == "partially_aligned"
+        assert client._supports_structured is True
+
+    def test_generate_falls_back_to_json_mode_after_schema_error(self, monkeypatch):
+        calls = []
+
+        class _FakeBadRequestError(Exception):
+            def __init__(self, body):
+                super().__init__("schema validation failed")
+                self.body = body
+
+        class _FakeCompletions:
+            def create(self, **params):
+                calls.append(params)
+                response_format = params.get("response_format", {})
+                if response_format.get("type") == "json_schema":
+                    raise _FakeBadRequestError(
+                        {
+                            "error": {
+                                "code": "json_validate_failed",
+                                "message": "Generated JSON does not match the expected schema",
+                                "failed_generation": "not valid json",
+                            }
+                        }
+                    )
+                return _make_response(
+                    json.dumps(
+                        {
+                            "summary": "ok",
+                            "intent_alignment": "partially_aligned",
+                            "tools_used": ["read"],
+                            "risk_indicators": [],
+                        }
+                    )
+                )
+
+        class _FakeOpenAI:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=_FakeCompletions())
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr("intaris.llm.BadRequestError", _FakeBadRequestError)
+        monkeypatch.setattr("intaris.llm.OpenAI", _FakeOpenAI)
+
+        client = LLMClient(
+            LLMConfig(api_key="test-key", base_url="http://example.test"),
+        )
+
+        raw = client.generate(
+            [{"role": "user", "content": "hi"}],
+            json_schema=SESSION_SUMMARY_SCHEMA,
+        )
+
+        assert json.loads(raw)["intent_alignment"] == "partially_aligned"
+        assert [call.get("response_format", {}).get("type") for call in calls] == [
+            "json_schema",
+            "json_object",
+        ]
