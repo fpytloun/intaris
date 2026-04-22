@@ -123,7 +123,35 @@ class AuditStore:
                 ),
             )
 
-        return self.get_by_call_id(call_id, user_id=user_id)
+        return {
+            "id": record_id,
+            "call_id": call_id,
+            "record_type": record_type,
+            "user_id": user_id,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "timestamp": now,
+            "tool": tool,
+            "args_redacted": args_redacted,
+            "content": content,
+            "classification": classification,
+            "evaluation_path": evaluation_path,
+            "decision": decision,
+            "risk": risk,
+            "reasoning": reasoning,
+            "latency_ms": latency_ms,
+            "user_decision": None,
+            "user_note": None,
+            "resolved_at": None,
+            "resolved_by": None,
+            "judge_reasoning": None,
+            "judge_decision": None,
+            "judge_risk": None,
+            "args_hash": args_hash,
+            "profile_version": profile_version,
+            "intention": intention,
+            "injection_detected": injection_detected,
+        }
 
     def get_by_call_id(self, call_id: str, *, user_id: str) -> dict[str, Any]:
         """Get an audit record by call_id, scoped to user.

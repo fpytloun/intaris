@@ -22,6 +22,8 @@ class TestConfigDefaults:
         config = DBConfig()
         assert config.path.endswith("intaris.db")
         assert ".intaris" in config.path
+        assert config.pool_min_conn == 1
+        assert config.pool_max_conn == 20
 
     def test_server_defaults(self):
         config = ServerConfig()
@@ -105,6 +107,23 @@ class TestConfigEnvVars:
         monkeypatch.setenv("DB_PATH", "/tmp/test.db")
         config = DBConfig()
         assert config.path == "/tmp/test.db"
+
+    def test_custom_db_pool_size(self, monkeypatch):
+        monkeypatch.setenv("DB_POOL_MIN_CONN", "2")
+        monkeypatch.setenv("DB_POOL_MAX_CONN", "25")
+        config = DBConfig()
+        assert config.pool_min_conn == 2
+        assert config.pool_max_conn == 25
+
+    def test_invalid_db_pool_bounds(self, monkeypatch):
+        monkeypatch.setenv("LLM_API_KEY", "test-key")
+        config = Config(llm=LLMConfig())
+        config.db.pool_min_conn = 5
+        config.db.pool_max_conn = 4
+        with pytest.raises(
+            ValueError, match="DB_POOL_MIN_CONN cannot be greater than DB_POOL_MAX_CONN"
+        ):
+            config.validate()
 
     def test_custom_llm_model(self, monkeypatch):
         monkeypatch.setenv("LLM_MODEL", "gpt-4o")

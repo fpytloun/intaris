@@ -127,6 +127,13 @@ class DBConfig:
     # Format: postgresql://user:password@host:port/dbname
     database_url: str = field(default_factory=lambda: _env("DATABASE_URL"))
 
+    # PostgreSQL: connection pool sizing.
+    # Keep the default large enough to handle concurrent evaluate requests,
+    # background analysis workers, and judge/intention tasks without
+    # exhausting the pool under moderate load.
+    pool_min_conn: int = field(default_factory=lambda: _env_int("DB_POOL_MIN_CONN", 1))
+    pool_max_conn: int = field(default_factory=lambda: _env_int("DB_POOL_MAX_CONN", 20))
+
 
 @dataclass
 class ServerConfig:
@@ -457,6 +464,18 @@ class Config:
             raise ValueError(
                 "DATABASE_URL is required when DB_BACKEND=postgresql. "
                 "Format: postgresql://user:password@host:port/dbname"
+            )
+        if self.db.pool_min_conn < 1:
+            raise ValueError(
+                f"DB_POOL_MIN_CONN={self.db.pool_min_conn} must be >= 1."
+            )
+        if self.db.pool_max_conn < 1:
+            raise ValueError(
+                f"DB_POOL_MAX_CONN={self.db.pool_max_conn} must be >= 1."
+            )
+        if self.db.pool_min_conn > self.db.pool_max_conn:
+            raise ValueError(
+                "DB_POOL_MIN_CONN cannot be greater than DB_POOL_MAX_CONN."
             )
 
         if not self.llm.api_key:

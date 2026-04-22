@@ -154,6 +154,7 @@ class Database:
         self._path = config.path
         self._local = threading.local()
         self._pool = None
+        self._pool_semaphore = None
         db_dir = os.path.dirname(self._path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
@@ -186,24 +187,44 @@ class Database:
         self._path = ""
         self._local = threading.local()
         self._pool = psycopg2.pool.ThreadedConnectionPool(
-            minconn=1,
-            maxconn=10,
+            minconn=config.pool_min_conn,
+            maxconn=config.pool_max_conn,
             dsn=config.database_url,
         )
-        logger.info("PostgreSQL connection pool initialized")
+        # ThreadedConnectionPool fails immediately when exhausted. Use a
+        # semaphore to turn saturation into backpressure instead of 500s.
+        self._pool_semaphore = threading.BoundedSemaphore(config.pool_max_conn)
+        logger.info(
+            "PostgreSQL connection pool initialized (min=%d max=%d)",
+            config.pool_min_conn,
+            config.pool_max_conn,
+        )
 
     def _get_pg_connection(self) -> Any:
         """Get a connection from the PostgreSQL pool."""
         import psycopg2.extras
 
-        conn = self._pool.getconn()
+        if self._pool_semaphore is not None:
+            self._pool_semaphore.acquire()
+
+        try:
+            conn = self._pool.getconn()
+        except Exception:
+            if self._pool_semaphore is not None:
+                self._pool_semaphore.release()
+            raise
+
         # Use RealDictCursor so rows behave like dicts (same as sqlite3.Row)
         conn.cursor_factory = psycopg2.extras.RealDictCursor
         return conn
 
     def _put_pg_connection(self, conn: Any) -> None:
         """Return a connection to the PostgreSQL pool."""
-        self._pool.putconn(conn)
+        try:
+            self._pool.putconn(conn)
+        finally:
+            if self._pool_semaphore is not None:
+                self._pool_semaphore.release()
 
     # ── Public API ────────────────────────────────────────────────
 

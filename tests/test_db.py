@@ -219,6 +219,33 @@ class TestAuditStore:
         assert record["decision"] == "approve"
         assert record["args_redacted"]["command"] == "ls -la"
 
+    def test_insert_does_not_refetch_record(self, audit_store, session_store, monkeypatch):
+        self._create_session(session_store)
+
+        def fail(*args, **kwargs):
+            raise AssertionError("insert() should not call get_by_call_id()")
+
+        monkeypatch.setattr(audit_store, "get_by_call_id", fail)
+
+        record = audit_store.insert(
+            call_id="call_no_refetch",
+            user_id=TEST_USER,
+            session_id="sess_audit",
+            agent_id="agent_1",
+            tool="bash",
+            args_redacted={"command": "ls -la"},
+            classification="read",
+            evaluation_path="fast",
+            decision="approve",
+            risk=None,
+            reasoning="Read-only command",
+            latency_ms=5,
+        )
+
+        assert record["call_id"] == "call_no_refetch"
+        assert record["timestamp"]
+        assert record["user_decision"] is None
+
     def test_get_by_call_id(self, audit_store, session_store):
         self._create_session(session_store)
         audit_store.insert(
