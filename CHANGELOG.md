@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.6] - 2026-04-23
+
+### Added
+
+- **Assistant thinking events** -- Allow `assistant_thinking` session events so event ingestion, validation, and downstream consumers can capture internal assistant-thought stream records explicitly.
+
+### Fixed
+
+- **Intention updates** -- Prioritize active user pivots so fresh user direction wins over stale session framing during intention regeneration.
+- **Structured output recovery** -- Recover from schema-invalid structured LLM responses instead of failing the request path when providers return malformed payloads.
+- **PostgreSQL connection usage** -- Prevent PostgreSQL pool exhaustion under load by tightening database connection lifecycle handling.
+
+### Changed
+
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.4.6`.
+
 ## [0.4.5] - 2026-04-19
 
 ### Added
@@ -198,6 +214,7 @@ Initial release.
 - **Client integrations** -- OpenCode plugin (`intaris.ts`) and Claude Code hooks (bash scripts).
 - **Documentation** -- Architecture, evaluation pipeline, configuration, REST API, MCP proxy, management UI, deployment, development, and client integration guides.
 
+[0.4.6]: https://github.com/fpytloun/intaris/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/fpytloun/intaris/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/fpytloun/intaris/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/fpytloun/intaris/compare/v0.4.2...v0.4.3
