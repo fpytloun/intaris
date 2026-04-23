@@ -547,6 +547,41 @@ class TestSessionEvents:
         assert payload["events"][0]["source"] == "cognis"
         assert payload["events"][0]["data"]["source"] == "memory_search"
 
+    def test_append_and_read_assistant_thinking_event(self, client_no_auth):
+        headers = {
+            "X-User-Id": "events-user-thinking",
+            "X-Agent-Id": "agent-1",
+            "X-Intaris-Source": "cognis",
+        }
+        _create_session(client_no_auth, "sess-events-thinking", headers)
+
+        append = client_no_auth.post(
+            "/api/v1/session/sess-events-thinking/events",
+            json={
+                "type": "assistant_thinking",
+                "data": {
+                    "message_id": "msg_turn_1",
+                    "block_id": "thk_1",
+                    "title": "Considering calibration for migration",
+                    "content": "For the migration and to address long-term drift...",
+                    "reasoning_source": "summary",
+                    "turn_id": "turn_1",
+                },
+            },
+            headers=headers,
+        )
+        assert append.status_code == 200
+
+        events = client_no_auth.get(
+            "/api/v1/session/sess-events-thinking/events?type=assistant_thinking",
+            headers=headers,
+        )
+        assert events.status_code == 200
+        payload = events.json()
+        assert [event["type"] for event in payload["events"]] == ["assistant_thinking"]
+        assert payload["events"][0]["data"]["title"] == "Considering calibration for migration"
+        assert payload["events"][0]["data"]["block_id"] == "thk_1"
+
     def test_read_events_rejects_invalid_position_range(self, client_no_auth):
         headers = {"X-User-Id": "events-user-6", "X-Agent-Id": "agent-1"}
         _create_session(client_no_auth, "sess-events-position-range", headers)

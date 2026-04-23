@@ -35,6 +35,7 @@ VALID_EVENT_TYPES = frozenset(
         "developer_message",
         "user_message",
         "assistant_message",
+        "assistant_thinking",
         "context_snapshot",
         "tool_call",
         "tool_result",
