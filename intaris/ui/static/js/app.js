@@ -393,8 +393,12 @@ document.addEventListener('alpine:init', () => {
             body: JSON.stringify({ token: exchangeToken })
           });
           if (resp.ok) {
-            // Clean token from URL after successful exchange
-            window.history.replaceState({}, '', window.location.pathname);
+            // Clean only the single-use token; keep deep-link params such as
+            // session_id so the nav store can open the requested modal.
+            params.delete('token');
+            const nextQuery = params.toString();
+            const nextUrl = window.location.pathname + (nextQuery ? '?' + nextQuery : '') + window.location.hash;
+            window.history.replaceState({}, '', nextUrl);
             // Cookie set by response — proceed with cookie auth
             await this.tryCookieAuth();
             if (this.authenticated) return;
@@ -547,6 +551,7 @@ document.addEventListener('alpine:init', () => {
     selectedAgent: '',
     agents: [],
     pendingApprovals: 0,
+    deepLinkHandled: false,
 
     // Session modal state
     sessionModal: null,
@@ -569,6 +574,26 @@ document.addEventListener('alpine:init', () => {
       window.dispatchEvent(new CustomEvent('intaris:tab-changed', {
         detail: { tab }
       }));
+    },
+
+    handleDeepLink() {
+      if (this.deepLinkHandled) return;
+      this.deepLinkHandled = true;
+
+      const params = new URLSearchParams(window.location.search);
+      const requestedTab = params.get('tab');
+      const sessionId = params.get('session_id');
+      const validTabs = ['dashboard', 'sessions', 'audit', 'approvals', 'analysis', 'servers', 'settings'];
+
+      if (sessionId) {
+        this.setTab('sessions');
+        void this.openSessionModal(sessionId);
+        return;
+      }
+
+      if (requestedTab && validTabs.includes(requestedTab)) {
+        this.setTab(requestedTab);
+      }
     },
 
     setAgent(agentId) {
@@ -943,6 +968,7 @@ document.addEventListener('alpine:init', () => {
     if (!auth.loading && auth.authenticated) {
       clearInterval(_checkAuth);
       Alpine.store('ws').connect();
+      Alpine.store('nav').handleDeepLink();
       // Fetch initial pending approvals count
       IntarisAPI.listAudit({ decision: 'escalate', resolved: false, limit: 1 })
         .then(result => {

@@ -46,11 +46,25 @@ function renderMarkdown(text) {
   try {
     const html = marked.parse(text);
     // Sanitize to prevent XSS from user-controlled content in assistant messages
-    if (typeof DOMPurify !== 'undefined') return DOMPurify.sanitize(html);
-    return html;
+    const safeHtml = typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(html) : html;
+    return markOutgoingLinks(safeHtml);
   } catch (_) {
     return escapeHtml(text);
   }
+}
+
+function markOutgoingLinks(html) {
+  if (typeof document === 'undefined') return html;
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  template.content.querySelectorAll('a[href]').forEach((link) => {
+    const href = (link.getAttribute('href') || '').trim().toLowerCase();
+    if (href.startsWith('http://') || href.startsWith('https://') || href.startsWith('mailto:')) {
+      link.setAttribute('target', '_blank');
+      link.setAttribute('rel', 'noopener noreferrer');
+    }
+  });
+  return template.innerHTML;
 }
 
 function escapeHtml(str) {
