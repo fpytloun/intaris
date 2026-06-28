@@ -8,6 +8,7 @@ import os
 import tempfile
 
 import pytest
+from mcp.types import CallToolResult, TextContent
 
 from intaris.audit import AuditStore
 from intaris.classifier import Classification, classify
@@ -1133,6 +1134,217 @@ class TestConnectionManagerEvict:
 
             assert key not in mgr._lifecycle_tasks
             assert key not in mgr._lifecycle_queues
+
+        asyncio.run(_test())
+
+
+class _RecordingEvaluator:
+    def __init__(self, decision: str = "approve"):
+        self.decision = decision
+        self.calls: list[dict] = []
+
+    def evaluate(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "decision": self.decision,
+            "call_id": "call-test",
+            "reasoning": "ok",
+        }
+
+
+class _MCPProxyServerStore:
+    def get_all_tool_preferences(self, *, user_id: str):
+        assert user_id
+        return {}
+
+    def get_server(self, *, user_id: str, name: str, decrypt_secrets: bool = False):
+        assert user_id
+        assert decrypt_secrets is True
+        return {
+            "name": name,
+            "transport": "streamable-http",
+            "url": "https://example.test/mcp",
+        }
+
+
+class _RecordingMCPClient:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def call_tool(self, *, name, arguments, read_timeout_seconds):
+        self.calls.append(
+            {
+                "name": name,
+                "arguments": arguments,
+                "read_timeout_seconds": read_timeout_seconds,
+            }
+        )
+        return CallToolResult(
+            content=[TextContent(type="text", text="ok")],
+            isError=False,
+        )
+
+
+class _MCPProxyConnectionManager:
+    def __init__(self):
+        self.client = _RecordingMCPClient()
+
+    def connection_count(self):
+        return 0
+
+    async def get_or_connect(self, *, server_config, user_id):
+        assert server_config["name"]
+        assert user_id
+        return self.client
+
+    async def start(self):
+        return None
+
+    async def shutdown(self):
+        return None
+
+
+class _MCPProxySessionStore:
+    def __init__(self):
+        self.created: list[dict] = []
+
+    def create(self, *, user_id: str, session_id: str, intention: str):
+        self.created.append(
+            {
+                "user_id": user_id,
+                "session_id": session_id,
+                "intention": intention,
+            }
+        )
+
+
+class TestMCPProxyEvaluatorArgumentCompaction:
+    def test_compacts_large_base64_payloads_for_evaluator(self):
+        from intaris.mcp.proxy import _compact_evaluator_args
+
+        payload = "A" * 12000
+        args = {
+            "attachments": [
+                {
+                    "filename": "invoice.pdf",
+                    "mime_type": "application/pdf",
+                    "content": payload,
+                }
+            ]
+        }
+
+        compacted = _compact_evaluator_args(args)
+
+        content = compacted["attachments"][0]["content"]
+        assert payload not in json.dumps(compacted)
+        assert "long string omitted" in content
+        assert "likely_base64=true" in content
+        assert "chars=12000" in content
+        assert compacted["attachments"][0]["filename"] == "invoice.pdf"
+        assert compacted["attachments"][0]["mime_type"] == "application/pdf"
+
+    def test_compaction_preserves_all_container_entries(self):
+        from intaris.mcp.proxy import _compact_evaluator_args
+
+        args = {"items": [{"id": index, "operation": "read"} for index in range(150)]}
+        args["items"][149]["operation"] = "delete-everything"
+
+        compacted = _compact_evaluator_args(args)
+
+        assert len(compacted["items"]) == 150
+        assert compacted["items"][149]["operation"] == "delete-everything"
+        assert "__intaris_omitted_keys__" not in compacted
+        assert "omitted" not in json.dumps(compacted)
+
+    def test_rest_call_evaluates_compacted_args_but_executes_original_args(self):
+        async def _test():
+            from intaris.mcp.proxy import MCPProxy
+
+            payload = "A" * 12000
+            args = {
+                "to": "finance@example.test",
+                "attachments": [
+                    {
+                        "filename": "invoice.pdf",
+                        "mime_type": "application/pdf",
+                        "content": payload,
+                    }
+                ],
+            }
+            evaluator = _RecordingEvaluator()
+            conn_mgr = _MCPProxyConnectionManager()
+            proxy = MCPProxy(
+                connection_manager=conn_mgr,
+                evaluator=evaluator,
+                session_store=None,
+                audit_store=None,
+                server_store=_MCPProxyServerStore(),
+            )
+
+            result = await proxy.call_tool_rest(
+                user_id=TEST_USER,
+                agent_id="agent",
+                session_id="sess-1",
+                server_name="googleworkspace",
+                tool_name="send_gmail_message",
+                arguments=args,
+            )
+
+            assert result["isError"] is False
+            evaluated_args = evaluator.calls[0]["args"]
+            evaluated_content = evaluated_args["attachments"][0]["content"]
+            assert payload not in json.dumps(evaluated_args)
+            assert "long string omitted" in evaluated_content
+            assert conn_mgr.client.calls[0]["arguments"] == args
+            assert (
+                conn_mgr.client.calls[0]["arguments"]["attachments"][0]["content"]
+                == payload
+            )
+
+        asyncio.run(_test())
+
+    def test_protocol_call_evaluates_compacted_args_but_executes_original_args(self):
+        async def _test():
+            from intaris.mcp.proxy import MCPProxy
+            from intaris.server import _session_agent_id, _session_user_id
+
+            payload = "A" * 12000
+            args = {
+                "attachments": [
+                    {
+                        "filename": "invoice.pdf",
+                        "mime_type": "application/pdf",
+                        "content": payload,
+                    }
+                ],
+            }
+            evaluator = _RecordingEvaluator()
+            conn_mgr = _MCPProxyConnectionManager()
+            proxy = MCPProxy(
+                connection_manager=conn_mgr,
+                evaluator=evaluator,
+                session_store=_MCPProxySessionStore(),
+                audit_store=None,
+                server_store=_MCPProxyServerStore(),
+            )
+
+            user_token = _session_user_id.set(TEST_USER)
+            agent_token = _session_agent_id.set("agent")
+            try:
+                result = await proxy._handle_call_tool(
+                    "googleworkspace:send_gmail_message",
+                    args,
+                )
+            finally:
+                _session_agent_id.reset(agent_token)
+                _session_user_id.reset(user_token)
+
+            assert result[0].text == "ok"
+            evaluated_args = evaluator.calls[0]["args"]
+            evaluated_content = evaluated_args["attachments"][0]["content"]
+            assert payload not in json.dumps(evaluated_args)
+            assert "long string omitted" in evaluated_content
+            assert conn_mgr.client.calls[0]["arguments"] == args
 
         asyncio.run(_test())
 

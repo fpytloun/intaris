@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import hashlib
 import logging
 import time
 import uuid
@@ -45,6 +46,65 @@ _PROXY_INSTRUCTIONS_HEADER = (
     "are evaluated for safety before execution. If a tool call is escalated, "
     "wait for human approval and retry."
 )
+
+_EVALUATOR_MAX_STRING_CHARS = 4096
+_EVALUATOR_STRING_PREVIEW_CHARS = 512
+
+
+def _is_likely_base64_payload(value: str) -> bool:
+    """Return whether a long string looks like base64 payload data."""
+
+    compact = "".join(value.split())
+    if len(compact) < 512 or len(compact) % 4:
+        return False
+    alphabet = set(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=-_"
+    )
+    return all(ch in alphabet for ch in compact)
+
+
+def _compact_long_string(value: str) -> str:
+    """Replace a long string with bounded metadata for LLM evaluation."""
+
+    digest = hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+    likely_base64 = _is_likely_base64_payload(value)
+    if likely_base64:
+        return (
+            "<long string omitted for safety evaluation: "
+            f"chars={len(value)} sha256={digest} likely_base64=true>"
+        )
+
+    preview_chars = max(1, _EVALUATOR_STRING_PREVIEW_CHARS // 2)
+    head = value[:preview_chars]
+    tail = value[-preview_chars:]
+    return (
+        "<long string truncated for safety evaluation: "
+        f"chars={len(value)} sha256={digest} likely_base64=false "
+        f"head={head!r} tail={tail!r}>"
+    )
+
+
+def _compact_evaluator_args(value: Any) -> Any:
+    """Return a long-string-compacted argument view for LLM evaluation.
+
+    The returned value keeps the original JSON structure and all container
+    entries, but replaces large string payloads with deterministic summaries.
+    The original arguments must still be used for upstream MCP execution after
+    approval.
+    """
+
+    if isinstance(value, str):
+        if len(value) <= _EVALUATOR_MAX_STRING_CHARS:
+            return value
+        return _compact_long_string(value)
+
+    if isinstance(value, list):
+        return [_compact_evaluator_args(item) for item in value]
+
+    if isinstance(value, dict):
+        return {str(key): _compact_evaluator_args(item) for key, item in value.items()}
+
+    return value
 
 
 class MCPProxy:
@@ -378,6 +438,8 @@ class MCPProxy:
             user_id=user_id,
         )
 
+        evaluator_args = _compact_evaluator_args(arguments)
+
         # Run safety evaluation (sync evaluator wrapped in to_thread).
         eval_result = await asyncio.to_thread(
             self._evaluator.evaluate,
@@ -385,7 +447,7 @@ class MCPProxy:
             session_id=session_id,
             agent_id=agent_id,
             tool=name,
-            args=arguments,
+            args=evaluator_args,
             tool_preferences=tool_prefs,
         )
 
@@ -618,6 +680,8 @@ class MCPProxy:
             user_id=user_id,
         )
 
+        evaluator_args = _compact_evaluator_args(arguments)
+
         # Run safety evaluation (sync evaluator wrapped in to_thread).
         eval_result = await asyncio.to_thread(
             self._evaluator.evaluate,
@@ -625,7 +689,7 @@ class MCPProxy:
             session_id=session_id,
             agent_id=agent_id,
             tool=namespaced,
-            args=arguments,
+            args=evaluator_args,
             tool_preferences=tool_prefs,
         )
 
