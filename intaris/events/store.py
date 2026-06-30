@@ -358,6 +358,121 @@ class EventStore:
 
         return events
 
+    def read_before(
+        self,
+        user_id: str,
+        session_id: str,
+        before_seq: int,
+        limit: int,
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        data_sources: set[str] | None = None,
+        turn_id: str | None = None,
+        min_position: int | None = None,
+        max_position: int | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[dict]:
+        """Read the last matching events with seq < before_seq in chronological order."""
+        if before_seq <= 0 or limit <= 0:
+            return []
+
+        with self._lock:
+            key = (user_id, session_id)
+            buffer_events = list(self._buffers.get(key, []))
+
+        payload_filtering = (
+            data_sources
+            or turn_id is not None
+            or min_position is not None
+            or max_position is not None
+        )
+        filtered_buffer = [
+            event
+            for event in buffer_events
+            if event.get("seq", 0) < before_seq
+            and self._event_matches_filters(
+                event,
+                event_types=event_types,
+                sources=sources,
+                exclude_sources=exclude_sources,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
+            and (
+                not payload_filtering
+                or self._event_matches_payload_filters(
+                    event,
+                    data_sources=data_sources,
+                    turn_id=turn_id,
+                    min_position=min_position,
+                    max_position=max_position,
+                )
+            )
+        ]
+        filtered_buffer.sort(key=lambda e: e.get("seq", 0))
+        if len(filtered_buffer) >= limit:
+            return filtered_buffer[-limit:]
+
+        max_persisted_seq = min(before_seq - 1, self._backend.last_seq(user_id, session_id))
+        if max_persisted_seq <= 0:
+            return filtered_buffer[-limit:]
+
+        fetch_limit = min(max_persisted_seq, max(limit, limit + len(buffer_events)))
+        previous_persisted_count = -1
+
+        while fetch_limit > 0:
+            persisted_events = self._backend.read_before(
+                user_id,
+                session_id,
+                before_seq=before_seq,
+                limit=fetch_limit,
+                event_types=event_types,
+                sources=sources,
+                exclude_sources=exclude_sources,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
+            raw_persisted_count = len(persisted_events)
+            if payload_filtering:
+                persisted_events = [
+                    event
+                    for event in persisted_events
+                    if self._event_matches_payload_filters(
+                        event,
+                        data_sources=data_sources,
+                        turn_id=turn_id,
+                        min_position=min_position,
+                        max_position=max_position,
+                    )
+                ]
+
+            combined = persisted_events + filtered_buffer
+            combined.sort(key=lambda e: e.get("seq", 0))
+
+            seen: set[int] = set()
+            deduped: list[dict] = []
+            for event in combined:
+                seq = event.get("seq", 0)
+                if seq not in seen:
+                    seen.add(seq)
+                    deduped.append(event)
+
+            if len(deduped) >= limit:
+                return deduped[-limit:]
+            if raw_persisted_count < fetch_limit:
+                return deduped[-limit:]
+            if raw_persisted_count == previous_persisted_count:
+                return deduped[-limit:]
+            if fetch_limit >= max_persisted_seq:
+                return deduped[-limit:]
+
+            previous_persisted_count = raw_persisted_count
+            fetch_limit = min(fetch_limit * 2, max_persisted_seq)
+
+        return filtered_buffer[-limit:]
+
     def read_tail(
         self,
         user_id: str,

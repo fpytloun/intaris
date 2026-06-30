@@ -173,6 +173,21 @@ class EventBackend(Protocol):
         """
         ...
 
+    def read_before(
+        self,
+        user_id: str,
+        session_id: str,
+        before_seq: int,
+        limit: int,
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[dict]:
+        """Read the last matching events with seq < before_seq in chronological order."""
+        ...
+
     def read_tail(
         self,
         user_id: str,
@@ -351,6 +366,50 @@ class FilesystemEventBackend:
                     result.append(event)
 
         result.sort(key=lambda e: e.get("seq", 0))
+        return result
+
+    def read_before(
+        self,
+        user_id: str,
+        session_id: str,
+        before_seq: int,
+        limit: int,
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[dict]:
+        if before_seq <= 0 or limit <= 0:
+            return []
+
+        chunks: list[tuple[int, int, Path]] = []
+        for session_dir in self._session_dir_candidates(user_id, session_id):
+            chunks.extend(self._list_chunks(session_dir))
+        chunks.sort(key=lambda c: c[0])
+        result: list[dict] = []
+
+        for start_seq, _, chunk_path in reversed(chunks):
+            if start_seq >= before_seq:
+                continue
+            events = _ndjson_to_events(chunk_path.read_bytes())
+            for event in reversed(events):
+                if event.get("seq", 0) >= before_seq:
+                    continue
+                if _event_matches_filters(
+                    event,
+                    event_types=event_types,
+                    sources=sources,
+                    exclude_sources=exclude_sources,
+                    after_ts=after_ts,
+                    before_ts=before_ts,
+                ):
+                    result.append(event)
+                    if len(result) >= limit:
+                        result.reverse()
+                        return result
+
+        result.reverse()
         return result
 
     def read_tail(
@@ -600,6 +659,49 @@ class S3EventBackend:
                     result.append(event)
 
         result.sort(key=lambda e: e.get("seq", 0))
+        return result
+
+    def read_before(
+        self,
+        user_id: str,
+        session_id: str,
+        before_seq: int,
+        limit: int,
+        event_types: set[str] | None = None,
+        sources: set[str] | None = None,
+        exclude_sources: set[str] | None = None,
+        after_ts: str | None = None,
+        before_ts: str | None = None,
+    ) -> list[dict]:
+        if before_seq <= 0 or limit <= 0:
+            return []
+
+        chunks = self._list_chunks(user_id, session_id)
+        result: list[dict] = []
+
+        for start_seq, _, key in reversed(chunks):
+            if start_seq >= before_seq:
+                continue
+            response = self._client.get_object(Bucket=self._bucket, Key=key)
+            data = response["Body"].read()
+            events = _ndjson_to_events(data)
+            for event in reversed(events):
+                if event.get("seq", 0) >= before_seq:
+                    continue
+                if _event_matches_filters(
+                    event,
+                    event_types=event_types,
+                    sources=sources,
+                    exclude_sources=exclude_sources,
+                    after_ts=after_ts,
+                    before_ts=before_ts,
+                ):
+                    result.append(event)
+                    if len(result) >= limit:
+                        result.reverse()
+                        return result
+
+        result.reverse()
         return result
 
     def read_tail(

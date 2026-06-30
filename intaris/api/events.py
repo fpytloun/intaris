@@ -462,7 +462,7 @@ async def append_events(
     summary="Read session events",
     description=(
         "Read events from a session's event log with optional filtering. "
-        "Supports pagination via after_seq and limit parameters."
+        "Supports pagination via after_seq, before_seq, and limit parameters."
     ),
 )
 async def read_events(
@@ -470,6 +470,11 @@ async def read_events(
     request: Request,
     ctx: SessionContext = Depends(get_session_context),
     after_seq: int = Query(0, ge=0, description="Return events with seq > this value"),
+    before_seq: int | None = Query(
+        None,
+        ge=0,
+        description="Return the last events with seq < this value; requires limit",
+    ),
     limit: int = Query(0, ge=0, description="Max events to return (0 = all)"),
     last_n: int = Query(
         0,
@@ -480,7 +485,7 @@ async def read_events(
         None,
         description=(
             "Comma-separated exact event sequence numbers to return. Mutually exclusive "
-            "with after_seq, limit, and last_n."
+            "with after_seq, before_seq, limit, and last_n."
         ),
     ),
     type: str | None = Query(
@@ -530,20 +535,30 @@ async def read_events(
 
     exact_seqs = _parse_event_seqs(seqs)
 
-    if exact_seqs and (after_seq or limit or last_n):
+    if exact_seqs and (after_seq or before_seq is not None or limit or last_n):
         raise HTTPException(
             status_code=400,
-            detail="seqs is mutually exclusive with after_seq, limit, and last_n",
+            detail="seqs is mutually exclusive with after_seq, before_seq, limit, and last_n",
         )
-    if last_n and after_seq:
+    if last_n and (after_seq or before_seq is not None):
         raise HTTPException(
             status_code=400,
-            detail="last_n and after_seq are mutually exclusive",
+            detail="last_n is mutually exclusive with after_seq and before_seq",
         )
     if last_n and limit:
         raise HTTPException(
             status_code=400,
             detail="last_n and limit are mutually exclusive",
+        )
+    if before_seq is not None and after_seq:
+        raise HTTPException(
+            status_code=400,
+            detail="before_seq and after_seq are mutually exclusive",
+        )
+    if before_seq is not None and not limit:
+        raise HTTPException(
+            status_code=400,
+            detail="before_seq requires limit",
         )
     if (
         min_position is not None
@@ -599,6 +614,23 @@ async def read_events(
                 after_ts=after_ts,
                 before_ts=before_ts,
             )
+        elif before_seq is not None:
+            fetch_limit = limit + 1
+            events = event_store.read_before(
+                ctx.user_id,
+                session_id,
+                before_seq=before_seq,
+                limit=fetch_limit,
+                event_types=event_types,
+                sources=event_sources,
+                exclude_sources=event_exclude_sources,
+                data_sources=event_data_sources,
+                turn_id=turn_id,
+                min_position=min_position,
+                max_position=max_position,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
         else:
             # Request one extra to determine has_more
             fetch_limit = limit + 1 if limit else 0
@@ -628,6 +660,9 @@ async def read_events(
     elif last_n and len(events) > last_n:
         has_more = True
         events = events[-last_n:]
+    elif before_seq is not None and limit and len(events) > limit:
+        has_more = True
+        events = events[-limit:]
     elif limit and len(events) > limit:
         has_more = True
         events = events[:limit]

@@ -403,8 +403,10 @@ Read events with pagination and filtering.
 | Parameter | Default | Description |
 |---|---|---|
 | `after_seq` | `0` | Return events after this sequence number |
+| `before_seq` | (none) | Return the last events before this sequence number; requires `limit` |
 | `limit` | `0` | Max events to return (`0` = all) |
 | `last_n` | `0` | Return the last N matching events in chronological order |
+| `seqs` | (none) | Comma-separated exact sequence numbers to return |
 | `type` | (all) | Filter by event type |
 | `source` | (all) | Filter by writer source (`X-Intaris-Source`) |
 | `exclude_source` | (none) | Exclude writer sources |
@@ -415,7 +417,10 @@ Read events with pagination and filtering.
 | `after_ts` | (none) | Return events after this ISO 8601 timestamp |
 | `before_ts` | (none) | Return events before this ISO 8601 timestamp |
 
-`last_n` is mutually exclusive with `after_seq` and `limit`.
+`last_n` is mutually exclusive with `after_seq`, `before_seq`, and `limit`.
+`before_seq` is mutually exclusive with `after_seq`, `last_n`, and `seqs`, and
+requires a positive `limit`. Results are returned in chronological order with
+`seq < before_seq`; `has_more=true` means older matching events are available.
 
 **Response:**
 

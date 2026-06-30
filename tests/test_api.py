@@ -654,12 +654,59 @@ class TestSessionEvents:
         assert [event["seq"] for event in data["events"]] == [5, 6]
         assert data["last_seq"] == 6
 
+    def test_read_events_before_seq(self, client_no_auth):
+        headers = {"X-User-Id": "events-user-before", "X-Agent-Id": "agent-1"}
+        _create_session(client_no_auth, "sess-events-before-seq", headers)
+
+        for idx in range(5):
+            resp = client_no_auth.post(
+                "/api/v1/session/sess-events-before-seq/events",
+                json={"type": "message", "data": {"index": idx}},
+                headers=headers,
+            )
+            assert resp.status_code == 200
+
+        resp = client_no_auth.get(
+            "/api/v1/session/sess-events-before-seq/events?before_seq=6&limit=2&type=message",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [event["seq"] for event in data["events"]] == [4, 5]
+        assert data["last_seq"] == 6
+        assert data["has_more"] is True
+
     def test_last_n_and_after_seq_are_mutually_exclusive(self, client_no_auth):
         headers = {"X-User-Id": "events-user-2", "X-Agent-Id": "agent-1"}
         _create_session(client_no_auth, "sess-events-mutual", headers)
 
         resp = client_no_auth.get(
             "/api/v1/session/sess-events-mutual/events?last_n=2&after_seq=1",
+            headers=headers,
+        )
+        assert resp.status_code == 400
+        assert "mutually exclusive" in resp.json()["detail"]
+
+    def test_before_seq_rejects_conflicting_pagination(self, client_no_auth):
+        headers = {"X-User-Id": "events-user-before-conflict", "X-Agent-Id": "agent-1"}
+        _create_session(client_no_auth, "sess-events-before-conflict", headers)
+
+        resp = client_no_auth.get(
+            "/api/v1/session/sess-events-before-conflict/events?before_seq=5",
+            headers=headers,
+        )
+        assert resp.status_code == 400
+        assert "requires limit" in resp.json()["detail"]
+
+        resp = client_no_auth.get(
+            "/api/v1/session/sess-events-before-conflict/events?before_seq=5&after_seq=1&limit=2",
+            headers=headers,
+        )
+        assert resp.status_code == 400
+        assert "mutually exclusive" in resp.json()["detail"]
+
+        resp = client_no_auth.get(
+            "/api/v1/session/sess-events-before-conflict/events?before_seq=5&last_n=2&limit=2",
             headers=headers,
         )
         assert resp.status_code == 400

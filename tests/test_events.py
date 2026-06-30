@@ -240,6 +240,69 @@ class TestFilesystemEventBackend:
         result = backend.read_tail("alice", "sess1", limit=2)
         assert [e["seq"] for e in result] == [4, 5]
 
+    def test_read_before_seq(self, backend):
+        events = [
+            {"seq": i, "ts": f"t-{i}", "type": "message", "data": {}}
+            for i in range(1, 6)
+        ]
+        backend.append("alice", "sess1", events)
+
+        result = backend.read_before("alice", "sess1", before_seq=5, limit=2)
+        assert [e["seq"] for e in result] == [3, 4]
+
+    def test_read_before_seq_with_filters(self, backend):
+        backend.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "seq": 1,
+                    "ts": "t-1",
+                    "type": "message",
+                    "source": "client",
+                    "data": {},
+                },
+                {
+                    "seq": 2,
+                    "ts": "t-2",
+                    "type": "evaluation",
+                    "source": "intaris",
+                    "data": {},
+                },
+                {
+                    "seq": 3,
+                    "ts": "t-3",
+                    "type": "message",
+                    "source": "client",
+                    "data": {},
+                },
+                {
+                    "seq": 4,
+                    "ts": "t-4",
+                    "type": "tool_call",
+                    "source": "client",
+                    "data": {},
+                },
+                {
+                    "seq": 5,
+                    "ts": "t-5",
+                    "type": "message",
+                    "source": "client",
+                    "data": {},
+                },
+            ],
+        )
+
+        result = backend.read_before(
+            "alice",
+            "sess1",
+            before_seq=5,
+            limit=2,
+            event_types={"message"},
+            sources={"client"},
+        )
+        assert [e["seq"] for e in result] == [1, 3]
+
     def test_read_tail_with_filters(self, backend):
         backend.append(
             "alice",
@@ -308,6 +371,27 @@ class TestFilesystemEventBackend:
         result = backend.read("alice", "sess1")
         assert len(result) == 4
         assert [e["seq"] for e in result] == [1, 2, 3, 4]
+
+    def test_read_before_seq_across_chunks(self, backend):
+        """Backward reading works across multiple chunk files."""
+        chunk1 = [
+            {"seq": 1, "ts": "t", "type": "message", "data": {}},
+            {"seq": 2, "ts": "t", "type": "message", "data": {}},
+        ]
+        chunk2 = [
+            {"seq": 3, "ts": "t", "type": "message", "data": {}},
+            {"seq": 4, "ts": "t", "type": "message", "data": {}},
+        ]
+        chunk3 = [
+            {"seq": 5, "ts": "t", "type": "message", "data": {}},
+            {"seq": 6, "ts": "t", "type": "message", "data": {}},
+        ]
+        backend.append("alice", "sess1", chunk1)
+        backend.append("alice", "sess1", chunk2)
+        backend.append("alice", "sess1", chunk3)
+
+        result = backend.read_before("alice", "sess1", before_seq=5, limit=3)
+        assert [e["seq"] for e in result] == [2, 3, 4]
 
     def test_read_after_seq_skips_entire_chunks(self, backend):
         """Chunks entirely before after_seq are skipped."""
@@ -1037,6 +1121,16 @@ class TestEventStore:
         events = store.read_tail("alice", "sess1", limit=2)
         assert [e["seq"] for e in events] == [2, 3]
 
+    def test_read_before_seq_from_buffer(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "message", "data": {}} for _ in range(4)],
+        )
+
+        events = store.read_before("alice", "sess1", before_seq=4, limit=2)
+        assert [e["seq"] for e in events] == [2, 3]
+
     def test_read_tail_combines_backend_and_buffer(self, store):
         store.append(
             "alice", "sess1", [{"type": "message", "data": {}} for _ in range(5)]
@@ -1047,6 +1141,17 @@ class TestEventStore:
 
         events = store.read_tail("alice", "sess1", limit=4)
         assert [e["seq"] for e in events] == [4, 5, 6, 7]
+
+    def test_read_before_seq_combines_backend_and_buffer(self, store):
+        store.append(
+            "alice", "sess1", [{"type": "message", "data": {}} for _ in range(5)]
+        )
+        store.append(
+            "alice", "sess1", [{"type": "tool_call", "data": {}} for _ in range(2)]
+        )
+
+        events = store.read_before("alice", "sess1", before_seq=7, limit=3)
+        assert [e["seq"] for e in events] == [4, 5, 6]
 
     def test_read_tail_with_filters(self, store):
         store.append(
@@ -1063,6 +1168,71 @@ class TestEventStore:
 
         events = store.read_tail("alice", "sess1", limit=2, event_types={"message"})
         assert [e["seq"] for e in events] == [3, 5]
+
+    def test_read_before_seq_with_payload_filters_across_persisted_and_buffer(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "type": "system_message",
+                    "data": {"source": "identity", "turn_id": "turn-0", "position": 0},
+                },
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-1",
+                        "position": 0,
+                    },
+                },
+                {
+                    "type": "assistant_message",
+                    "data": {"content": "hello", "turn_id": "turn-1", "position": 1},
+                },
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-2",
+                        "position": 0,
+                    },
+                },
+                {
+                    "type": "context_snapshot",
+                    "data": {"source": "bootstrap", "entries": []},
+                },
+            ],
+            source="cognis",
+        )
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "type": "developer_message",
+                    "data": {
+                        "source": "memory_search",
+                        "turn_id": "turn-3",
+                        "position": 0,
+                    },
+                },
+                {
+                    "type": "assistant_message",
+                    "data": {"content": "done", "turn_id": "turn-3", "position": 1},
+                },
+            ],
+            source="cognis",
+        )
+
+        events = store.read_before(
+            "alice",
+            "sess1",
+            before_seq=7,
+            limit=2,
+            data_sources={"memory_search"},
+        )
+        assert [event["seq"] for event in events] == [4, 6]
 
     def test_read_with_multiple_source_filter(self, store):
         """Multiple sources in filter returns events from any of them."""
