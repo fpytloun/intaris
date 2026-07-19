@@ -1053,7 +1053,12 @@
       <div x-show="$store.nav.activeTab === 'audit'" x-data="auditTab()" x-init="init()">
         <!-- Filters -->
         <div class="card mb-4">
-          <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div class="grid grid-cols-2 md:grid-cols-6 gap-3">
+            <select x-model="filterSource" class="select text-sm">
+              <option value="all">Evaluations + events</option>
+              <option value="evaluations">Evaluations only</option>
+              <option value="events">Events only</option>
+            </select>
             <input x-model="filterSession" placeholder="Session ID" class="input text-sm">
             <input x-model="filterTool" placeholder="Tool" class="input text-sm">
             <select x-model="filterDecision" class="select text-sm">
@@ -1088,18 +1093,22 @@
 
         <!-- Audit Records -->
         <div class="space-y-2">
-          <template x-for="r in records" :key="r.call_id">
+          <template x-for="r in records" :key="r.id || r.call_id">
             <div class="card cursor-pointer" @click="toggleExpand(r)">
               <div class="flex items-center justify-between">
                 <div class="flex items-center gap-3">
-                  <span :class="decisionBadgeClass(r.decision)" x-text="r.decision"></span>
+                  <span :class="sourceBadgeClass(r.source)"
+                        x-text="r.source === 'event' ? 'event' : 'evaluation'"></span>
+                  <span x-show="r.decision"
+                        :class="decisionBadgeClass(r.decision)" x-text="r.decision"></span>
                   <span x-show="r.decision === 'escalate' && r.user_decision"
                         :class="decisionBadgeClass(r.user_decision)" x-text="r.user_decision"></span>
                   <span class="font-mono text-sm" x-text="r.tool || r.record_type"></span>
-                  <span x-show="r.record_type && r.record_type !== 'tool_call'"
+                  <span x-show="r.record_type && (r.record_type !== 'tool_call' || r.source === 'event')"
                         :class="recordTypeBadgeClass(r.record_type)" x-text="r.record_type"></span>
                   <span :class="riskBadgeClass(r.risk)" x-text="r.risk" x-show="r.risk"></span>
-                  <span :class="pathBadgeClass(r.evaluation_path)" x-text="r.evaluation_path"></span>
+                  <span x-show="r.evaluation_path"
+                        :class="pathBadgeClass(r.evaluation_path)" x-text="r.evaluation_path"></span>
                 </div>
                 <div class="flex items-center gap-3 text-xs text-muted">
                   <span x-show="r.agent_id" class="font-mono" x-text="r.agent_id"></span>
@@ -1107,14 +1116,16 @@
                         @click.stop="goToSession(r.session_id)"
                         x-text="r.session_id"></span>
                   <span x-text="formatTime(r.timestamp)"></span>
-                  <span x-text="r.latency_ms + 'ms'"></span>
+                  <span x-show="r.event_source" x-text="r.event_source"></span>
+                  <span x-show="r.latency_ms != null" x-text="r.latency_ms + 'ms'"></span>
+                  <span x-show="r.duration_ms != null" x-text="r.duration_ms + 'ms'"></span>
                 </div>
               </div>
               <!-- Intention (if present) -->
               <div x-show="r.intention" class="mt-1 text-xs text-muted truncate" x-text="r.intention"></div>
 
                 <!-- Expanded Detail -->
-              <div x-show="expandedId === r.call_id" x-cloak class="mt-4 pt-4 border-t border-brand-border">
+              <div x-show="expandedId === (r.id || r.call_id)" x-cloak class="mt-4 pt-4 border-t border-brand-border">
                 <!-- Content (for reasoning/checkpoint/summary records) -->
                 <template x-if="expandedRecord?.content">
                   <div class="mb-3">
@@ -1272,6 +1283,9 @@
                   <div>Classification: <span x-text="expandedRecord?.classification"></span></div>
                   <div>Agent: <span x-text="expandedRecord?.agent_id || 'none'"></span></div>
                   <div>User: <span x-text="expandedRecord?.user_id"></span></div>
+                  <div x-show="expandedRecord?.source === 'event'">Sequence: <span x-text="expandedRecord?.seq"></span></div>
+                  <div x-show="expandedRecord?.event_source">Event source: <span x-text="expandedRecord?.event_source"></span></div>
+                  <div x-show="expandedRecord?.is_error != null">Error: <span x-text="expandedRecord?.is_error"></span></div>
                 </div>
               </div>
             </div>

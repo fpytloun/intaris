@@ -320,7 +320,7 @@ class AuditStore:
                 f"""
                 SELECT * FROM audit_log
                 {where}
-                ORDER BY timestamp DESC
+                ORDER BY timestamp DESC, id DESC
                 LIMIT ? OFFSET ?
                 """,
                 params + [limit, offset],

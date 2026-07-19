@@ -15,6 +15,7 @@ function auditTab() {
     expandedRecord: null,
     resolving: {},
     noteText: {},
+    eventReloadTimer: null,
 
     // Filters
     filterSession: '',
@@ -22,6 +23,7 @@ function auditTab() {
     filterDecision: '',
     filterRisk: '',
     filterPath: '',
+    filterSource: 'all',
 
     init() {
       window.addEventListener('intaris:tab-changed', (e) => {
@@ -48,6 +50,7 @@ function auditTab() {
       if (Alpine.store('nav').activeTab !== 'audit') return;
 
       if (data.type === 'evaluated') {
+        if (this.filterSource === 'events') return;
         // Only add if on page 1 and matches current filters
         if (this.page !== 1) return;
         if (this.filterSession && data.session_id !== this.filterSession) return;
@@ -63,6 +66,7 @@ function auditTab() {
         this.records = [
           {
             call_id: callId,
+            source: 'evaluation',
             decision: data.decision,
             tool: data.tool,
             risk: data.risk,
@@ -75,9 +79,21 @@ function auditTab() {
             agent_id: data.agent_id,
             timestamp: data.timestamp || new Date().toISOString(),
           },
-          ...this.records.filter(r => r.call_id !== callId),
+          ...this.records.filter(
+            r => r.source === 'event' || r.call_id !== callId
+          ),
         ].slice(0, 30);
         this.total++;
+      }
+
+      if (
+        data.type === 'session_event'
+        && ['tool_call', 'tool_result'].includes(data.event?.type)
+        && this.filterSource !== 'evaluations'
+        && this.page === 1
+      ) {
+        clearTimeout(this.eventReloadTimer);
+        this.eventReloadTimer = setTimeout(() => this.load(), 150);
       }
 
       if (data.type === 'decided') {
@@ -95,6 +111,7 @@ function auditTab() {
       this.loading = true;
       try {
         const params = { page: this.page, limit: 30 };
+        params.source = this.filterSource;
         if (this.filterSession) params.session_id = this.filterSession;
         if (this.filterTool) params.tool = this.filterTool;
         if (this.filterDecision) params.decision = this.filterDecision;
@@ -124,6 +141,7 @@ function auditTab() {
       this.filterDecision = '';
       this.filterRisk = '';
       this.filterPath = '';
+      this.filterSource = 'all';
       this.page = 1;
       this.load();
     },
@@ -137,12 +155,17 @@ function auditTab() {
     },
 
     async toggleExpand(record) {
-      if (this.expandedId === record.call_id) {
+      const recordId = record.id || record.call_id;
+      if (this.expandedId === recordId) {
         this.expandedId = null;
         this.expandedRecord = null;
         return;
       }
-      this.expandedId = record.call_id;
+      this.expandedId = recordId;
+      if (record.source === 'event') {
+        this.expandedRecord = record;
+        return;
+      }
       try {
         this.expandedRecord = await IntarisAPI.getAuditRecord(record.call_id);
       } catch (e) {
@@ -152,11 +175,17 @@ function auditTab() {
 
     _applyResolutionUpdate(callId, updates) {
       if (!callId) return;
-      const record = this.records.find(r => r.call_id === callId);
+      const record = this.records.find(
+        r => r.source !== 'event' && r.call_id === callId
+      );
       if (record) {
         Object.assign(record, updates);
       }
-      if (this.expandedRecord && this.expandedRecord.call_id === callId) {
+      if (
+        this.expandedRecord
+        && this.expandedRecord.source !== 'event'
+        && this.expandedRecord.call_id === callId
+      ) {
         this.expandedRecord = { ...this.expandedRecord, ...updates };
       }
     },
@@ -249,6 +278,12 @@ function auditTab() {
         summary: 'badge badge-summary',
       };
       return classes[type] || 'badge badge-low';
+    },
+
+    sourceBadgeClass(source) {
+      return source === 'event'
+        ? 'badge badge-checkpoint'
+        : 'badge badge-low';
     },
 
     formatTime(ts) {

@@ -1447,6 +1447,65 @@ class TestAudit:
         data = resp.json()
         assert all(item["decision"] == "approve" for item in data["items"])
 
+    def test_list_audit_includes_projected_tool_events(self, client_no_auth):
+        _, headers = self._setup_audit(client_no_auth, "user-events")
+        headers["X-Intaris-Source"] = "cognis"
+        append = client_no_auth.post(
+            "/api/v1/session/sess-user-events/events",
+            json=[
+                {
+                    "type": "tool_call",
+                    "data": {
+                        "name": "switch_agent_profile",
+                        "call_id": "profile-call",
+                        "arguments": {"profile_id": "developer"},
+                    },
+                },
+                {
+                    "type": "tool_result",
+                    "data": {
+                        "name": "switch_agent_profile",
+                        "call_id": "profile-call",
+                        "is_error": False,
+                        "duration_ms": 3,
+                        "result": "switched",
+                    },
+                },
+            ],
+            headers=headers,
+        )
+        assert append.status_code == 200
+
+        resp = client_no_auth.get(
+            "/api/v1/audit",
+            params={"source": "events", "tool": "switch_agent_profile"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert {item["record_type"] for item in data["items"]} == {
+            "tool_call",
+            "tool_result",
+        }
+        assert all(item["source"] == "event" for item in data["items"])
+        assert all(
+            "args_redacted" not in item or item["args_redacted"] is None
+            for item in data["items"]
+        )
+        assert all(
+            "content" not in item or item["content"] is None for item in data["items"]
+        )
+
+    def test_list_audit_rejects_invalid_source(self, client_no_auth):
+        headers = {"X-User-Id": "user-invalid-source"}
+        resp = client_no_auth.get(
+            "/api/v1/audit",
+            params={"source": "invalid"},
+            headers=headers,
+        )
+        assert resp.status_code == 400
+
     def test_get_audit_record(self, client_no_auth):
         result, headers = self._setup_audit(client_no_auth, "user-get")
         call_id = result["call_id"]

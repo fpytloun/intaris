@@ -604,6 +604,18 @@ async def lifespan(app):
     if cfg.event_store.enabled:
         event_store = EventStore(cfg.event_store)
         event_store.set_event_bus(app.state.event_bus)
+        from intaris.event_audit import EventAuditStore
+
+        event_store.set_audit_store(EventAuditStore(_get_db()))
+        try:
+            reconciled = event_store.reconcile_audit_index()
+            if reconciled:
+                logger.info("Reconciled %d historical audit events", reconciled)
+        except Exception:
+            logger.exception(
+                "Historical audit-event reconciliation failed; "
+                "continuing with live projection"
+            )
         app.state.event_store = event_store
         if app.state.intention_barrier is not None:
             app.state.intention_barrier.set_event_store(event_store)

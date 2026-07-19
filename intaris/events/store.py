@@ -81,6 +81,8 @@ class EventStore:
 
         # EventBus reference (set after initialization via set_event_bus)
         self._event_bus: Any = None
+        self._audit_store: Any = None
+        self._audit_reconcile_pending: dict[tuple[str, str], int] = {}
 
         logger.info(
             "Event store initialized (backend=%s, flush_size=%d, flush_interval=%ds)",
@@ -96,6 +98,10 @@ class EventStore:
         and EventBus are created.
         """
         self._event_bus = event_bus
+
+    def set_audit_store(self, audit_store: Any) -> None:
+        """Set the optional relational projection for auditable events."""
+        self._audit_store = audit_store
 
     def append(
         self,
@@ -162,8 +168,12 @@ class EventStore:
             buf.extend(enriched)
 
             # Flush if buffer exceeds threshold
-            if len(buf) >= self._config.flush_size:
+            if len(buf) >= self._config.flush_size or any(
+                event.get("type") in {"tool_call", "tool_result"} for event in enriched
+            ):
                 self._flush_locked(key)
+
+        self._reconcile_pending_audit({key})
 
         # Publish to EventBus for live tailing (outside lock).
         # Uses enriched copies (with seq/ts/source) rather than caller's dicts.
@@ -415,7 +425,9 @@ class EventStore:
         if len(filtered_buffer) >= limit:
             return filtered_buffer[-limit:]
 
-        max_persisted_seq = min(before_seq - 1, self._backend.last_seq(user_id, session_id))
+        max_persisted_seq = min(
+            before_seq - 1, self._backend.last_seq(user_id, session_id)
+        )
         if max_persisted_seq <= 0:
             return filtered_buffer[-limit:]
 
@@ -655,8 +667,10 @@ class EventStore:
 
         Called on session completion, termination, or suspension.
         """
+        key = (user_id, session_id)
         with self._lock:
-            self._flush_locked((user_id, session_id))
+            self._flush_locked(key)
+        self._reconcile_pending_audit({key})
 
     def flush_all(self) -> None:
         """Flush all buffered events to storage.
@@ -667,6 +681,8 @@ class EventStore:
         with self._lock:
             for key in list(self._buffers.keys()):
                 self._flush_locked(key)
+            pending = set(self._audit_reconcile_pending)
+        self._reconcile_pending_audit(pending)
 
     def delete_session(self, user_id: str, session_id: str) -> None:
         """Delete all events for a session (storage + buffer)."""
@@ -778,6 +794,97 @@ class EventStore:
             logger.debug("Swept %d stale seq counters", removed)
         return removed
 
+    def reconcile_audit_index(self, *, batch_size: int = 1000) -> int:
+        """Backfill the relational audit projection from durable event storage."""
+        if self._audit_store is None:
+            return 0
+
+        indexed = 0
+        for state in self._audit_store.projection_sessions():
+            user_id = state["user_id"]
+            session_id = state["session_id"]
+            after_seq = int(state["last_seq"])
+            try:
+                indexed += self._reconcile_audit_session(
+                    user_id=user_id,
+                    session_id=session_id,
+                    after_seq=after_seq,
+                    batch_size=batch_size,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile historical audit events for %s/%s; will retry",
+                    user_id,
+                    session_id,
+                )
+                with self._lock:
+                    self._audit_reconcile_pending[(user_id, session_id)] = after_seq
+        return indexed
+
+    def _reconcile_audit_session(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        after_seq: int,
+        batch_size: int = 1000,
+    ) -> int:
+        indexed = 0
+        while True:
+            events = self._backend.read(
+                user_id,
+                session_id,
+                after_seq=after_seq,
+                limit=batch_size,
+            )
+            if not events:
+                break
+            self._audit_store.index_events(
+                user_id=user_id,
+                session_id=session_id,
+                events=events,
+            )
+            indexed += sum(
+                event.get("type") in {"tool_call", "tool_result"} for event in events
+            )
+            after_seq = int(events[-1]["seq"])
+            if len(events) < batch_size:
+                break
+        return indexed
+
+    def _reconcile_pending_audit(
+        self, keys: set[tuple[str, str]] | None = None
+    ) -> None:
+        if self._audit_store is None:
+            return
+        with self._lock:
+            target_keys = keys or set(self._audit_reconcile_pending)
+            pending = {
+                key: self._audit_reconcile_pending.pop(key)
+                for key in target_keys
+                if key in self._audit_reconcile_pending
+            }
+        for (user_id, session_id), after_seq in pending.items():
+            try:
+                self._reconcile_audit_session(
+                    user_id=user_id,
+                    session_id=session_id,
+                    after_seq=after_seq,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to reconcile audit events for %s/%s; will retry",
+                    user_id,
+                    session_id,
+                )
+                with self._lock:
+                    existing = self._audit_reconcile_pending.get(
+                        (user_id, session_id), after_seq
+                    )
+                    self._audit_reconcile_pending[(user_id, session_id)] = min(
+                        existing, after_seq
+                    )
+
     @property
     def buffered_session_count(self) -> int:
         """Number of sessions with buffered (unflushed) events."""
@@ -798,6 +905,24 @@ class EventStore:
         user_id, session_id = key
         try:
             self._backend.append(user_id, session_id, buf)
+            if self._audit_store is not None:
+                try:
+                    checkpoint = self._audit_store.index_events(
+                        user_id=user_id,
+                        session_id=session_id,
+                        events=buf,
+                    )
+                    if checkpoint < int(buf[-1]["seq"]):
+                        existing = self._audit_reconcile_pending.get(key, checkpoint)
+                        self._audit_reconcile_pending[key] = min(existing, checkpoint)
+                except Exception:
+                    logger.exception(
+                        "Failed to index durable audit events for %s/%s; "
+                        "startup reconciliation will retry",
+                        user_id,
+                        session_id,
+                    )
+                    self._audit_reconcile_pending[key] = 0
             logger.debug(
                 "Flushed %d events for %s/%s (seq %d-%d)",
                 len(buf),

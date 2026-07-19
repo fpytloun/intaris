@@ -191,21 +191,29 @@ Valid transitions: `active` -> `idle`/`completed`/`suspended`/`terminated`, `idl
 
 ### GET /audit
 
-Query audit records with filtering and pagination.
+Query evaluation records, projected tool execution events, or a unified timeline
+with filtering and pagination. The API defaults to evaluations for backwards
+compatibility; the management UI requests the unified timeline.
 
 **Query parameters:**
 
 | Parameter | Default | Description |
 |---|---|---|
+| `source` | `evaluations` | Data source: `evaluations`, `events`, or `all` |
 | `session_id` | (all) | Filter by session ID |
+| `agent_id` | (all) | Filter by agent ID |
 | `decision` | (all) | Filter by decision: `approve`, `deny`, `escalate` |
 | `risk` | (all) | Filter by risk level |
 | `tool` | (all) | Filter by tool name |
 | `path` | (all) | Filter by evaluation path |
 | `record_type` | (all) | Filter by record type: `tool_call`, `reasoning`, `checkpoint`, `summary` |
 | `resolved` | (all) | Filter escalations: `true` (resolved), `false` (pending) |
+| `event_type` | (all) | Event-only filter: `tool_call` or `tool_result` |
+| `event_source` | (all) | Event-only filter for the recording source, for example `cognis` |
+| `from` | (all) | Inclusive ISO 8601 lower timestamp bound |
+| `to` | (all) | Inclusive ISO 8601 upper timestamp bound |
 | `page` | `1` | Page number |
-| `per_page` | `50` | Items per page (max 200) |
+| `limit` | `50` | Items per page (max 200) |
 
 **Response:**
 
@@ -214,6 +222,7 @@ Query audit records with filtering and pagination.
   "items": [
     {
       "call_id": "uuid-here",
+      "source": "evaluation",
       "session_id": "oc-ses_abc123",
       "user_id": "alice",
       "agent_id": "opencode",
@@ -240,6 +249,13 @@ Query audit records with filtering and pagination.
   "pages": 2
 }
 ```
+
+Event rows use `source: "event"` and `record_type: "tool_call"` or
+`"tool_result"`. They expose bounded metadata (`event_source`, `seq`,
+`is_error`, and `duration_ms`) but never copy raw arguments or tool output into
+the relational audit index. Decision-only filters (`decision`, `risk`, `path`,
+`record_type`, and `resolved`) exclude event rows; event-only filters exclude
+evaluation rows.
 
 For escalated records that have been resolved, `user_decision` is `"approve"` or `"deny"`, `resolved_by` is `"user"` (human) or `"judge"` (judge LLM), and `judge_reasoning` contains the judge's reasoning when the judge reviewed the escalation.
 

@@ -1446,8 +1446,8 @@ class BackgroundWorker:
 
             try:
                 buffered = self._event_store.buffered_event_count
+                self._event_store.flush_all()
                 if buffered > 0:
-                    self._event_store.flush_all()
                     logger.debug(
                         "Event store periodic flush: %d events flushed", buffered
                     )

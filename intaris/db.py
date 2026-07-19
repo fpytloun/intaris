@@ -1152,6 +1152,39 @@ CREATE INDEX IF NOT EXISTS idx_audit_decision
 CREATE INDEX IF NOT EXISTS idx_audit_record_type
     ON audit_log(record_type);
 
+CREATE TABLE IF NOT EXISTS audit_event_index (
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_source TEXT NOT NULL,
+    tool TEXT,
+    call_id TEXT,
+    audit_call_id TEXT,
+    is_error INTEGER,
+    duration_ms INTEGER,
+    PRIMARY KEY (user_id, session_id, seq),
+    FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_event_timeline
+    ON audit_event_index(user_id, timestamp DESC, session_id, seq);
+
+CREATE INDEX IF NOT EXISTS idx_audit_event_session
+    ON audit_event_index(user_id, session_id, timestamp DESC, seq);
+
+CREATE TABLE IF NOT EXISTS audit_event_projection_state (
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    last_seq INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, session_id),
+    FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
+        ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS event_append_idempotency (
     user_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -1421,6 +1454,39 @@ CREATE INDEX IF NOT EXISTS idx_audit_decision
     ON audit_log(decision);
 CREATE INDEX IF NOT EXISTS idx_audit_record_type
     ON audit_log(record_type);
+
+CREATE TABLE IF NOT EXISTS audit_event_index (
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    seq BIGINT NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL,
+    event_type TEXT NOT NULL,
+    event_source TEXT NOT NULL,
+    tool TEXT,
+    call_id TEXT,
+    audit_call_id TEXT,
+    is_error BOOLEAN,
+    duration_ms INTEGER,
+    PRIMARY KEY (user_id, session_id, seq),
+    FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
+        ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_event_timeline
+    ON audit_event_index(user_id, timestamp DESC, session_id, seq);
+
+CREATE INDEX IF NOT EXISTS idx_audit_event_session
+    ON audit_event_index(user_id, session_id, timestamp DESC, seq);
+
+CREATE TABLE IF NOT EXISTS audit_event_projection_state (
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    last_seq BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (user_id, session_id),
+    FOREIGN KEY (user_id, session_id) REFERENCES sessions(user_id, session_id)
+        ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS event_append_idempotency (
     user_id TEXT NOT NULL,

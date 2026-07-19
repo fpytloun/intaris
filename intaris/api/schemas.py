@@ -223,8 +223,9 @@ class AuditRecord(BaseModel):
     """
 
     id: str
-    call_id: str
+    call_id: str | None = None
     record_type: str = "tool_call"
+    source: Literal["evaluation", "event"] = "evaluation"
     user_id: str
     session_id: str
     agent_id: str | None = None
@@ -233,11 +234,16 @@ class AuditRecord(BaseModel):
     args_redacted: dict[str, Any] | None = None
     content: str | None = None
     classification: str | None = None
-    evaluation_path: str
-    decision: str
+    evaluation_path: str | None = None
+    decision: str | None = None
     risk: str | None = None
     reasoning: str | None = None
-    latency_ms: int
+    latency_ms: int | None = None
+    event_source: str | None = None
+    seq: int | None = None
+    is_error: bool | None = None
+    duration_ms: int | None = None
+    audit_call_id: str | None = None
     intention: str | None = None
     injection_detected: bool = False
     user_decision: str | None = None

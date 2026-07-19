@@ -32,17 +32,21 @@ async def list_audit(
     from_ts: str | None = Query(None, alias="from"),
     to_ts: str | None = Query(None, alias="to"),
     resolved: bool | None = Query(None),
+    source: str = Query("evaluations"),
+    event_type: str | None = Query(None),
+    event_source: str | None = Query(None),
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
 ) -> AuditListResponse:
     """Query audit log with filters and pagination."""
-    from intaris.audit import AuditStore
+    from intaris.event_audit import EventAuditStore
     from intaris.server import _get_db
 
     try:
-        store = AuditStore(_get_db())
+        store = EventAuditStore(_get_db())
         result = store.query(
             user_id=ctx.user_id,
+            source=source,
             session_id=session_id,
             agent_id=agent_id,
             record_type=record_type,
@@ -53,10 +57,14 @@ async def list_audit(
             from_ts=from_ts,
             to_ts=to_ts,
             resolved=resolved,
+            event_type=event_type,
+            event_source=event_source,
             page=page,
             limit=limit,
         )
         return AuditListResponse(**result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception:
         logger.exception("Error in /audit")
         raise HTTPException(
