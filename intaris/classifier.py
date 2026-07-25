@@ -279,6 +279,7 @@ _BENIGN_TEMPLATE_BASENAMES: set[str] = {
 
 _SENSITIVE_BASENAME_GLOBS: tuple[str, ...] = (
     ".env",
+    ".env*",
     ".env.*",
     ".npmrc",
     ".pypirc",
@@ -288,7 +289,9 @@ _SENSITIVE_BASENAME_GLOBS: tuple[str, ...] = (
     "*.key",
     "*private*.pem",
     "*privkey*.pem",
-    "*key*.pem",
+    "*-key.pem",
+    "*_key.pem",
+    "*.key.pem",
 )
 
 _SENSITIVE_SUFFIXES: tuple[str, ...] = (".key",)
@@ -377,7 +380,7 @@ def _is_sensitive_path(path: str) -> bool:
     basename = normalized.rsplit("/", 1)[-1]
     if any(char in basename for char in "*?["):
         return any(
-            fnmatch.fnmatchcase(pattern, basename)
+            fnmatch.fnmatchcase(basename, pattern)
             for pattern in _SENSITIVE_BASENAME_GLOBS
         )
     if _is_benign_env_template(basename):
@@ -388,7 +391,11 @@ def _is_sensitive_path(path: str) -> bool:
         or basename.endswith(_SENSITIVE_SUFFIXES)
         or (
             basename.endswith(".pem")
-            and any(marker in basename for marker in ("key", "private", "privkey"))
+            and (
+                "private" in basename
+                or "privkey" in basename
+                or basename.endswith(("-key.pem", "_key.pem", ".key.pem"))
+            )
         )
         or normalized == "config/database.yml"
         or normalized.endswith("/config/database.yml")
@@ -473,10 +480,10 @@ def _generic_file_operands(args: list[str]) -> list[str]:
             operands.extend(arg for arg in args[index + 1 :] if arg)
             break
         if token.startswith("-"):
-            if token in {"-d", "-f", "-n", "-c", "-m"}:
+            if token in {"-d", "-n", "-c", "-m", "--label", "-L"}:
                 skip_next = True
             continue
-        operands.append(_strip_assignment_prefix(token))
+        operands.append(token)
     return operands
 
 
@@ -484,27 +491,50 @@ def _grep_file_operands(args: list[str]) -> list[str]:
     """Return grep/rg file operands while skipping the search pattern."""
     operands: list[str] = []
     pattern_seen = False
-    skip_next = False
+    pending_value: str | None = None
     for index, token in enumerate(args):
-        if skip_next:
-            skip_next = False
-            pattern_seen = True
+        if pending_value is not None:
+            if pending_value == "file":
+                operands.append(token)
+                pattern_seen = True
+            elif pending_value == "pattern":
+                pattern_seen = True
+            pending_value = None
             continue
         if token == "--":
             remaining = args[index + 1 :]
             if not pattern_seen and remaining:
                 remaining = remaining[1:]
-            operands.extend(_strip_assignment_prefix(arg) for arg in remaining if arg)
+            operands.extend(arg for arg in remaining if arg)
             break
-        if token in {"-e", "--regexp", "-f", "--file"}:
-            skip_next = True
+        if token in {"-f", "--file"}:
+            pending_value = "file"
+            continue
+        if token in {"-e", "--regexp"}:
+            pending_value = "pattern"
+            continue
+        if token in {
+            "--exclude",
+            "--include",
+            "--exclude-dir",
+            "--include-dir",
+            "--label",
+            "--binary-files",
+            "--devices",
+            "--directories",
+            "-m",
+            "-A",
+            "-B",
+            "-C",
+        }:
+            pending_value = "option"
             continue
         if token.startswith("-"):
             continue
         if not pattern_seen:
             pattern_seen = True
             continue
-        operands.append(_strip_assignment_prefix(token))
+        operands.append(token)
     return operands
 
 
@@ -512,27 +542,32 @@ def _sed_file_operands(args: list[str]) -> list[str]:
     """Return sed input file operands while skipping scripts and options."""
     operands: list[str] = []
     script_seen = False
-    skip_next = False
+    pending_value: str | None = None
     for index, token in enumerate(args):
-        if skip_next:
-            skip_next = False
+        if pending_value is not None:
+            if pending_value == "file":
+                operands.append(token)
+            script_seen = True
+            pending_value = None
             continue
         if token == "--":
             remaining = args[index + 1 :]
             if not script_seen and remaining:
                 remaining = remaining[1:]
-            operands.extend(_strip_assignment_prefix(arg) for arg in remaining if arg)
+            operands.extend(arg for arg in remaining if arg)
             break
-        if token in {"-e", "-f"}:
-            skip_next = True
-            script_seen = True
+        if token in {"-f", "--file"}:
+            pending_value = "file"
+            continue
+        if token in {"-e", "--expression"}:
+            pending_value = "script"
             continue
         if token.startswith("-"):
             continue
         if not script_seen:
             script_seen = True
             continue
-        operands.append(_strip_assignment_prefix(token))
+        operands.append(token)
     return operands
 
 
@@ -540,32 +575,35 @@ def _awk_file_operands(args: list[str]) -> list[str]:
     """Return awk file operands while skipping the program and option values."""
     operands: list[str] = []
     program_seen = False
-    skip_next = False
+    pending_value: str | None = None
     for index, token in enumerate(args):
-        if skip_next:
-            skip_next = False
+        if pending_value is not None:
+            if pending_value == "file":
+                operands.append(token)
+                program_seen = True
+            pending_value = None
             continue
         if token == "--":
             remaining = args[index + 1 :]
             if not program_seen and remaining:
                 remaining = remaining[1:]
-            operands.extend(_strip_assignment_prefix(arg) for arg in remaining if arg)
+            operands.extend(arg for arg in remaining if arg)
             break
-        if token in {"-f", "-v"}:
-            skip_next = True
+        if token == "-f":
+            pending_value = "file"
+            continue
+        if token == "-v":
+            pending_value = "var"
             continue
         if token.startswith("-"):
             continue
         if not program_seen:
             program_seen = True
             continue
-        operands.append(_strip_assignment_prefix(token))
+        if _looks_like_env_assignment(token):
+            continue
+        operands.append(token)
     return operands
-
-
-def _strip_assignment_prefix(token: str) -> str:
-    """Return the filename side of command operands such as path=.env."""
-    return token.split("=", 1)[-1] if "=" in token else token
 
 
 def resolve_path(path: str, working_directory: str) -> str:

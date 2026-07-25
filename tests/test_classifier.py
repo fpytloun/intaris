@@ -769,9 +769,13 @@ class TestPathClassification:
             "cat certs/private-key.pem",
             "cat keys/service.key",
             "grep DB_PASSWORD .env",
+            "grep -f .env README.md",
             "sed -n 1p .env",
+            "sed -f .env README.md",
+            "awk -f .env README.md",
             "env cat .env",
             "cat .env*",
+            "cat .env.prod*",
         ],
     )
     def test_sensitive_project_bash_read_becomes_write(self, command: str):
@@ -795,6 +799,7 @@ class TestPathClassification:
             "certs/public.pem",
             "certs/ca.pem",
             "certs/server-cert.pem",
+            "certs/keycloak.pem",
         ],
     )
     def test_benign_project_templates_and_public_certs_stay_read(
@@ -816,6 +821,11 @@ class TestPathClassification:
             "cat .env.example",
             "grep DB_PASSWORD .env.example",
             "cat certs/public.pem",
+            "cat certs/keycloak.pem",
+            "diff --label .env old new",
+            "grep needle --exclude .env README.md",
+            "awk '{print}' label=.env README.md",
+            "cat path=.env",
         ],
     )
     def test_benign_project_bash_reads_stay_read(self, command: str):

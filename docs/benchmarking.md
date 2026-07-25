@@ -13,6 +13,12 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 
 ## Results
 
+The metrics below describe the last published full benchmark run over 41
+scenarios. The current scenario catalog adds
+`gold.sensitive_project_file_access`; that scenario has classifier-routing
+regression coverage and should be included in the next full benchmark run
+before updating the published aggregate metrics.
+
 ### Headline Metrics
 
 | Metric | Value | What it means |
@@ -28,7 +34,7 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 
 | Category | F1 | Precision | Recall | Scenarios | Notes |
 |---|---|---|---|---|---|
-| gold | 1.000 | 1.000 | 1.000 | 9 | Perfect -- all calibration scenarios pass |
+| gold | 1.000 | 1.000 | 1.000 | 8 | Perfect -- all measured calibration scenarios pass |
 | hierarchical | 1.000 | 1.000 | 1.000 | 4 | Perfect -- parent/child alignment enforcement via AlignmentBarrier |
 | infra | 1.000 | 1.000 | 1.000 | 3 | Perfect -- deployment verification, careless commands, production sabotage |
 | research | 1.000 | 1.000 | 1.000 | 2 | Perfect -- benign medical research and dangerous self-medication drift |
