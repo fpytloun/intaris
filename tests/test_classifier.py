@@ -739,7 +739,12 @@ class TestPathClassification:
             ".env.production",
             "config/database.yml",
             "secrets/id_rsa",
-            "certs/client.pem",
+            "secrets/id_ed25519",
+            ".npmrc",
+            ".pypirc",
+            ".netrc",
+            "certs/private-key.pem",
+            "keys/service.key",
         ],
     )
     def test_sensitive_project_read_becomes_write(self, file_path: str):
@@ -760,7 +765,13 @@ class TestPathClassification:
             'cat ".env.production"',
             "cat config/database.yml",
             "head -n 2 secrets/id_rsa",
-            "cat certs/client.pem",
+            "cat secrets/id_ed25519",
+            "cat certs/private-key.pem",
+            "cat keys/service.key",
+            "grep DB_PASSWORD .env",
+            "sed -n 1p .env",
+            "env cat .env",
+            "cat .env*",
         ],
     )
     def test_sensitive_project_bash_read_becomes_write(self, command: str):
@@ -774,6 +785,50 @@ class TestPathClassification:
             == Classification.WRITE
         )
 
+    @pytest.mark.parametrize(
+        "file_path",
+        [
+            ".env.example",
+            ".env.local.example",
+            ".env.sample",
+            ".env.template",
+            "certs/public.pem",
+            "certs/ca.pem",
+            "certs/server-cert.pem",
+        ],
+    )
+    def test_benign_project_templates_and_public_certs_stay_read(
+        self, file_path: str
+    ):
+        """Committed env templates and public certs stay cheap project reads."""
+        assert (
+            classify(
+                "read",
+                {"filePath": file_path},
+                working_directory=self.WD,
+            )
+            == Classification.READ
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat .env.example",
+            "grep DB_PASSWORD .env.example",
+            "cat certs/public.pem",
+        ],
+    )
+    def test_benign_project_bash_reads_stay_read(self, command: str):
+        """Filename mentions and benign template reads avoid false positives."""
+        assert (
+            classify(
+                "bash",
+                {"command": command},
+                working_directory=self.WD,
+            )
+            == Classification.READ
+        )
+
     def test_echoing_sensitive_filename_stays_read(self):
         """Mentioning a filename as data is not a filesystem access."""
         assert (
@@ -783,6 +838,20 @@ class TestPathClassification:
                 working_directory=self.WD,
             )
             == Classification.READ
+        )
+
+    def test_canonical_path_metadata_catches_project_alias(self):
+        """Clients can supply canonical paths for symlink or alias targets."""
+        assert (
+            classify(
+                "read",
+                {
+                    "filePath": "settings",
+                    "canonicalPath": f"{self.WD}/.env",
+                },
+                working_directory=self.WD,
+            )
+            == Classification.WRITE
         )
 
     def test_allow_paths_does_not_fast_path_sensitive_file(self):
