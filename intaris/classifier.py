@@ -301,17 +301,17 @@ _ENV_OPTIONS_WITH_SEPARATE_VALUES: set[str] = {
     "--unset",
     "-C",
     "--chdir",
-    "-S",
-    "--split-string",
+    "-a",
+    "--argv0",
 }
 
 _ENV_OPTIONS_WITH_ATTACHED_VALUES: tuple[str, ...] = (
     "-u",
     "-C",
-    "-S",
+    "-a",
     "--unset=",
     "--chdir=",
-    "--split-string=",
+    "--argv0=",
 )
 
 # apply_patch envelope headers that introduce filesystem targets.
@@ -460,6 +460,22 @@ def _unwrap_read_command(tokens: list[str]) -> list[str]:
                 if token == "--":
                     remaining.pop(0)
                     break
+                if token in {"-S", "--split-string"}:
+                    remaining.pop(0)
+                    if remaining:
+                        split_value = remaining.pop(0)
+                        remaining = _split_env_split_string(split_value) + remaining
+                    continue
+                if token.startswith("--split-string="):
+                    split_value = token.split("=", 1)[1]
+                    remaining.pop(0)
+                    remaining = _split_env_split_string(split_value) + remaining
+                    continue
+                if token.startswith("-S") and token != "-S":
+                    split_value = token[2:]
+                    remaining.pop(0)
+                    remaining = _split_env_split_string(split_value) + remaining
+                    continue
                 if token in _ENV_OPTIONS_WITH_SEPARATE_VALUES:
                     remaining.pop(0)
                     if remaining:
@@ -479,6 +495,14 @@ def _unwrap_read_command(tokens: list[str]) -> list[str]:
                     continue
                 break
     return remaining
+
+
+def _split_env_split_string(value: str) -> list[str]:
+    """Parse GNU env -S/--split-string command text into shell tokens."""
+    try:
+        return shlex.split(value)
+    except ValueError:
+        return []
 
 
 def _looks_like_env_assignment(token: str) -> bool:
