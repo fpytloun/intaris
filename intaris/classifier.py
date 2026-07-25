@@ -296,6 +296,24 @@ _SENSITIVE_BASENAME_GLOBS: tuple[str, ...] = (
 
 _SENSITIVE_SUFFIXES: tuple[str, ...] = (".key",)
 
+_ENV_OPTIONS_WITH_SEPARATE_VALUES: set[str] = {
+    "-u",
+    "--unset",
+    "-C",
+    "--chdir",
+    "-S",
+    "--split-string",
+}
+
+_ENV_OPTIONS_WITH_ATTACHED_VALUES: tuple[str, ...] = (
+    "-u",
+    "-C",
+    "-S",
+    "--unset=",
+    "--chdir=",
+    "--split-string=",
+)
+
 # apply_patch envelope headers that introduce filesystem targets.
 _APPLY_PATCH_PATH_RE = re.compile(
     r"^\*\*\* (?:Add|Update|Delete) File: (?P<path>.+)$", re.MULTILINE
@@ -379,6 +397,11 @@ def _is_sensitive_path(path: str) -> bool:
     normalized = path.replace("\\", "/").rstrip("/").lower()
     basename = normalized.rsplit("/", 1)[-1]
     if any(char in basename for char in "*?["):
+        if any(
+            fnmatch.fnmatchcase(literal, basename)
+            for literal in _SENSITIVE_LITERAL_BASENAMES
+        ):
+            return True
         return any(
             fnmatch.fnmatchcase(basename, pattern)
             for pattern in _SENSITIVE_BASENAME_GLOBS
@@ -437,6 +460,17 @@ def _unwrap_read_command(tokens: list[str]) -> list[str]:
                 if token == "--":
                     remaining.pop(0)
                     break
+                if token in _ENV_OPTIONS_WITH_SEPARATE_VALUES:
+                    remaining.pop(0)
+                    if remaining:
+                        remaining.pop(0)
+                    continue
+                if any(
+                    token.startswith(prefix) and token != prefix
+                    for prefix in _ENV_OPTIONS_WITH_ATTACHED_VALUES
+                ):
+                    remaining.pop(0)
+                    continue
                 if token.startswith("-"):
                     remaining.pop(0)
                     continue
@@ -510,8 +544,17 @@ def _grep_file_operands(args: list[str]) -> list[str]:
         if token in {"-f", "--file"}:
             pending_value = "file"
             continue
+        attached_file = _attached_option_value(token, "-f", "--file")
+        if attached_file is not None:
+            if attached_file:
+                operands.append(attached_file)
+                pattern_seen = True
+            continue
         if token in {"-e", "--regexp"}:
             pending_value = "pattern"
+            continue
+        if _attached_option_value(token, "-e", "--regexp") is not None:
+            pattern_seen = True
             continue
         if token in {
             "--exclude",
@@ -559,8 +602,17 @@ def _sed_file_operands(args: list[str]) -> list[str]:
         if token in {"-f", "--file"}:
             pending_value = "file"
             continue
+        attached_file = _attached_option_value(token, "-f", "--file")
+        if attached_file is not None:
+            if attached_file:
+                operands.append(attached_file)
+                script_seen = True
+            continue
         if token in {"-e", "--expression"}:
             pending_value = "script"
+            continue
+        if _attached_option_value(token, "-e", "--expression") is not None:
+            script_seen = True
             continue
         if token.startswith("-"):
             continue
@@ -592,6 +644,12 @@ def _awk_file_operands(args: list[str]) -> list[str]:
         if token == "-f":
             pending_value = "file"
             continue
+        attached_file = _attached_option_value(token, "-f")
+        if attached_file is not None:
+            if attached_file:
+                operands.append(attached_file)
+                program_seen = True
+            continue
         if token == "-v":
             pending_value = "var"
             continue
@@ -604,6 +662,19 @@ def _awk_file_operands(args: list[str]) -> list[str]:
             continue
         operands.append(token)
     return operands
+
+
+def _attached_option_value(
+    token: str,
+    short_option: str,
+    long_option: str | None = None,
+) -> str | None:
+    """Return an attached option value such as ``-f.env`` or ``--file=.env``."""
+    if long_option and token.startswith(f"{long_option}="):
+        return token.split("=", 1)[1]
+    if token.startswith(short_option) and token != short_option:
+        return token[len(short_option) :]
+    return None
 
 
 def resolve_path(path: str, working_directory: str) -> str:
