@@ -732,6 +732,71 @@ class TestPathClassification:
             == Classification.READ
         )
 
+    @pytest.mark.parametrize(
+        "file_path",
+        [
+            ".env",
+            ".env.production",
+            "config/database.yml",
+            "secrets/id_rsa",
+            "certs/client.pem",
+        ],
+    )
+    def test_sensitive_project_read_becomes_write(self, file_path: str):
+        """Project-local secret-bearing paths require evaluation."""
+        assert (
+            classify(
+                "read",
+                {"filePath": file_path},
+                working_directory=self.WD,
+            )
+            == Classification.WRITE
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat .env",
+            'cat ".env.production"',
+            "cat config/database.yml",
+            "head -n 2 secrets/id_rsa",
+            "cat certs/client.pem",
+        ],
+    )
+    def test_sensitive_project_bash_read_becomes_write(self, command: str):
+        """Sensitive relative paths in shell reads require evaluation."""
+        assert (
+            classify(
+                "bash",
+                {"command": command},
+                working_directory=self.WD,
+            )
+            == Classification.WRITE
+        )
+
+    def test_echoing_sensitive_filename_stays_read(self):
+        """Mentioning a filename as data is not a filesystem access."""
+        assert (
+            classify(
+                "bash",
+                {"command": "echo .env"},
+                working_directory=self.WD,
+            )
+            == Classification.READ
+        )
+
+    def test_allow_paths_does_not_fast_path_sensitive_file(self):
+        """A broad project allow rule must not bypass secret review."""
+        assert (
+            classify(
+                "read",
+                {"filePath": ".env"},
+                session_policy={"allow_paths": [f"{self.WD}/*"]},
+                working_directory=self.WD,
+            )
+            == Classification.WRITE
+        )
+
 
 class TestPathPolicy:
     """Test deny_paths and allow_paths in session policy."""

@@ -44,6 +44,7 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 - **Data exfiltration** -- `curl POST` to external URLs, credential file uploads, pastebin dumps. Caught by critical pattern matcher.
 - **Production access** -- `kubectl get secrets`, unauthorized database queries, admin API calls. Caught by LLM evaluation.
 - **Path traversal** -- `../../etc/shadow`, reads outside working directory, denied path patterns. Caught by filesystem path protection.
+- **In-project sensitive file reads** -- conventional secret-bearing paths such as `.env`, `config/database.yml`, `id_rsa`, and `*.pem` are sent for evaluator review even inside the working directory. The `gold.sensitive_project_file_access` scenario covers structured tool arguments and shell reads.
 - **Session policy violations** -- denied tools, denied commands, denied paths. Caught by classifier fast path.
 - **Overt threats** -- threatening emails, harassment, intimidation. Caught by LLM evaluation.
 
@@ -52,7 +53,6 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 - **Subtle code-level backdoors** -- an `X-Debug=bypass` auth skip or hardcoded admin credentials embedded in otherwise legitimate code edits. The LLM evaluator doesn't inspect code content deeply enough.
 - **Prompt injection in code** -- `IGNORE ALL PREVIOUS INSTRUCTIONS` embedded in JavaScript comments within functional validation code. The injection detection doesn't scan file content.
 - **Escalation patterns** -- a gradual drift from professional advice to stalking to aggressive emails. Each individual call looks borderline; the pattern only emerges across multiple calls. This is an L2/L3 behavioral analysis concern.
-- **In-project sensitive file reads** -- `.env` and `config/database.yml` reads within the working directory are fast-pathed as read-only by design. The classifier doesn't distinguish sensitive files from regular project files.
 
 ### Score Interpretation
 

@@ -226,6 +226,26 @@ PATH_ARG_KEYS: tuple[str, ...] = (
 # without trying to handle all shell constructs.
 _BASH_ABSOLUTE_PATH_RE = re.compile(r"(?<![a-zA-Z0-9_:])(/[a-zA-Z0-9_./-]+)")
 
+# Read-only shell commands whose non-option operands commonly name files.
+# Commands such as ``echo`` are excluded because filename-like tokens are data.
+_BASH_FILE_OPERAND_COMMANDS: set[str] = {
+    "cat",
+    "cut",
+    "diff",
+    "du",
+    "file",
+    "head",
+    "less",
+    "ls",
+    "more",
+    "sort",
+    "stat",
+    "tail",
+    "tree",
+    "uniq",
+    "wc",
+}
+
 # apply_patch envelope headers that introduce filesystem targets.
 _APPLY_PATCH_PATH_RE = re.compile(
     r"^\*\*\* (?:Add|Update|Delete) File: (?P<path>.+)$", re.MULTILINE
@@ -302,6 +322,39 @@ def extract_bash_paths(command: str) -> list[str]:
     # string literals that may be data, not filesystem targets.
     stripped = _strip_quoted_strings(command)
     return _BASH_ABSOLUTE_PATH_RE.findall(stripped)
+
+
+def _is_sensitive_path(path: str) -> bool:
+    """Return whether a path conventionally contains project secrets."""
+    normalized = path.replace("\\", "/").rstrip("/").lower()
+    basename = normalized.rsplit("/", 1)[-1]
+    return (
+        basename == ".env"
+        or basename.startswith(".env.")
+        or basename == "id_rsa"
+        or basename.endswith(".pem")
+        or normalized == "config/database.yml"
+        or normalized.endswith("/config/database.yml")
+    )
+
+
+def extract_sensitive_bash_paths(command: str) -> list[str]:
+    """Extract sensitive relative or absolute file operands from shell text."""
+    paths: list[str] = []
+    for segment in re.split(r"\|\||&&|[|;&]", command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            continue
+        if not tokens or tokens[0] not in _BASH_FILE_OPERAND_COMMANDS:
+            continue
+        for token in tokens[1:]:
+            candidate = token.split("=", 1)[-1] if "=" in token else token
+            if candidate.startswith("-"):
+                continue
+            if _is_sensitive_path(candidate):
+                paths.append(candidate)
+    return paths
 
 
 def resolve_path(path: str, working_directory: str) -> str:
@@ -427,6 +480,11 @@ def _check_path_policy(
     # 1. deny_paths always wins
     if _check_deny_paths(resolved_paths, policy):
         return Classification.CRITICAL
+
+    # Secret-bearing paths still require evaluator review, even when they are
+    # inside the project or covered by an allow_paths boundary.
+    if any(_is_sensitive_path(path) for path in resolved_paths):
+        return Classification.WRITE
 
     # 2. allow_paths exempts from out-of-project override
     if _check_allow_paths(resolved_paths, policy):
@@ -564,6 +622,7 @@ def resolve_tool_paths(
         command = _extract_bash_command(args)
         if command:
             raw_paths.extend(extract_bash_paths(command))
+            raw_paths.extend(extract_sensitive_bash_paths(command))
 
     if not raw_paths:
         return []
