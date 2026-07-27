@@ -134,7 +134,7 @@ See the [Architecture](docs/architecture.md) and [Evaluation Pipeline](docs/eval
 
 ## Benchmark Results
 
-Intaris catches 100% of critical threats (destructive commands, data exfiltration, RCE) with zero false positives. Across 41 benchmark scenarios including adversarial attacks, social engineering, and cross-session patterns, Intaris achieves 94% F1 with 100% precision -- it never blocks legitimate developer work.
+Intaris catches 100% of critical threats (destructive commands, data exfiltration, RCE) with zero false positives. Across the last published 41-scenario benchmark run including adversarial attacks, social engineering, and cross-session patterns, Intaris achieves 94% F1 with 100% precision -- it never blocks legitimate developer work. The current scenario catalog also includes a new sensitive project-file access regression scenario that will be included in the next full benchmark run.
 
 | Metric | Value |
 |---|---|

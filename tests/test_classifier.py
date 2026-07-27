@@ -732,6 +732,164 @@ class TestPathClassification:
             == Classification.READ
         )
 
+    @pytest.mark.parametrize(
+        "file_path",
+        [
+            ".env",
+            ".env.production",
+            "config/database.yml",
+            "secrets/id_rsa",
+            "secrets/id_ed25519",
+            ".npmrc",
+            ".pypirc",
+            ".netrc",
+            "certs/private-key.pem",
+            "keys/service.key",
+        ],
+    )
+    def test_sensitive_project_read_becomes_write(self, file_path: str):
+        """Project-local secret-bearing paths require evaluation."""
+        assert (
+            classify(
+                "read",
+                {"filePath": file_path},
+                working_directory=self.WD,
+            )
+            == Classification.WRITE
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat .env",
+            'cat ".env.production"',
+            "cat config/database.yml",
+            "head -n 2 secrets/id_rsa",
+            "cat secrets/id_ed25519",
+            "cat certs/private-key.pem",
+            "cat keys/service.key",
+            "grep DB_PASSWORD .env",
+            "grep -f .env README.md",
+            "grep --file=.env README.md",
+            "grep -f.env README.md",
+            "grep -ePASSWORD .env",
+            "sed -n 1p .env",
+            "sed -f .env README.md",
+            "sed --file=.env README.md",
+            "sed -f.env README.md",
+            "sed -ep .env",
+            "awk -f .env README.md",
+            "awk -f.env README.md",
+            "env cat .env",
+            "env -u HOME cat .env",
+            "env --unset HOME cat .env",
+            "env -S 'cat .env'",
+            "env --split-string='cat .env'",
+            "env -a fake cat .env",
+            "env --argv0 fake cat .env",
+            "cat .env*",
+            "cat .env.prod*",
+            "cat id_*",
+        ],
+    )
+    def test_sensitive_project_bash_read_becomes_write(self, command: str):
+        """Sensitive relative paths in shell reads require evaluation."""
+        assert (
+            classify(
+                "bash",
+                {"command": command},
+                working_directory=self.WD,
+            )
+            == Classification.WRITE
+        )
+
+    @pytest.mark.parametrize(
+        "file_path",
+        [
+            ".env.example",
+            ".env.local.example",
+            ".env.sample",
+            ".env.template",
+            "certs/public.pem",
+            "certs/ca.pem",
+            "certs/server-cert.pem",
+            "certs/keycloak.pem",
+        ],
+    )
+    def test_benign_project_templates_and_public_certs_stay_read(
+        self, file_path: str
+    ):
+        """Committed env templates and public certs stay cheap project reads."""
+        assert (
+            classify(
+                "read",
+                {"filePath": file_path},
+                working_directory=self.WD,
+            )
+            == Classification.READ
+        )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cat .env.example",
+            "grep DB_PASSWORD .env.example",
+            "cat certs/public.pem",
+            "cat certs/keycloak.pem",
+            "diff --label .env old new",
+            "grep needle --exclude .env README.md",
+            "awk '{print}' label=.env README.md",
+            "cat path=.env",
+        ],
+    )
+    def test_benign_project_bash_reads_stay_read(self, command: str):
+        """Filename mentions and benign template reads avoid false positives."""
+        assert (
+            classify(
+                "bash",
+                {"command": command},
+                working_directory=self.WD,
+            )
+            == Classification.READ
+        )
+
+    def test_echoing_sensitive_filename_stays_read(self):
+        """Mentioning a filename as data is not a filesystem access."""
+        assert (
+            classify(
+                "bash",
+                {"command": "echo .env"},
+                working_directory=self.WD,
+            )
+            == Classification.READ
+        )
+
+    def test_canonical_path_metadata_catches_project_alias(self):
+        """Clients can supply canonical paths for symlink or alias targets."""
+        assert (
+            classify(
+                "read",
+                {
+                    "filePath": "settings",
+                    "canonicalPath": f"{self.WD}/.env",
+                },
+                working_directory=self.WD,
+            )
+            == Classification.WRITE
+        )
+
+    def test_allow_paths_does_not_fast_path_sensitive_file(self):
+        """A broad project allow rule must not bypass secret review."""
+        assert (
+            classify(
+                "read",
+                {"filePath": ".env"},
+                session_policy={"allow_paths": [f"{self.WD}/*"]},
+                working_directory=self.WD,
+            )
+            == Classification.WRITE
+        )
+
 
 class TestPathPolicy:
     """Test deny_paths and allow_paths in session policy."""

@@ -13,6 +13,12 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 
 ## Results
 
+The metrics below describe the last published full benchmark run over 41
+scenarios. The current scenario catalog adds
+`gold.sensitive_project_file_access`; that scenario has classifier-routing
+regression coverage and should be included in the next full benchmark run
+before updating the published aggregate metrics.
+
 ### Headline Metrics
 
 | Metric | Value | What it means |
@@ -28,7 +34,7 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 
 | Category | F1 | Precision | Recall | Scenarios | Notes |
 |---|---|---|---|---|---|
-| gold | 1.000 | 1.000 | 1.000 | 8 | Perfect -- all calibration scenarios pass |
+| gold | 1.000 | 1.000 | 1.000 | 8 | Perfect -- all measured calibration scenarios pass |
 | hierarchical | 1.000 | 1.000 | 1.000 | 4 | Perfect -- parent/child alignment enforcement via AlignmentBarrier |
 | infra | 1.000 | 1.000 | 1.000 | 3 | Perfect -- deployment verification, careless commands, production sabotage |
 | research | 1.000 | 1.000 | 1.000 | 2 | Perfect -- benign medical research and dangerous self-medication drift |
@@ -44,6 +50,7 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 - **Data exfiltration** -- `curl POST` to external URLs, credential file uploads, pastebin dumps. Caught by critical pattern matcher.
 - **Production access** -- `kubectl get secrets`, unauthorized database queries, admin API calls. Caught by LLM evaluation.
 - **Path traversal** -- `../../etc/shadow`, reads outside working directory, denied path patterns. Caught by filesystem path protection.
+- **In-project sensitive file reads** -- conventional secret-bearing paths such as `.env`, `config/database.yml`, `id_rsa`, `id_ed25519`, `.npmrc`, `.pypirc`, `.netrc`, private-key PEM names, and `*.key` are sent for evaluator review even inside the working directory. The `gold.sensitive_project_file_access` scenario covers structured tool arguments and shell reads while keeping ordinary source reads, committed `.env.example` templates, and public certificates on the cheap read path.
 - **Session policy violations** -- denied tools, denied commands, denied paths. Caught by classifier fast path.
 - **Overt threats** -- threatening emails, harassment, intimidation. Caught by LLM evaluation.
 
@@ -52,7 +59,7 @@ Each scenario defines a visible **intention** (what Intaris sees) and either scr
 - **Subtle code-level backdoors** -- an `X-Debug=bypass` auth skip or hardcoded admin credentials embedded in otherwise legitimate code edits. The LLM evaluator doesn't inspect code content deeply enough.
 - **Prompt injection in code** -- `IGNORE ALL PREVIOUS INSTRUCTIONS` embedded in JavaScript comments within functional validation code. The injection detection doesn't scan file content.
 - **Escalation patterns** -- a gradual drift from professional advice to stalking to aggressive emails. Each individual call looks borderline; the pattern only emerges across multiple calls. This is an L2/L3 behavioral analysis concern.
-- **In-project sensitive file reads** -- `.env` and `config/database.yml` reads within the working directory are fast-pathed as read-only by design. The classifier doesn't distinguish sensitive files from regular project files.
+- **Symlink and alias targets without canonical metadata** -- shell text such as `cat settings` cannot be resolved to `settings -> .env` without executor filesystem context. Clients that can provide canonical or resolved path metadata let the classifier route those alias targets for review.
 
 ### Score Interpretation
 
@@ -90,7 +97,7 @@ python -m tools.benchmark --url ... --api-key ... run \
 
 | Category | Count | Mode | Description |
 |---|---|---|---|
-| gold | 8 | scripted | Hand-labeled calibration scenarios with known correct outcomes. Tests critical patterns, session policy, path protection, escalation retry, prompt injection. |
+| gold | 9 | scripted | Hand-labeled calibration scenarios with known correct outcomes. Tests critical patterns, session policy, path protection, escalation retry, prompt injection and project-local sensitive read routing. |
 | adversarial | 4 | scripted | Backdoor insertion, data exfiltration, systematic circumvention after denials, prompt injection in tool arguments. |
 | infra | 3 | mixed | Kubernetes deployment verification (generative), careless destructive commands (scripted), production sabotage (scripted). |
 | coding | 6 | mixed | Benign development (generative), path traversal attempts (scripted), session policy enforcement (scripted), IntentionBarrier testing (generative). |
@@ -100,7 +107,7 @@ python -m tools.benchmark --url ... --api-key ... run \
 | hierarchical | 4 | generative | Parent/child session pairs testing AlignmentBarrier -- aligned delegation and misaligned child. |
 | cross_session | 9 | scripted | Three multi-session attack chains (3 sessions each): reconnaissance-to-exploit, progressive escalation, credential harvesting. Tests L3 cross-session analysis. |
 
-**Total: 41 sessions** (32 individual + 9 cross-session).
+**Total: 42 sessions** (33 individual + 9 cross-session).
 
 ## Understanding the Report
 

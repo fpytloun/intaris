@@ -218,6 +218,12 @@ PATH_ARG_KEYS: tuple[str, ...] = (
     "dir",
     "folder",
     "filename",
+    "canonicalPath",
+    "canonical_path",
+    "realPath",
+    "real_path",
+    "resolvedPath",
+    "resolved_path",
 )
 
 # Regex to extract absolute paths from bash command strings.
@@ -225,6 +231,88 @@ PATH_ARG_KEYS: tuple[str, ...] = (
 # Intentionally simple — catches obvious cases like "cat /etc/shadow"
 # without trying to handle all shell constructs.
 _BASH_ABSOLUTE_PATH_RE = re.compile(r"(?<![a-zA-Z0-9_:])(/[a-zA-Z0-9_./-]+)")
+
+# Read-only shell commands whose non-option operands commonly name files.
+# Commands such as ``echo`` are excluded because filename-like tokens are data.
+_BASH_FILE_OPERAND_COMMANDS: set[str] = {
+    "awk",
+    "cat",
+    "cut",
+    "diff",
+    "du",
+    "file",
+    "grep",
+    "head",
+    "less",
+    "ls",
+    "more",
+    "rg",
+    "sort",
+    "stat",
+    "sed",
+    "tail",
+    "tree",
+    "uniq",
+    "wc",
+}
+
+_BASH_COMMAND_WRAPPERS: set[str] = {
+    "command",
+    "env",
+    "time",
+}
+
+_SENSITIVE_LITERAL_BASENAMES: set[str] = {
+    ".env",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "id_rsa",
+    "id_ed25519",
+}
+
+_BENIGN_TEMPLATE_BASENAMES: set[str] = {
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+}
+
+_SENSITIVE_BASENAME_GLOBS: tuple[str, ...] = (
+    ".env",
+    ".env*",
+    ".env.*",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "id_rsa",
+    "id_ed25519",
+    "*.key",
+    "*private*.pem",
+    "*privkey*.pem",
+    "*-key.pem",
+    "*_key.pem",
+    "*.key.pem",
+)
+
+_SENSITIVE_SUFFIXES: tuple[str, ...] = (".key",)
+
+_ENV_OPTIONS_WITH_SEPARATE_VALUES: set[str] = {
+    "-u",
+    "--unset",
+    "-C",
+    "--chdir",
+    "-a",
+    "--argv0",
+}
+
+_ENV_OPTIONS_WITH_ATTACHED_VALUES: tuple[str, ...] = (
+    "-u",
+    "-C",
+    "-a",
+    "--unset=",
+    "--chdir=",
+    "--argv0=",
+)
 
 # apply_patch envelope headers that introduce filesystem targets.
 _APPLY_PATCH_PATH_RE = re.compile(
@@ -302,6 +390,315 @@ def extract_bash_paths(command: str) -> list[str]:
     # string literals that may be data, not filesystem targets.
     stripped = _strip_quoted_strings(command)
     return _BASH_ABSOLUTE_PATH_RE.findall(stripped)
+
+
+def _is_sensitive_path(path: str) -> bool:
+    """Return whether a path conventionally contains project secrets."""
+    normalized = path.replace("\\", "/").rstrip("/").lower()
+    basename = normalized.rsplit("/", 1)[-1]
+    if any(char in basename for char in "*?["):
+        if any(
+            fnmatch.fnmatchcase(literal, basename)
+            for literal in _SENSITIVE_LITERAL_BASENAMES
+        ):
+            return True
+        return any(
+            fnmatch.fnmatchcase(basename, pattern)
+            for pattern in _SENSITIVE_BASENAME_GLOBS
+        )
+    if _is_benign_env_template(basename):
+        return False
+    return (
+        basename in _SENSITIVE_LITERAL_BASENAMES
+        or (basename.startswith(".env.") and not _is_benign_env_template(basename))
+        or basename.endswith(_SENSITIVE_SUFFIXES)
+        or (
+            basename.endswith(".pem")
+            and (
+                "private" in basename
+                or "privkey" in basename
+                or basename.endswith(("-key.pem", "_key.pem", ".key.pem"))
+            )
+        )
+        or normalized == "config/database.yml"
+        or normalized.endswith("/config/database.yml")
+    )
+
+
+def _is_benign_env_template(basename: str) -> bool:
+    """Return True for committed env templates that should stay cheap reads."""
+    return basename in _BENIGN_TEMPLATE_BASENAMES or basename.endswith(
+        (".example", ".sample", ".template")
+    )
+
+
+def extract_sensitive_bash_paths(command: str) -> list[str]:
+    """Extract sensitive relative or absolute file operands from shell text."""
+    paths: list[str] = []
+    for segment in re.split(r"\|\||&&|[|;&]", command):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:
+            continue
+        tokens = _unwrap_read_command(tokens)
+        if not tokens or tokens[0] not in _BASH_FILE_OPERAND_COMMANDS:
+            continue
+        for candidate in _file_operands_for_command(tokens):
+            if _is_sensitive_path(candidate):
+                paths.append(candidate)
+    return paths
+
+
+def _unwrap_read_command(tokens: list[str]) -> list[str]:
+    """Remove harmless command wrappers before path-sensitive inspection."""
+    remaining = list(tokens)
+    while remaining and remaining[0] in _BASH_COMMAND_WRAPPERS:
+        wrapper = remaining.pop(0)
+        if wrapper == "env":
+            while remaining:
+                token = remaining[0]
+                if token == "--":
+                    remaining.pop(0)
+                    break
+                if token in {"-S", "--split-string"}:
+                    remaining.pop(0)
+                    if remaining:
+                        split_value = remaining.pop(0)
+                        remaining = _split_env_split_string(split_value) + remaining
+                    continue
+                if token.startswith("--split-string="):
+                    split_value = token.split("=", 1)[1]
+                    remaining.pop(0)
+                    remaining = _split_env_split_string(split_value) + remaining
+                    continue
+                if token.startswith("-S") and token != "-S":
+                    split_value = token[2:]
+                    remaining.pop(0)
+                    remaining = _split_env_split_string(split_value) + remaining
+                    continue
+                if token in _ENV_OPTIONS_WITH_SEPARATE_VALUES:
+                    remaining.pop(0)
+                    if remaining:
+                        remaining.pop(0)
+                    continue
+                if any(
+                    token.startswith(prefix) and token != prefix
+                    for prefix in _ENV_OPTIONS_WITH_ATTACHED_VALUES
+                ):
+                    remaining.pop(0)
+                    continue
+                if token.startswith("-"):
+                    remaining.pop(0)
+                    continue
+                if _looks_like_env_assignment(token):
+                    remaining.pop(0)
+                    continue
+                break
+    return remaining
+
+
+def _split_env_split_string(value: str) -> list[str]:
+    """Parse GNU env -S/--split-string command text into shell tokens."""
+    try:
+        return shlex.split(value)
+    except ValueError:
+        return []
+
+
+def _looks_like_env_assignment(token: str) -> bool:
+    """Return True for VAR=value prefixes used before env-wrapped commands."""
+    if "=" not in token:
+        return False
+    name, _ = token.split("=", 1)
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name))
+
+
+def _file_operands_for_command(tokens: list[str]) -> list[str]:
+    """Return likely filesystem operands for read-only shell commands."""
+    command = tokens[0]
+    args = tokens[1:]
+    if command in {"grep", "rg"}:
+        return _grep_file_operands(args)
+    if command == "sed":
+        return _sed_file_operands(args)
+    if command == "awk":
+        return _awk_file_operands(args)
+    return _generic_file_operands(args)
+
+
+def _generic_file_operands(args: list[str]) -> list[str]:
+    """Return non-option operands, skipping common option values."""
+    operands: list[str] = []
+    skip_next = False
+    for index, token in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if token == "--":
+            operands.extend(arg for arg in args[index + 1 :] if arg)
+            break
+        if token.startswith("-"):
+            if token in {"-d", "-n", "-c", "-m", "--label", "-L"}:
+                skip_next = True
+            continue
+        operands.append(token)
+    return operands
+
+
+def _grep_file_operands(args: list[str]) -> list[str]:
+    """Return grep/rg file operands while skipping the search pattern."""
+    operands: list[str] = []
+    pattern_seen = False
+    pending_value: str | None = None
+    for index, token in enumerate(args):
+        if pending_value is not None:
+            if pending_value == "file":
+                operands.append(token)
+                pattern_seen = True
+            elif pending_value == "pattern":
+                pattern_seen = True
+            pending_value = None
+            continue
+        if token == "--":
+            remaining = args[index + 1 :]
+            if not pattern_seen and remaining:
+                remaining = remaining[1:]
+            operands.extend(arg for arg in remaining if arg)
+            break
+        if token in {"-f", "--file"}:
+            pending_value = "file"
+            continue
+        attached_file = _attached_option_value(token, "-f", "--file")
+        if attached_file is not None:
+            if attached_file:
+                operands.append(attached_file)
+                pattern_seen = True
+            continue
+        if token in {"-e", "--regexp"}:
+            pending_value = "pattern"
+            continue
+        if _attached_option_value(token, "-e", "--regexp") is not None:
+            pattern_seen = True
+            continue
+        if token in {
+            "--exclude",
+            "--include",
+            "--exclude-dir",
+            "--include-dir",
+            "--label",
+            "--binary-files",
+            "--devices",
+            "--directories",
+            "-m",
+            "-A",
+            "-B",
+            "-C",
+        }:
+            pending_value = "option"
+            continue
+        if token.startswith("-"):
+            continue
+        if not pattern_seen:
+            pattern_seen = True
+            continue
+        operands.append(token)
+    return operands
+
+
+def _sed_file_operands(args: list[str]) -> list[str]:
+    """Return sed input file operands while skipping scripts and options."""
+    operands: list[str] = []
+    script_seen = False
+    pending_value: str | None = None
+    for index, token in enumerate(args):
+        if pending_value is not None:
+            if pending_value == "file":
+                operands.append(token)
+            script_seen = True
+            pending_value = None
+            continue
+        if token == "--":
+            remaining = args[index + 1 :]
+            if not script_seen and remaining:
+                remaining = remaining[1:]
+            operands.extend(arg for arg in remaining if arg)
+            break
+        if token in {"-f", "--file"}:
+            pending_value = "file"
+            continue
+        attached_file = _attached_option_value(token, "-f", "--file")
+        if attached_file is not None:
+            if attached_file:
+                operands.append(attached_file)
+                script_seen = True
+            continue
+        if token in {"-e", "--expression"}:
+            pending_value = "script"
+            continue
+        if _attached_option_value(token, "-e", "--expression") is not None:
+            script_seen = True
+            continue
+        if token.startswith("-"):
+            continue
+        if not script_seen:
+            script_seen = True
+            continue
+        operands.append(token)
+    return operands
+
+
+def _awk_file_operands(args: list[str]) -> list[str]:
+    """Return awk file operands while skipping the program and option values."""
+    operands: list[str] = []
+    program_seen = False
+    pending_value: str | None = None
+    for index, token in enumerate(args):
+        if pending_value is not None:
+            if pending_value == "file":
+                operands.append(token)
+                program_seen = True
+            pending_value = None
+            continue
+        if token == "--":
+            remaining = args[index + 1 :]
+            if not program_seen and remaining:
+                remaining = remaining[1:]
+            operands.extend(arg for arg in remaining if arg)
+            break
+        if token == "-f":
+            pending_value = "file"
+            continue
+        attached_file = _attached_option_value(token, "-f")
+        if attached_file is not None:
+            if attached_file:
+                operands.append(attached_file)
+                program_seen = True
+            continue
+        if token == "-v":
+            pending_value = "var"
+            continue
+        if token.startswith("-"):
+            continue
+        if not program_seen:
+            program_seen = True
+            continue
+        if _looks_like_env_assignment(token):
+            continue
+        operands.append(token)
+    return operands
+
+
+def _attached_option_value(
+    token: str,
+    short_option: str,
+    long_option: str | None = None,
+) -> str | None:
+    """Return an attached option value such as ``-f.env`` or ``--file=.env``."""
+    if long_option and token.startswith(f"{long_option}="):
+        return token.split("=", 1)[1]
+    if token.startswith(short_option) and token != short_option:
+        return token[len(short_option) :]
+    return None
 
 
 def resolve_path(path: str, working_directory: str) -> str:
@@ -427,6 +824,11 @@ def _check_path_policy(
     # 1. deny_paths always wins
     if _check_deny_paths(resolved_paths, policy):
         return Classification.CRITICAL
+
+    # Secret-bearing paths still require evaluator review, even when they are
+    # inside the project or covered by an allow_paths boundary.
+    if any(_is_sensitive_path(path) for path in resolved_paths):
+        return Classification.WRITE
 
     # 2. allow_paths exempts from out-of-project override
     if _check_allow_paths(resolved_paths, policy):
@@ -564,6 +966,7 @@ def resolve_tool_paths(
         command = _extract_bash_command(args)
         if command:
             raw_paths.extend(extract_bash_paths(command))
+            raw_paths.extend(extract_sensitive_bash_paths(command))
 
     if not raw_paths:
         return []
