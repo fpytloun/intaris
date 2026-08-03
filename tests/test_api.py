@@ -117,6 +117,18 @@ def test_search_initialization_does_not_block_startup(env_no_auth, monkeypatch):
         assert app.state.search_init_task.done() is False
 
 
+def test_event_reconciliation_is_deferred_at_startup(env_no_auth):
+    """Historical event projection must never delay the liveness endpoint."""
+    import intaris.server as srv
+
+    app = srv.create_app()
+    with TestClient(app) as client:
+        response = client.get("/live")
+
+        assert response.status_code == 200
+        assert app.state.event_reconciliation_task is None
+
+
 def test_search_initialization_disables_vector_tier(monkeypatch):
     """Startup must not import or initialize the optional vector backend."""
     import intaris.server as srv

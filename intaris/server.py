@@ -652,21 +652,18 @@ async def lifespan(app):
         from intaris.event_audit import EventAuditStore
 
         event_store.set_audit_store(EventAuditStore(_get_db()))
-        try:
-            reconciled = event_store.reconcile_audit_index()
-            if reconciled:
-                logger.info("Reconciled %d historical audit events", reconciled)
-        except Exception:
-            logger.exception(
-                "Historical audit-event reconciliation failed; "
-                "continuing with live projection"
-            )
         app.state.event_store = event_store
+        app.state.event_reconciliation_task = None
         if app.state.intention_barrier is not None:
             app.state.intention_barrier.set_event_store(event_store)
-        logger.info("Event store initialized (backend=%s)", cfg.event_store.backend)
+        logger.info(
+            "Event store initialized (backend=%s); historical audit reconciliation "
+            "is deferred",
+            cfg.event_store.backend,
+        )
     else:
         app.state.event_store = None
+        app.state.event_reconciliation_task = None
         logger.info("Event store disabled")
 
     # Search schema and optional vector backend initialization can load large
@@ -770,7 +767,11 @@ async def lifespan(app):
 
     # Initialize MCP proxy
     global _mcp_proxy_ref
-    mcp_proxy = _init_mcp_proxy(cfg)
+    try:
+        mcp_proxy = _init_mcp_proxy(cfg)
+    except Exception:
+        logger.exception("MCP proxy initialization failed; continuing without proxy")
+        mcp_proxy = None
     app.state.mcp_proxy = mcp_proxy
     _mcp_proxy_ref = mcp_proxy
 

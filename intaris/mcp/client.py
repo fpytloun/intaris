@@ -44,8 +44,16 @@ from urllib.parse import quote
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
 from mcp.types import Implementation
+
+try:
+    from mcp.client.streamable_http import streamablehttp_client
+
+    _STREAMABLE_HTTP_LEGACY = True
+except ImportError:  # MCP SDK >= 1.26 renamed this client helper.
+    from mcp.client.streamable_http import streamable_http_client
+
+    _STREAMABLE_HTTP_LEGACY = False
 
 logger = logging.getLogger(__name__)
 
@@ -566,17 +574,25 @@ class MCPConnectionManager:
         url = server_config["url"]
         headers = server_config.get("headers")
 
-        (
-            read_stream,
-            write_stream,
-            _get_session_id,
-        ) = await exit_stack.enter_async_context(
-            streamablehttp_client(
+        if _STREAMABLE_HTTP_LEGACY:
+            context = streamablehttp_client(
                 url=url,
                 headers=headers,
                 timeout=timedelta(seconds=timeout_seconds),
             )
-        )
+        else:
+            import httpx
+
+            http_client = await exit_stack.enter_async_context(
+                httpx.AsyncClient(
+                    headers=headers,
+                    timeout=timeout_seconds,
+                )
+            )
+            context = streamable_http_client(url=url, http_client=http_client)
+
+        streams = await exit_stack.enter_async_context(context)
+        read_stream, write_stream = streams[:2]
         return read_stream, write_stream
 
     async def _connect_sse(
