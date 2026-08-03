@@ -13,6 +13,7 @@ import contextvars
 import logging
 import os
 import sys
+from dataclasses import replace
 
 import uvicorn
 from starlette.applications import Starlette
@@ -24,7 +25,7 @@ from starlette.routing import Mount, Route, WebSocketRoute
 
 from intaris import __version__
 from intaris.auth import match_api_key, resolve_auth
-from intaris.config import load_config
+from intaris.config import SearchConfig, load_config
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -474,6 +475,50 @@ async def _stop_task(task: asyncio.Task[None] | None, *, timeout: float) -> None
             await task
 
 
+async def _initialize_search(app, config: SearchConfig) -> None:
+    """Initialize optional search after the HTTP server starts serving."""
+    try:
+        if config.vector_enabled():
+            logger.warning(
+                "Search vector tier is disabled at runtime to keep Intaris startup "
+                "responsive; lexical search remains available"
+            )
+            config = replace(config, vector_provider="disabled")
+        search_service = await asyncio.to_thread(
+            _build_search_service, _get_db(), config
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        app.state.search_service = None
+        app.state.search_initializing = False
+        api_app = getattr(app.state, "_api_app", None)
+        if api_app is not None:
+            api_app.state.search_service = None
+            api_app.state.search_initializing = False
+        logger.exception("Search initialization failed; continuing without search")
+        return
+
+    app.state.search_service = search_service
+    app.state.search_initializing = False
+    api_app = getattr(app.state, "_api_app", None)
+    if api_app is not None:
+        api_app.state.search_service = search_service
+        api_app.state.search_initializing = False
+    logger.info(
+        "Search initialized (lexical=%s, vector=%s)",
+        search_service.lexical_backend,
+        search_service.vector_backend_name,
+    )
+
+
+def _build_search_service(db, config: SearchConfig):
+    """Import and construct search in a worker thread."""
+    from intaris.search.service import SearchService
+
+    return SearchService(db=db, config=config)
+
+
 # ── Application Factory ──────────────────────────────────────────────
 
 
@@ -624,27 +669,21 @@ async def lifespan(app):
         app.state.event_store = None
         logger.info("Event store disabled")
 
-    # Initialize search subsystem. Lexical tier (PG tsvector / SQLite
-    # LIKE) is always available when the master flag is on; the vector
-    # tier is optional and turns on automatically when configured.
-    from intaris.search.service import SearchService
-
-    search_service = SearchService(db=_get_db(), config=cfg.search)
-    app.state.search_service = search_service
+    # Search schema and optional vector backend initialization can load large
+    # third-party model definitions. It is non-critical, so never let it hold
+    # up the API process or Kubernetes health probes.
+    app.state.search_service = None
+    search_task = None
     if cfg.search.enabled:
-        logger.info(
-            "Search initialized (lexical=%s, vector=%s)",
-            search_service.lexical_backend,
-            search_service.vector_backend_name,
+        search_task = asyncio.create_task(
+            _initialize_search(app, cfg.search), name="intaris-search-init"
         )
-        # Wire search hooks so audit/summary writers fan out into the
-        # vector indexer when the vector tier is enabled.
-        from intaris import analyzer as _analyzer
-        from intaris.audit import AuditStore as _AuditStore
-
-        _AuditStore.set_search_service(search_service)
-        _analyzer.set_search_service(search_service)
+        app.state.search_init_task = search_task
+        app.state.search_initializing = True
+        logger.info("Search initialization scheduled")
     else:
+        app.state.search_init_task = None
+        app.state.search_initializing = False
         logger.info("Search disabled (INTARIS_SEARCH_ENABLED=false)")
 
     # Initialize background worker for behavioral analysis
@@ -754,6 +793,7 @@ async def lifespan(app):
         api_app.state.event_store = app.state.event_store
         api_app.state.judge_reviewer = app.state.judge_reviewer
         api_app.state.search_service = app.state.search_service
+        api_app.state.search_initializing = app.state.search_initializing
 
     mcp_session_stop = None
     mcp_session_task = None
@@ -785,11 +825,6 @@ async def lifespan(app):
             app.state.mcp_session_manager_task = None
             app.state.mcp_session_manager_ready = None
 
-        # Start the search indexer worker (no-op when search disabled
-        # or vector tier disabled).
-        with contextlib.suppress(Exception):
-            await search_service.start()
-
         yield
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Shutdown interrupted — running cleanup")
@@ -814,9 +849,15 @@ async def lifespan(app):
             except asyncio.CancelledError:
                 pass
 
-        # Stop search indexer worker (3s timeout per service)
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await asyncio.wait_for(search_service.stop(), timeout=3.0)
+        # Search initialization is optional; do not block shutdown on it.
+        if search_task is not None:
+            search_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await search_task
+        search_service = app.state.search_service
+        if search_service is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(search_service.stop(), timeout=3.0)
 
         # Flush event store buffers (synchronous — fast)
         if app.state.event_store is not None:

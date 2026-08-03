@@ -11,6 +11,7 @@ import contextlib
 import json
 import os
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -97,6 +98,49 @@ def client_with_auth(env_with_auth):
 def _auth_headers(token: str = "test-api-key") -> dict:
     """Create auth headers."""
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_search_initialization_does_not_block_startup(env_no_auth, monkeypatch):
+    """Optional search setup must not delay the server becoming live."""
+    import intaris.server as srv
+
+    async def slow_search_initialization(app, config):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(srv, "_initialize_search", slow_search_initialization)
+
+    app = srv.create_app()
+    with TestClient(app) as client:
+        response = client.get("/live")
+
+        assert response.status_code == 200
+        assert app.state.search_init_task.done() is False
+
+
+def test_search_initialization_disables_vector_tier(monkeypatch):
+    """Startup must not import or initialize the optional vector backend."""
+    import intaris.server as srv
+    from intaris.config import SearchConfig
+
+    captured = {}
+    service = SimpleNamespace(lexical_backend="sqlite", vector_backend_name="disabled")
+    app = SimpleNamespace(state=SimpleNamespace(search_initializing=True))
+
+    def build_search_service(db, config):
+        captured["config"] = config
+        return service
+
+    monkeypatch.setattr(srv, "_build_search_service", build_search_service)
+    monkeypatch.setattr(srv, "_get_db", lambda: object())
+
+    config = SearchConfig()
+    config.vector_provider = "qdrant"
+    config.embedding_model = "test-embedding-model"
+    asyncio.run(srv._initialize_search(app, config))
+
+    assert captured["config"].vector_provider == "disabled"
+    assert app.state.search_service is service
+    assert app.state.search_initializing is False
 
 
 class _FakeEvaluator:

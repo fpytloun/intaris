@@ -6,7 +6,14 @@ import os
 
 import pytest
 
-from intaris.config import Config, DBConfig, LLMConfig, ServerConfig, _parse_api_keys
+from intaris.config import (
+    Config,
+    DBConfig,
+    LLMConfig,
+    SearchConfig,
+    ServerConfig,
+    _parse_api_keys,
+)
 
 
 class TestConfigDefaults:
@@ -65,6 +72,12 @@ class TestConfigValidation:
         if config.llm.api_key:
             with pytest.raises(ValueError, match="must be >= 0"):
                 config.validate()
+
+    def test_vector_settings_do_not_block_startup_validation(self):
+        config = Config(llm=LLMConfig(api_key="test-key"), search=SearchConfig())
+        config.search.vector_provider = "qdrant"
+
+        config.validate()
 
     def test_malformed_api_keys_fails_validation(self, monkeypatch):
         monkeypatch.setenv("INTARIS_API_KEYS", "not-json")

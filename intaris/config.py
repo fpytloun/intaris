@@ -621,27 +621,9 @@ class Config:
                     f"{self.search.vector_provider} is not supported. "
                     "Use 'disabled', 'pgvector', or 'qdrant'."
                 )
-            if (
-                self.search.vector_provider == "pgvector"
-                and self.db.backend != "postgresql"
-            ):
-                raise ValueError(
-                    "INTARIS_SEARCH_VECTOR_PROVIDER=pgvector requires "
-                    "DB_BACKEND=postgresql."
-                )
-            if self.search.vector_provider == "qdrant" and not self.search.qdrant_url:
-                raise ValueError(
-                    "INTARIS_SEARCH_VECTOR_PROVIDER=qdrant requires "
-                    "INTARIS_SEARCH_QDRANT_URL (server URL or local path)."
-                )
-            if (
-                self.search.vector_provider != "disabled"
-                and not self.search.embedding_model
-            ):
-                raise ValueError(
-                    "INTARIS_SEARCH_EMBEDDING_MODEL is required when "
-                    "INTARIS_SEARCH_VECTOR_PROVIDER is not 'disabled'."
-                )
+            # Vector providers are intentionally inactive at runtime so
+            # optional model/client setup cannot delay the guardrails API.
+            # Keep accepting their settings for future re-enablement.
             if self.search.embedding_dim < 1:
                 raise ValueError(
                     "INTARIS_SEARCH_EMBEDDING_DIM="

@@ -39,6 +39,8 @@ def _service_or_none(request: Request) -> Any:
 
 def _service(request: Request) -> Any:
     svc = _service_or_none(request)
+    if svc is None and getattr(request.app.state, "search_initializing", False):
+        raise HTTPException(status_code=503, detail="search_initializing")
     if svc is None or not svc.enabled:
         raise HTTPException(status_code=404, detail="search_disabled")
     return svc
@@ -53,10 +55,12 @@ async def search_health(request: Request) -> SearchHealth:
             SearchVectorState,
         )
 
+        initializing = getattr(request.app.state, "search_initializing", False)
         return SearchHealth(
-            enabled=False,
+            enabled=initializing,
             lexical=SearchLexicalCapabilities(backend="disabled"),
             vector=SearchVectorState(provider="disabled"),
+            notes=["Search initialization in progress"] if initializing else [],
         )
     return await asyncio.to_thread(svc.health)
 
