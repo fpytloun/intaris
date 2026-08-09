@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -93,7 +94,8 @@ async def declare_intention(
         event_store = getattr(http_request.app.state, "event_store", None)
         if event_store is not None:
             try:
-                event_store.append(
+                await asyncio.to_thread(
+                    event_store.append,
                     ctx.user_id,
                     request.session_id,
                     [
@@ -331,7 +333,8 @@ async def update_session_status(
         event_store = getattr(http_request.app.state, "event_store", None)
         if event_store is not None:
             try:
-                event_store.append(
+                await asyncio.to_thread(
+                    event_store.append,
                     ctx.user_id,
                     session_id,
                     [
@@ -354,7 +357,9 @@ async def update_session_status(
             # Flush event buffer on session completion/termination/suspension
             if request.status in ("completed", "terminated", "suspended"):
                 try:
-                    event_store.flush_session(ctx.user_id, session_id)
+                    await asyncio.to_thread(
+                        event_store.flush_session, ctx.user_id, session_id
+                    )
                 except Exception:
                     logger.debug(
                         "Failed to flush events on session %s",

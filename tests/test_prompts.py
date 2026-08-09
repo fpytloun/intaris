@@ -250,6 +250,30 @@ class TestRecentReasoningPromptRendering:
         assert "LLM tool surface" in prompt
         assert "⟨reasoning_history⟩" in prompt
 
+    def test_evaluator_prompt_keeps_ineligible_reasoning_context(self):
+        prompt = build_evaluation_user_prompt(
+            intention="Keep the trusted intention",
+            policy=None,
+            recent_history=[],
+            recent_reasoning=[
+                {
+                    "content": "User message: external audit evidence",
+                    "args_redacted": {"intention_eligible": False},
+                }
+            ],
+            session_stats={
+                "total_calls": 1,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args={"command": "git status"},
+            agent_id="opencode",
+        )
+
+        assert "external audit evidence" in prompt
+
     def test_build_prompt_includes_guardrails_context_as_advisory_data(self):
         prompt = build_evaluation_user_prompt(
             intention="Inspect monitoring state",

@@ -24,6 +24,10 @@ def _env_int(key: str, default: int) -> int:
     return int(os.environ.get(key, str(default)))
 
 
+def _env_float(key: str, default: float) -> float:
+    return float(os.environ.get(key, str(default)))
+
+
 def _env_bool(key: str, default: bool = False) -> bool:
     return os.environ.get(key, str(default)).lower() in ("true", "1", "yes")
 
@@ -141,6 +145,11 @@ class ServerConfig:
 
     host: str = field(default_factory=lambda: _env("INTARIS_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: _env_int("INTARIS_PORT", 8060))
+    metrics_enabled: bool = field(
+        default_factory=lambda: _env_bool("METRICS_ENABLED", True)
+    )
+    metrics_host: str = field(default_factory=lambda: _env("METRICS_HOST", "0.0.0.0"))
+    metrics_port: int = field(default_factory=lambda: _env_int("METRICS_PORT", 9090))
 
     # Single shared API key (authenticates but does not bind to user_id).
     api_key: str = field(default_factory=lambda: _env("INTARIS_API_KEY"))
@@ -361,9 +370,43 @@ class EventStoreConfig:
         default_factory=lambda: _env_int("EVENT_STORE_FLUSH_SIZE", 100)
     )
 
+    # Write buffer: approximate maximum serialized bytes per chunk.
+    flush_bytes: int = field(
+        default_factory=lambda: _env_int("EVENT_STORE_FLUSH_BYTES", 4 * 1024 * 1024)
+    )
+
     # Write buffer: seconds between periodic flushes.
     flush_interval: int = field(
         default_factory=lambda: _env_int("EVENT_STORE_FLUSH_INTERVAL", 30)
+    )
+
+    # S3 chunk index cache lifetime. A short TTL avoids a prefix listing on
+    # every read while still discovering chunks written by another process.
+    s3_chunk_cache_ttl: float = field(
+        default_factory=lambda: _env_float("EVENT_STORE_S3_CHUNK_CACHE_TTL", 300.0)
+    )
+
+    # Immutable S3 event chunk cache. This cache is only instantiated by the
+    # S3 backend; filesystem event storage already reads authoritative local files.
+    event_cache_backend: str = field(
+        default_factory=lambda: _env("EVENT_CACHE_BACKEND", "filesystem")
+    )
+    event_cache_path: str = field(
+        default_factory=lambda: (
+            _env("EVENT_CACHE_PATH") or os.path.join(_data_dir(), "event-cache")
+        )
+    )
+    event_cache_max_bytes: int = field(
+        default_factory=lambda: _env_int("EVENT_CACHE_MAX_BYTES", 10 * 1024**3)
+    )
+    event_cache_ttl_seconds: float = field(
+        default_factory=lambda: _env_float("EVENT_CACHE_TTL_SECONDS", 7 * 24 * 3600)
+    )
+    event_cache_touch_interval_seconds: float = field(
+        default_factory=lambda: _env_float("EVENT_CACHE_TOUCH_INTERVAL_SECONDS", 3600.0)
+    )
+    event_cache_sweep_interval_seconds: float = field(
+        default_factory=lambda: _env_float("EVENT_CACHE_SWEEP_INTERVAL_SECONDS", 60.0)
     )
 
 
@@ -548,6 +591,16 @@ class Config:
     event_store: EventStoreConfig = field(default_factory=EventStoreConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
 
+    def __post_init__(self) -> None:
+        """Apply the evaluate LLM key to unset specialized LLM configurations."""
+        if self.llm.api_key:
+            if not self.llm_analysis.api_key:
+                self.llm_analysis.api_key = self.llm.api_key
+            if not self.llm_l3_analysis.api_key:
+                self.llm_l3_analysis.api_key = self.llm.api_key
+            if not self.llm_judge.api_key:
+                self.llm_judge.api_key = self.llm.api_key
+
     def validate(self) -> None:
         """Validate that required configuration is present."""
         # Database backend validation.
@@ -594,6 +647,16 @@ class Config:
             )
         if self.server.rate_limit < 0:
             raise ValueError(f"RATE_LIMIT={self.server.rate_limit} must be >= 0.")
+        if not 1 <= self.server.port <= 65535:
+            raise ValueError(
+                f"INTARIS_PORT={self.server.port} must be between 1 and 65535."
+            )
+        if not 1 <= self.server.metrics_port <= 65535:
+            raise ValueError(
+                f"METRICS_PORT={self.server.metrics_port} must be between 1 and 65535."
+            )
+        if self.server.metrics_enabled and self.server.metrics_port == self.server.port:
+            raise ValueError("METRICS_PORT must differ from INTARIS_PORT.")
 
         # Fail loudly if INTARIS_API_KEYS env var is set but parsed as empty
         # (indicates malformed JSON that was silently ignored at parse time).
@@ -665,9 +728,8 @@ class Config:
             raise ValueError(f"MCP_CONFIG_FILE={self.mcp.config_file} does not exist.")
 
         # Analysis LLM is required when behavioral analysis is enabled.
-        # No fallback from llm_analysis to llm — prevents silent
-        # misconfiguration where a fast/cheap model produces garbage
-        # for analysis tasks that need a more capable model.
+        # Its API key falls back to the evaluate LLM key while retaining
+        # analysis-specific model, reasoning, and timeout defaults.
         if self.analysis.enabled and not self.llm_analysis.api_key:
             raise ValueError(
                 "ANALYSIS_LLM_API_KEY (or LLM_API_KEY as fallback) is required "
@@ -707,11 +769,37 @@ class Config:
                     f"EVENT_STORE_FLUSH_SIZE={self.event_store.flush_size} "
                     "must be >= 1."
                 )
+            if self.event_store.flush_bytes < 1:
+                raise ValueError(
+                    f"EVENT_STORE_FLUSH_BYTES={self.event_store.flush_bytes} "
+                    "must be >= 1."
+                )
             if self.event_store.flush_interval < 1:
                 raise ValueError(
                     f"EVENT_STORE_FLUSH_INTERVAL={self.event_store.flush_interval} "
                     "must be >= 1."
                 )
+            if self.event_store.s3_chunk_cache_ttl < 0:
+                raise ValueError(
+                    "EVENT_STORE_S3_CHUNK_CACHE_TTL="
+                    f"{self.event_store.s3_chunk_cache_ttl} must be >= 0."
+                )
+            if self.event_store.event_cache_backend not in {
+                "disabled",
+                "none",
+                "filesystem",
+            }:
+                raise ValueError(
+                    "EVENT_CACHE_BACKEND must be disabled, none, or filesystem."
+                )
+            if self.event_store.event_cache_max_bytes < 1:
+                raise ValueError("EVENT_CACHE_MAX_BYTES must be >= 1.")
+            if self.event_store.event_cache_ttl_seconds < 0:
+                raise ValueError("EVENT_CACHE_TTL_SECONDS must be >= 0.")
+            if self.event_store.event_cache_touch_interval_seconds < 0:
+                raise ValueError("EVENT_CACHE_TOUCH_INTERVAL_SECONDS must be >= 0.")
+            if self.event_store.event_cache_sweep_interval_seconds < 1:
+                raise ValueError("EVENT_CACHE_SWEEP_INTERVAL_SECONDS must be >= 1.")
 
 
 def load_config() -> Config:

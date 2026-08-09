@@ -3,6 +3,7 @@ services:
     build: .
     ports:
       - "8060:8060"
+      - "127.0.0.1:9090:9090"
     environment:
       - LLM_API_KEY=${LLM_API_KEY:-${OPENAI_API_KEY}}
     volumes:

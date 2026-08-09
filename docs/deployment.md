@@ -29,6 +29,7 @@ services:
     build: .
     ports:
       - "8060:8060"
+      - "127.0.0.1:9090:9090"
     environment:
       - LLM_API_KEY=${LLM_API_KEY:-${OPENAI_API_KEY}}
     volumes:
@@ -46,7 +47,7 @@ The Dockerfile uses a two-stage build for fast dependency caching:
 - Base image: `python:3.13-slim`
 - Uses `uv` for fast dependency resolution
 - Data directory: `/data` (mount a volume here)
-- Exposed port: `8060`
+- Exposed ports: `8060` for the main API and `9090` for metrics
 - Health check: `GET /health` every 30s
 - Entry point: `intaris`
 
@@ -60,6 +61,7 @@ services:
     build: .
     ports:
       - "8060:8060"
+      - "127.0.0.1:9090:9090"
     environment:
       # LLM
       - LLM_API_KEY=sk-your-key
@@ -170,9 +172,14 @@ export EVENT_STORE_S3_ACCESS_KEY=your-access-key
 export EVENT_STORE_S3_SECRET_KEY=your-secret-key
 export EVENT_STORE_S3_BUCKET=intaris-events
 export EVENT_STORE_S3_REGION=us-east-1
+export EVENT_CACHE_BACKEND=filesystem
+export EVENT_CACHE_PATH=/data/event-cache
+export EVENT_CACHE_MAX_BYTES=10737418240
 ```
 
 Both backends use the same chunked layout: `{user_id}/{session_id}/seq_{start:06d}_{end:06d}.ndjson`.
+Only the S3 backend uses `EVENT_CACHE_*`. It keeps immutable chunks locally
+after the first read. Each replica can maintain an independent cache.
 
 ## Reverse Proxy
 
@@ -275,7 +282,13 @@ See the [MCP Proxy Guide](mcp-proxy.md) for config file format and details.
 | `RATE_LIMIT` | `60` | Increase for high-throughput agents. Set to `0` to disable. |
 | `SESSION_IDLE_TIMEOUT_MINUTES` | `30` | Lower for faster cleanup of abandoned sessions. |
 | `EVENT_STORE_FLUSH_SIZE` | `100` | Increase for high-volume recording. |
+| `EVENT_STORE_FLUSH_BYTES` | `4194304` | Target an upper bound for serialized chunk size. |
 | `EVENT_STORE_FLUSH_INTERVAL` | `30` | Decrease for lower-latency playback. |
+| `EVENT_STORE_S3_CHUNK_CACHE_TTL` | `300` | Increase for single-replica deployments; reduce when other writers must be discovered without shared invalidation. |
+| `EVENT_CACHE_BACKEND` | `filesystem` | Set to `disabled` to bypass immutable S3 chunk caching. |
+| `EVENT_CACHE_PATH` | `~/.intaris/event-cache` | Use fast local storage with sufficient free space. |
+| `EVENT_CACHE_MAX_BYTES` | `10737418240` | Bound local cache disk use. |
+| `EVENT_CACHE_TTL_SECONDS` | `604800` | Remove chunks that remain unused for this interval. |
 
 ## Monitoring
 
@@ -284,5 +297,27 @@ The `/health` endpoint returns service status and can be used for health checks:
 ```bash
 curl http://localhost:8060/health
 ```
+
+The response also includes process-local performance metrics:
+
+- HTTP request counts and latency histograms by route template, method, and status group.
+- Event-loop scheduling delay.
+- Database query, transaction, and connection-pool wait latency.
+- Event-store flush latency, batch sizes, buffered events, and reconciliation progress.
+- S3 request counts, transferred bytes, operation latency, metadata-cache behavior,
+  and immutable chunk-cache hits, misses, bytes, evictions, and load latency.
+
+Counters reset when the process restarts. In a multi-replica deployment, collect and
+aggregate the response from each replica.
+
+Prometheus-compatible metrics are available without authentication:
+
+```bash
+curl http://localhost:9090/metrics
+```
+
+The metrics listener is unauthenticated and separate from the main API. Do not
+publish `METRICS_PORT` through the public Service or ingress. Prometheus can
+scrape the pod port directly.
 
 The `/api/v1/stats` endpoint provides aggregated metrics for monitoring dashboards.

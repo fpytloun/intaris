@@ -194,6 +194,60 @@ class TaskQueue:
         )
         return task_id
 
+    def enqueue_bootstrap_if_no_user_message(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        priority: int = 1,
+    ) -> str | None:
+        """Atomically enqueue bootstrap only for a message-free session."""
+        task_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        payload = json.dumps({"trigger": "bootstrap"})
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO analysis_tasks
+                    (id, task_type, user_id, session_id, agent_id, status,
+                     priority, payload, retry_count, max_retries,
+                     next_attempt_at, created_at)
+                SELECT ?, 'intention_update', s.user_id, s.session_id,
+                       COALESCE(s.agent_id, ''), 'pending',
+                       ?, ?, 0, 3, ?, ?
+                FROM sessions AS s
+                WHERE s.user_id = ? AND s.session_id = ?
+                  AND s.user_message_observed = FALSE
+                  AND s.intention_source = 'initial'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM analysis_tasks AS t
+                      WHERE t.task_type = 'intention_update'
+                        AND t.user_id = s.user_id
+                        AND t.session_id = s.session_id
+                        AND t.status IN ('pending', 'running')
+                  )
+                """,
+                (
+                    task_id,
+                    priority,
+                    payload,
+                    now,
+                    now,
+                    user_id,
+                    session_id,
+                ),
+            )
+            inserted = cur.rowcount == 1
+        if not inserted:
+            return None
+        logger.debug(
+            "Enqueued bootstrap intention task %s for user=%s session=%s",
+            task_id,
+            user_id,
+            session_id,
+        )
+        return task_id
+
     def _resolve_task_agent_id(
         self,
         *,
@@ -242,10 +296,13 @@ class TaskQueue:
             Task dict or None.
         """
         now = datetime.now(timezone.utc).isoformat()
+        lock_clause = (
+            " FOR UPDATE SKIP LOCKED" if self._db.backend == "postgresql" else ""
+        )
 
         with self._db.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 UPDATE analysis_tasks
                 SET status = 'running',
                     started_at = ?,
@@ -271,7 +328,9 @@ class TaskQueue:
                       )
                     ORDER BY priority DESC, next_attempt_at ASC
                     LIMIT 1
+                    {lock_clause}
                 )
+                  AND status = 'pending'
                 RETURNING *
                 """,
                 (now, now, now, now),
@@ -1408,6 +1467,13 @@ class BackgroundWorker:
         # Pass intention_source directly so the update is atomic —
         # no double-update race between generate_intention and here.
         source = "bootstrap" if trigger == "bootstrap" else "user"
+        if source == "bootstrap":
+            session = self._session_store.get(session_id, user_id=user_id)
+            if session.get("user_message_observed"):
+                return {
+                    "status": "skipped",
+                    "reason": "User message already observed",
+                }
 
         # Run in thread executor to avoid blocking the event loop.
         # generate_intention() makes synchronous LLM calls (up to 30s).
@@ -1437,19 +1503,19 @@ class BackgroundWorker:
 
         cfg = load_config()
         interval = cfg.event_store.flush_interval
+        poll_interval = min(float(interval), 1.0)
 
         while self._running:
-            await asyncio.sleep(interval)
+            await asyncio.sleep(poll_interval)
 
             if self._event_store is None:
                 continue
 
             try:
-                buffered = self._event_store.buffered_event_count
-                self._event_store.flush_all()
-                if buffered > 0:
+                flushed = await asyncio.to_thread(self._event_store.flush_stale)
+                if flushed > 0:
                     logger.debug(
-                        "Event store periodic flush: %d events flushed", buffered
+                        "Event store periodic flush: %d events flushed", flushed
                     )
             except Exception:
                 logger.exception("Event store periodic flush failed")

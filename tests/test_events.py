@@ -9,7 +9,9 @@ Tests cover:
 
 from __future__ import annotations
 
+import io
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,13 +19,16 @@ import pytest
 from intaris.config import EventStoreConfig
 from intaris.events.backend import (
     FilesystemEventBackend,
+    S3EventBackend,
     _chunk_filename,
     _events_to_ndjson,
     _ndjson_to_events,
     _parse_chunk_filename,
     _validate_path_component,
 )
+from intaris.events.cache import FilesystemEventChunkCache, NullEventChunkCache
 from intaris.events.store import VALID_EVENT_TYPES, EventStore
+from intaris.metrics import Histogram
 
 # ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -629,6 +634,127 @@ class TestEventStore:
         events = store.read("alice", "sess1", limit=2)
         assert len(events) == 2
 
+    def test_unfiltered_read_pushes_limit_to_backend(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "message", "data": {}} for _ in range(5)],
+        )
+        observed_limits = []
+        original_read = store._backend.read
+
+        def recording_read(user_id, session_id, after_seq=0, limit=0):
+            observed_limits.append(limit)
+            return original_read(user_id, session_id, after_seq, limit)
+
+        store._backend.read = recording_read
+        events = store.read("alice", "sess1", limit=2)
+
+        assert len(events) == 2
+        assert observed_limits == [2]
+
+    def test_filtered_read_pages_until_limit_is_satisfied(self, tmp_path):
+        config = EventStoreConfig(
+            backend="filesystem",
+            filesystem_path=str(tmp_path / "events"),
+            flush_size=500,
+            flush_interval=30,
+        )
+        store = EventStore(config)
+        events = [
+            {
+                "type": "evaluation" if index == 150 else "message",
+                "data": {"index": index},
+            }
+            for index in range(1, 206)
+        ]
+        store.append("alice", "sess1", events)
+        store.flush_all()
+        observed_limits = []
+        original_read = store._backend.read
+
+        def recording_read(user_id, session_id, after_seq=0, limit=0):
+            observed_limits.append(limit)
+            return original_read(user_id, session_id, after_seq, limit)
+
+        store._backend.read = recording_read
+        result = store.read(
+            "alice",
+            "sess1",
+            limit=1,
+            event_types={"evaluation"},
+        )
+
+        assert [event["data"]["index"] for event in result] == [150]
+        assert observed_limits == [100, 100]
+
+    def test_filtered_read_prefers_earlier_persisted_match_over_buffer(self, tmp_path):
+        config = EventStoreConfig(
+            backend="filesystem",
+            filesystem_path=str(tmp_path / "events"),
+            flush_size=500,
+            flush_interval=30,
+        )
+        store = EventStore(config)
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {
+                    "type": "evaluation" if index == 150 else "message",
+                    "data": {"index": index},
+                }
+                for index in range(1, 206)
+            ],
+        )
+        store.flush_all()
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "evaluation", "data": {"index": 206}}],
+        )
+
+        result = store.read(
+            "alice",
+            "sess1",
+            limit=1,
+            event_types={"evaluation"},
+        )
+
+        assert [event["data"]["index"] for event in result] == [150]
+
+    def test_sparse_filtered_read_processes_each_page_once(self, tmp_path):
+        config = EventStoreConfig(
+            backend="filesystem",
+            filesystem_path=str(tmp_path / "events"),
+            flush_size=500,
+            flush_interval=30,
+        )
+        store = EventStore(config)
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "message", "data": {"index": index}} for index in range(1, 251)],
+        )
+        store.flush_all()
+        observed_after_seq = []
+        original_read = store._backend.read
+
+        def recording_read(user_id, session_id, after_seq=0, limit=0):
+            observed_after_seq.append(after_seq)
+            return original_read(user_id, session_id, after_seq, limit)
+
+        store._backend.read = recording_read
+        result = store.read(
+            "alice",
+            "sess1",
+            limit=1,
+            event_types={"evaluation"},
+        )
+
+        assert result == []
+        assert observed_after_seq == [0, 100, 200]
+
     def test_read_with_type_filter(self, store):
         store.append(
             "alice",
@@ -861,6 +987,53 @@ class TestEventStore:
         # Events should still be readable (from backend)
         events = store.read("alice", "sess1")
         assert len(events) == 5
+
+    def test_tool_events_use_normal_batching(self, store):
+        """Tool events remain buffered until a configured threshold."""
+        store.append(
+            "alice",
+            "sess1",
+            [
+                {"type": "tool_call", "data": {}},
+                {"type": "tool_result", "data": {}},
+            ],
+        )
+
+        assert store.buffered_event_count == 2
+        assert not store._backend.exists("alice", "sess1")
+
+    def test_auto_flush_on_byte_threshold(self, tmp_path):
+        config = EventStoreConfig(
+            backend="filesystem",
+            filesystem_path=str(tmp_path / "events"),
+            flush_size=100,
+            flush_bytes=100,
+            flush_interval=30,
+        )
+        store = EventStore(config)
+
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "message", "data": {"content": "x" * 200}}],
+        )
+
+        assert store.buffered_event_count == 0
+        assert store._backend.exists("alice", "sess1")
+
+    def test_flush_stale_only_flushes_expired_buffers(self, store):
+        store.append("alice", "old", [{"type": "message", "data": {}}])
+        store.append("alice", "new", [{"type": "message", "data": {}}])
+        store._buffer_started_at[("alice", "old")] = (
+            time.monotonic() - store._config.flush_interval - 1
+        )
+
+        flushed = store.flush_stale()
+
+        assert flushed == 1
+        assert store.read("alice", "old")
+        assert store.buffered_event_count == 1
+        assert store.read("alice", "new")
 
     def test_manual_flush(self, store):
         store.append(
@@ -1169,7 +1342,9 @@ class TestEventStore:
         events = store.read_tail("alice", "sess1", limit=2, event_types={"message"})
         assert [e["seq"] for e in events] == [3, 5]
 
-    def test_read_before_seq_with_payload_filters_across_persisted_and_buffer(self, store):
+    def test_read_before_seq_with_payload_filters_across_persisted_and_buffer(
+        self, store
+    ):
         store.append(
             "alice",
             "sess1",
@@ -1379,6 +1554,75 @@ class TestEventStore:
         # All seqs should be in range 1..50
         assert sorted(results) == list(range(1, 51))
 
+    def test_slow_flush_does_not_block_other_sessions(self, tmp_path):
+        config = EventStoreConfig(
+            backend="filesystem",
+            filesystem_path=str(tmp_path / "events"),
+            flush_size=1,
+            flush_interval=30,
+        )
+        store = EventStore(config)
+        original_append = store._backend.append
+        blocked = threading.Event()
+        release = threading.Event()
+
+        def blocking_append(user_id, session_id, events):
+            if session_id == "slow":
+                blocked.set()
+                release.wait(timeout=2)
+            original_append(user_id, session_id, events)
+
+        store._backend.append = blocking_append
+        slow = threading.Thread(
+            target=store.append,
+            args=("alice", "slow", [{"type": "message", "data": {}}]),
+        )
+        slow.start()
+        assert blocked.wait(timeout=1)
+
+        fast = threading.Thread(
+            target=store.append,
+            args=("alice", "fast", [{"type": "message", "data": {}}]),
+        )
+        fast.start()
+        fast.join(timeout=1)
+
+        release.set()
+        slow.join(timeout=1)
+        assert not fast.is_alive()
+        assert store.last_seq("alice", "fast") == 1
+
+    def test_buffer_registry_is_safe_during_concurrent_session_creation(
+        self, fs_config
+    ):
+        store = EventStore(fs_config)
+        errors = []
+        finished = threading.Event()
+
+        def create_sessions():
+            try:
+                for index in range(100):
+                    store.append(
+                        "alice",
+                        f"session-{index}",
+                        [{"type": "message", "data": {}}],
+                    )
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        creator = threading.Thread(target=create_sessions)
+        creator.start()
+        while not finished.is_set():
+            store.flush_stale()
+            store.metrics()
+        creator.join(timeout=2)
+        store.flush_all()
+
+        assert not errors
+        assert store.buffered_event_count == 0
+
 
 class TestEventStoreConfig:
     """Tests for EventStoreConfig."""
@@ -1388,7 +1632,12 @@ class TestEventStoreConfig:
         assert config.enabled is True
         assert config.backend == "filesystem"
         assert config.flush_size == 100
+        assert config.flush_bytes == 4 * 1024 * 1024
         assert config.flush_interval == 30
+        assert config.s3_chunk_cache_ttl == 300.0
+        assert config.event_cache_backend == "filesystem"
+        assert config.event_cache_max_bytes == 10 * 1024**3
+        assert config.event_cache_ttl_seconds == 7 * 24 * 3600
 
     def test_unsupported_backend_raises(self, tmp_path):
         config = EventStoreConfig(
@@ -1397,6 +1646,306 @@ class TestEventStoreConfig:
         )
         with pytest.raises(ValueError, match="Unsupported event store backend"):
             EventStore(config)
+
+    def test_filesystem_event_backend_does_not_create_chunk_cache(self, tmp_path):
+        cache_path = tmp_path / "event-cache"
+        EventStore(
+            EventStoreConfig(
+                backend="filesystem",
+                filesystem_path=str(tmp_path / "events"),
+                event_cache_path=str(cache_path),
+            )
+        )
+
+        assert not cache_path.exists()
+
+
+class TestS3EventBackendCache:
+    """Tests for the bounded local S3 metadata caches."""
+
+    class FakeClientError(Exception):
+        def __init__(self, status_code):
+            self.response = {
+                "Error": {"Code": "PreconditionFailed"},
+                "ResponseMetadata": {"HTTPStatusCode": status_code},
+            }
+            super().__init__("S3 client error")
+
+    class FakeClient:
+        def __init__(self):
+            self.list_calls = 0
+            self.objects = []
+            self.put_calls = []
+            self.etag = "etag-remote"
+            self.events = [{"seq": 1, "ts": "t", "type": "message", "data": {}}]
+
+        def list_objects_v2(self, **kwargs):
+            self.list_calls += 1
+            prefix = kwargs["Prefix"]
+            contents = [
+                {"Key": key, "ETag": f'"{self.etag}"'}
+                for key in self.objects
+                if key.startswith(prefix)
+            ]
+            return {"Contents": contents, "IsTruncated": False}
+
+        def put_object(self, **kwargs):
+            self.put_calls.append(kwargs)
+            self.objects.append(kwargs["Key"])
+            return {"ETag": '"etag-written"'}
+
+        def get_object(self, **kwargs):
+            return {"Body": io.BytesIO(_events_to_ndjson(self.events))}
+
+    @staticmethod
+    def backend(client, event_cache=None):
+        backend = S3EventBackend.__new__(S3EventBackend)
+        backend._client = client
+        backend._client_error_type = TestS3EventBackendCache.FakeClientError
+        backend._endpoint_identity = "https://s3.test"
+        backend._bucket = "events"
+        backend._chunk_cache_ttl = 60.0
+        backend._cache_lock = threading.Lock()
+        backend._chunk_cache = {}
+        backend._object_versions = {}
+        backend._write_prefix_cache = {}
+        backend._chunk_cache_hits = 0
+        backend._chunk_cache_misses = 0
+        backend._list_requests = 0
+        backend._get_requests = 0
+        backend._put_requests = 0
+        backend._bytes_read = 0
+        backend._bytes_written = 0
+        backend._operation_latency = {
+            "list": Histogram(),
+            "get": Histogram(),
+            "put": Histogram(),
+        }
+        backend._cache_max_entries = 4096
+        backend._event_cache = event_cache or NullEventChunkCache()
+        return backend
+
+    def test_chunk_listing_is_cached(self):
+        client = self.FakeClient()
+        client.objects = ["events/alice/session/seq_000001_000002.ndjson"]
+        backend = self.backend(client)
+
+        first = backend._list_chunks("alice", "session")
+        second = backend._list_chunks("alice", "session")
+
+        assert first == second
+        assert client.list_calls == 1
+        assert backend.metrics()["chunk_cache_hits_total"] == 1
+
+    def test_append_reuses_discovered_prefix(self):
+        client = self.FakeClient()
+        backend = self.backend(client)
+        events = [{"seq": 1, "ts": "t", "type": "message", "data": {}}]
+
+        backend.append("alice", "session", events)
+        backend.append(
+            "alice",
+            "session",
+            [{"seq": 2, "ts": "t", "type": "message", "data": {}}],
+        )
+
+        assert client.list_calls == 1
+        assert len(client.objects) == 2
+        assert all(call["IfNoneMatch"] == "*" for call in client.put_calls)
+        metrics = backend.metrics()
+        assert metrics["put_requests_total"] == 2
+        assert metrics["bytes_written_total"] > 0
+        assert metrics["operation_latency"]["put"]["count"] == 2
+
+    def test_append_caches_body_under_its_own_put_version(self):
+        client = self.FakeClient()
+        backend = self.backend(client)
+        cached_keys = []
+
+        class RecordingCache(NullEventChunkCache):
+            def put(self, key, value):
+                cached_keys.append(key)
+
+        backend._event_cache = RecordingCache()
+        original_cache_key = backend._object_cache_key
+
+        def race_with_metadata_refresh(key, *, version=None):
+            backend._object_versions[key] = "etag-replaced"
+            return original_cache_key(key, version=version)
+
+        backend._object_cache_key = race_with_metadata_refresh
+        backend.append(
+            "alice",
+            "session",
+            [{"seq": 1, "ts": "t", "type": "message", "data": {}}],
+        )
+
+        assert cached_keys[0].endswith("\0etag-written")
+
+    def test_matching_preexisting_immutable_chunk_is_idempotent(self):
+        client = self.FakeClient()
+
+        def precondition_failed(**kwargs):
+            raise self.FakeClientError(412)
+
+        client.put_object = precondition_failed
+        backend = self.backend(client)
+
+        backend.append(
+            "alice",
+            "session",
+            [{"seq": 1, "ts": "t", "type": "message", "data": {}}],
+        )
+
+        assert backend.metrics()["get_requests_total"] == 1
+
+    def test_mismatching_preexisting_immutable_chunk_is_rejected(self):
+        client = self.FakeClient()
+        client.events = [
+            {
+                "seq": 1,
+                "ts": "different",
+                "type": "message",
+                "data": {"content": "collision"},
+            }
+        ]
+
+        def precondition_failed(**kwargs):
+            raise self.FakeClientError(412)
+
+        client.put_object = precondition_failed
+        backend = self.backend(client)
+
+        with pytest.raises(RuntimeError, match="Immutable event chunk collision"):
+            backend.append(
+                "alice",
+                "session",
+                [{"seq": 1, "ts": "t", "type": "message", "data": {}}],
+            )
+
+    def test_stream_read_records_get_metrics(self):
+        client = self.FakeClient()
+        client.objects = ["events/alice/session/seq_000001_000001.ndjson"]
+        backend = self.backend(client)
+
+        assert list(backend.read_stream("alice", "session"))[0]["seq"] == 1
+
+        metrics = backend.metrics()
+        assert metrics["get_requests_total"] == 1
+        assert metrics["bytes_read_total"] > 0
+        assert metrics["operation_latency"]["get"]["count"] == 1
+
+    def test_repeated_chunk_read_uses_filesystem_cache(self, tmp_path):
+        client = self.FakeClient()
+        client.objects = ["events/alice/session/seq_000001_000001.ndjson"]
+        event_cache = FilesystemEventChunkCache(
+            str(tmp_path / "cache"),
+            max_bytes=1024 * 1024,
+            ttl_seconds=3600,
+            touch_interval_seconds=3600,
+            sweep_interval_seconds=60,
+        )
+        backend = self.backend(client, event_cache)
+
+        assert backend.read("alice", "session")[0]["seq"] == 1
+        assert backend.read("alice", "session")[0]["seq"] == 1
+
+        metrics = backend.metrics()
+        assert metrics["get_requests_total"] == 1
+        assert metrics["event_cache"]["hits_total"] == 1
+
+    def test_corrupt_cached_chunk_is_reloaded_from_s3(self, tmp_path):
+        client = self.FakeClient()
+        client.objects = ["events/alice/session/seq_000001_000001.ndjson"]
+        event_cache = FilesystemEventChunkCache(
+            str(tmp_path / "cache"),
+            max_bytes=1024 * 1024,
+            ttl_seconds=3600,
+            touch_interval_seconds=3600,
+            sweep_interval_seconds=60,
+        )
+        backend = self.backend(client, event_cache)
+        assert backend.read("alice", "session")[0]["seq"] == 1
+        object_key = client.objects[0]
+        digest = event_cache._digest_key(backend._object_cache_key(object_key))
+        event_cache._path_for_digest(digest).write_bytes(b"corrupt")
+
+        assert backend.read("alice", "session")[0]["seq"] == 1
+
+        metrics = backend.metrics()
+        assert metrics["get_requests_total"] == 2
+        assert metrics["event_cache"]["corruption_recoveries_total"] == 1
+
+    def test_recreated_object_uses_new_etag_cache_identity(self, tmp_path):
+        client = self.FakeClient()
+        client.objects = ["events/alice/session/seq_000001_000001.ndjson"]
+        event_cache = FilesystemEventChunkCache(
+            str(tmp_path / "cache"),
+            max_bytes=1024 * 1024,
+            ttl_seconds=3600,
+            touch_interval_seconds=3600,
+            sweep_interval_seconds=60,
+        )
+        backend = self.backend(client, event_cache)
+        assert backend.read("alice", "session")[0]["data"] == {}
+
+        client.etag = "etag-recreated"
+        client.events = [
+            {
+                "seq": 1,
+                "ts": "t2",
+                "type": "message",
+                "data": {"content": "new"},
+            }
+        ]
+        cache_key = ("alice", "session")
+        cached_at, chunks = backend._chunk_cache[cache_key]
+        backend._chunk_cache[cache_key] = (cached_at - 61, chunks)
+
+        result = backend.read("alice", "session")
+
+        assert result[0]["data"] == {"content": "new"}
+        assert backend.metrics()["get_requests_total"] == 2
+
+    def test_failed_put_records_attempt_without_written_bytes(self):
+        client = self.FakeClient()
+
+        def fail_put(**kwargs):
+            raise RuntimeError("S3 unavailable")
+
+        client.put_object = fail_put
+        backend = self.backend(client)
+
+        with pytest.raises(RuntimeError, match="S3 unavailable"):
+            backend.append(
+                "alice",
+                "session",
+                [{"seq": 1, "ts": "t", "type": "message", "data": {}}],
+            )
+
+        metrics = backend.metrics()
+        assert metrics["put_requests_total"] == 1
+        assert metrics["bytes_written_total"] == 0
+        assert metrics["operation_latency"]["put"]["count"] == 1
+
+    def test_local_append_does_not_extend_stale_chunk_cache(self):
+        client = self.FakeClient()
+        backend = self.backend(client)
+        client.objects = ["events/alice/session/seq_000001_000001.ndjson"]
+        assert len(backend._list_chunks("alice", "session")) == 1
+        cache_key = ("alice", "session")
+        cached_at, chunks = backend._chunk_cache[cache_key]
+        backend._chunk_cache[cache_key] = (cached_at - 61, chunks)
+        client.objects.append("events/alice/session/seq_000002_000002.ndjson")
+
+        backend.append(
+            "alice",
+            "session",
+            [{"seq": 3, "ts": "t", "type": "message", "data": {}}],
+        )
+        refreshed = backend._list_chunks("alice", "session")
+
+        assert [chunk[:2] for chunk in refreshed] == [(1, 1), (2, 2), (3, 3)]
 
 
 class TestValidEventTypes:

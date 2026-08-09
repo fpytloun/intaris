@@ -25,7 +25,7 @@ Part of the [Cognara](https://github.com/fpytloun) platform (Cognis controller, 
 - **Audit trail** -- Every evaluation is logged with decision, reasoning, risk level, classification, latency, and redacted arguments.
 - **Secret redaction** -- API keys, passwords, tokens, and connection strings are automatically redacted before audit storage.
 - **Filesystem path protection** -- Working directory enforcement with approved path prefix learning from LLM approvals.
-- **Session recording** -- Full-fidelity event logs with live tailing, playback, and chunked ndjson storage (filesystem or S3).
+- **Session recording** -- Full-fidelity event logs with live tailing, playback, chunked ndjson storage (filesystem or S3), and a bounded local cache for immutable S3 chunks.
 - **Cognis-ready auth** -- Accepts Cognis-issued ES256 JWTs for service-to-service calls while keeping standalone API key auth for direct clients.
 - **Behavioral analysis** -- Three-layer system: per-call data collection, session summaries, and cross-session behavioral profiling.
 - **Management UI** -- Built-in web dashboard with session tree view, audit log, approval queue, MCP server management, and real-time charts.

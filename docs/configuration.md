@@ -10,6 +10,9 @@ Data is stored in `~/.intaris` by default (override with `DATA_DIR`). In Docker,
 |---|---|---|
 | `INTARIS_HOST` | `0.0.0.0` | HTTP server bind address |
 | `INTARIS_PORT` | `8060` | HTTP server port |
+| `METRICS_ENABLED` | `true` | Start the dedicated unauthenticated metrics listener |
+| `METRICS_HOST` | `0.0.0.0` | Metrics listener bind address |
+| `METRICS_PORT` | `9090` | Dedicated Prometheus metrics port; must differ from `INTARIS_PORT` |
 | `INTARIS_API_KEY` | (empty) | Single shared API key. Authenticates requests but does not bind to a user -- clients must send `X-User-Id` header. |
 | `INTARIS_API_KEYS` | (empty) | JSON dict mapping API keys to user IDs: `{"key1": "alice", "key2": "bob", "key3": "*"}`. A value of `"*"` means auth-only (no user binding). |
 | `INTARIS_JWT_PUBLIC_KEY` | (empty) | Path to a Cognis ES256 public key PEM for JWT validation |
@@ -138,9 +141,21 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 | `EVENT_STORE_BACKEND` | `filesystem` | Storage backend: `filesystem` or `s3` |
 | `EVENT_STORE_PATH` | `~/.intaris/events` | Filesystem backend storage path |
 | `EVENT_STORE_FLUSH_SIZE` | `100` | Events per chunk before flushing |
+| `EVENT_STORE_FLUSH_BYTES` | `4194304` | Approximate serialized bytes per chunk before flushing |
 | `EVENT_STORE_FLUSH_INTERVAL` | `30` | Seconds between periodic flushes |
+| `EVENT_STORE_S3_CHUNK_CACHE_TTL` | `300` | Seconds to cache S3 chunk indexes in each process |
+| `EVENT_CACHE_BACKEND` | `filesystem` | Immutable S3 chunk cache: `filesystem` or `disabled` |
+| `EVENT_CACHE_PATH` | `~/.intaris/event-cache` | Local cache path; used only by the S3 event backend |
+| `EVENT_CACHE_MAX_BYTES` | `10737418240` | Maximum local event cache size |
+| `EVENT_CACHE_TTL_SECONDS` | `604800` | Remove chunks not accessed within this interval |
+| `EVENT_CACHE_TOUCH_INTERVAL_SECONDS` | `3600` | Minimum interval between persistent access-time updates |
+| `EVENT_CACHE_SWEEP_INTERVAL_SECONDS` | `60` | Minimum interval between cache eviction sweeps |
 
 ### S3 Backend
+
+The S3 backend caches immutable chunk contents on local storage by default.
+The filesystem event backend does not use this cache because its event files
+are already local and authoritative.
 
 | Variable | Default | Description |
 |---|---|---|

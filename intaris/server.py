@@ -13,7 +13,9 @@ import contextvars
 import logging
 import os
 import sys
+import time
 from dataclasses import replace
+from typing import Any
 
 import uvicorn
 from starlette.applications import Starlette
@@ -21,11 +23,16 @@ from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Mount, Route, WebSocketRoute
+from starlette.routing import Match, Mount, Route, WebSocketRoute
 
 from intaris import __version__
 from intaris.auth import match_api_key, resolve_auth
 from intaris.config import SearchConfig, load_config
+from intaris.metrics import (
+    RuntimeMetrics,
+    monitor_event_loop_delay,
+    render_prometheus_metrics,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -184,6 +191,25 @@ async def ready_check(request: Request) -> JSONResponse:
     except Exception:
         pass  # Health check should never fail due to barrier
 
+    try:
+        event_store = getattr(request.app.state, "event_store", None)
+        if event_store is not None:
+            response["event_store"] = await asyncio.to_thread(event_store.metrics)
+    except Exception:
+        pass  # Health check should never fail due to event-store metrics
+
+    try:
+        response["database"] = await asyncio.to_thread(_get_db().metrics)
+    except Exception:
+        pass  # Health check should never fail due to database metrics
+
+    try:
+        runtime_metrics = getattr(request.app.state, "runtime_metrics", None)
+        if runtime_metrics is not None:
+            response["runtime"] = runtime_metrics.snapshot()
+    except Exception:
+        pass  # Health check should never fail due to runtime metrics
+
     return JSONResponse(response)
 
 
@@ -192,7 +218,113 @@ async def health_check(request: Request) -> JSONResponse:
     return await ready_check(request)
 
 
+async def metrics_check(request: Request) -> Response:
+    """Return process-local metrics in Prometheus text format."""
+    source_app = getattr(request.app.state, "source_app", request.app)
+    runtime_metrics = getattr(source_app.state, "runtime_metrics", None)
+    runtime = runtime_metrics.snapshot() if runtime_metrics is not None else {}
+    database = await asyncio.to_thread(_get_db().metrics)
+    event_store = getattr(source_app.state, "event_store", None)
+    event_metrics = (
+        await asyncio.to_thread(event_store.metrics)
+        if event_store is not None
+        else None
+    )
+    return Response(
+        render_prometheus_metrics(runtime, database, event_metrics),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
+
+
+class _EmbeddedUvicornServer(uvicorn.Server):
+    """Uvicorn server that leaves process signal ownership to the main server."""
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield
+
+
+def create_metrics_app(source_app: Starlette) -> Starlette:
+    """Create the unauthenticated, metrics-only ASGI application."""
+    metrics_app = Starlette(
+        routes=[Route("/metrics", metrics_check, methods=["GET"])],
+    )
+    metrics_app.state.source_app = source_app
+    return metrics_app
+
+
+async def _start_metrics_server(
+    source_app: Starlette,
+    *,
+    host: str,
+    port: int,
+) -> tuple[_EmbeddedUvicornServer, asyncio.Task]:
+    """Start the dedicated metrics listener and wait until it accepts traffic."""
+    server = _EmbeddedUvicornServer(
+        uvicorn.Config(
+            create_metrics_app(source_app),
+            host=host,
+            port=port,
+            log_level="warning",
+            access_log=False,
+            lifespan="off",
+        )
+    )
+    task = asyncio.create_task(server.serve(), name="intaris-metrics-server")
+    for _ in range(100):
+        if server.started:
+            logger.info("Metrics server listening on %s:%d", host, port)
+            return server, task
+        if task.done():
+            await task
+            raise RuntimeError(
+                f"Metrics server stopped before startup on {host}:{port}"
+            )
+        await asyncio.sleep(0.05)
+    server.should_exit = True
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+    raise RuntimeError(f"Metrics server did not start on {host}:{port}")
+
+
 # ── API Key Middleware ────────────────────────────────────────────────
+
+
+class PerformanceMetricsMiddleware(BaseHTTPMiddleware):
+    """Record bounded route-template latency metrics for every HTTP request."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        started_at = time.monotonic()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            metrics = getattr(request.app.state, "runtime_metrics", None)
+            if metrics is not None:
+                route_path = _route_template(request.app, request.scope)
+                metrics.observe_request(
+                    request.method,
+                    route_path,
+                    status_code,
+                    (time.monotonic() - started_at) * 1000,
+                )
+
+
+def _route_template(app: Any, scope: dict[str, Any], prefix: str = "") -> str:
+    """Resolve a bounded route template, including recursively mounted apps."""
+    for route in getattr(app, "routes", ()):
+        match, child_scope = route.matches(scope)
+        if match != Match.FULL:
+            continue
+        route_path = getattr(route, "path", "")
+        if isinstance(route, Mount):
+            mounted_scope = dict(scope)
+            mounted_scope.update(child_scope)
+            return _route_template(route.app, mounted_scope, prefix + route_path)
+        return prefix + route_path
+    return "<unmatched>"
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
@@ -526,6 +658,7 @@ def _build_search_service(db, config: SearchConfig):
 async def lifespan(app):
     """Application lifespan: initialize on startup, cleanup on shutdown."""
     logger.info("Intaris %s starting up", __version__)
+    app.state.runtime_metrics = RuntimeMetrics()
 
     # Initialize database (creates tables if needed)
     _get_db()
@@ -650,8 +783,10 @@ async def lifespan(app):
         event_store = EventStore(cfg.event_store)
         event_store.set_event_bus(app.state.event_bus)
         from intaris.event_audit import EventAuditStore
+        from intaris.session import SessionStore
 
         event_store.set_audit_store(EventAuditStore(_get_db()))
+        event_store.set_session_store(SessionStore(_get_db()))
         app.state.event_store = event_store
         app.state.event_reconciliation_task = None
         if app.state.intention_barrier is not None:
@@ -799,7 +934,22 @@ async def lifespan(app):
     mcp_session_stop = None
     mcp_session_task = None
     mcp_ready = None
+    event_loop_metrics_task = asyncio.create_task(
+        monitor_event_loop_delay(app.state.runtime_metrics),
+        name="intaris-event-loop-metrics",
+    )
+    metrics_server = None
+    metrics_server_task = None
     try:
+        if cfg.server.metrics_enabled:
+            metrics_server, metrics_server_task = await _start_metrics_server(
+                app,
+                host=cfg.server.metrics_host,
+                port=cfg.server.metrics_port,
+            )
+        else:
+            logger.info("Dedicated metrics server disabled")
+
         if mcp_proxy is not None:
             await mcp_proxy.start()
             mcp_session_stop = asyncio.Event()
@@ -830,6 +980,15 @@ async def lifespan(app):
     except (asyncio.CancelledError, KeyboardInterrupt):
         logger.info("Shutdown interrupted — running cleanup")
     finally:
+        if metrics_server is not None:
+            metrics_server.should_exit = True
+        if metrics_server_task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(metrics_server_task, timeout=5.0)
+
+        event_loop_metrics_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await event_loop_metrics_task
         # Cleanup always runs, even on CancelledError/KeyboardInterrupt.
         # Each step is individually guarded with timeouts so one failure
         # or hang doesn't block the rest.
@@ -860,15 +1019,24 @@ async def lifespan(app):
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(search_service.stop(), timeout=3.0)
 
-        # Flush event store buffers (synchronous — fast)
-        if app.state.event_store is not None:
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                app.state.event_store.flush_all()
-                logger.info("Event store flushed")
-
         # Stop background worker (5s timeout — has its own internal timeout)
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await asyncio.wait_for(background_worker.stop(), timeout=5.0)
+
+        # Flush all in-memory event buffers after the periodic flusher stops.
+        if app.state.event_store is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(app.state.event_store.flush_all),
+                    timeout=30.0,
+                )
+                logger.info("Event store flushed")
+            except asyncio.TimeoutError:
+                logger.error("Event store shutdown flush timed out after 30s")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Event store shutdown flush failed")
 
         # Close webhook client (2s timeout)
         with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -960,7 +1128,10 @@ def create_app() -> Starlette:
     from starlette.responses import RedirectResponse
     from starlette.staticfiles import StaticFiles
 
-    middleware = [Middleware(APIKeyMiddleware)]
+    middleware = [
+        Middleware(PerformanceMetricsMiddleware),
+        Middleware(APIKeyMiddleware),
+    ]
 
     from intaris.api.stream import stream_websocket
 

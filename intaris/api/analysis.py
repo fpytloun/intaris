@@ -8,6 +8,7 @@ Provides endpoints for:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -127,6 +128,8 @@ async def submit_reasoning(
         # The client already recorded the events; we read them back to
         # populate the audit store and trigger the IntentionBarrier.
         resolved_from_events = False
+        intention_eligible = True
+        source_event_seq: int | None = None
         if request.from_events:
             from intaris.events.resolve import resolve_last_user_message
 
@@ -137,8 +140,11 @@ async def submit_reasoning(
                     detail="from_events requires an enabled event store",
                 )
 
-            resolved = resolve_last_user_message(
-                event_store, ctx.user_id, request.session_id
+            resolved = await asyncio.to_thread(
+                resolve_last_user_message,
+                event_store,
+                ctx.user_id,
+                request.session_id,
             )
             if resolved is None:
                 # No user message found — return success as no-op.
@@ -146,7 +152,15 @@ async def submit_reasoning(
                 # or no user messages exist yet.
                 return ReasoningResponse(ok=True, call_id="")
 
-            user_content, assistant_context = resolved
+            user_content = resolved.content
+            assistant_context = resolved.assistant_context
+            intention_eligible = resolved.intention_eligible
+            source_event_seq = resolved.seq
+            session_store.observe_user_message(
+                request.session_id,
+                user_id=ctx.user_id,
+                event_seq=resolved.seq,
+            )
             # Construct the same format as direct callers use
             content = f"User message: {user_content}"
             context = assistant_context
@@ -167,6 +181,10 @@ async def submit_reasoning(
             sanitized_ctx = _sanitize_agent_text(context)
             if sanitized_ctx:
                 context_data = {"context": sanitized_ctx}
+        if resolved_from_events:
+            context_data = context_data or {}
+            context_data["intention_eligible"] = intention_eligible
+            context_data["source_event_seq"] = source_event_seq
 
         audit_store.insert(
             call_id=call_id,
@@ -193,6 +211,11 @@ async def submit_reasoning(
         # task; the next POST /evaluate will wait for it to complete.
         # Only triggers for user messages, not agent reasoning.
         if sanitized.startswith("User message:"):
+            if not resolved_from_events:
+                session_store.mark_user_message_observed(
+                    request.session_id,
+                    user_id=ctx.user_id,
+                )
             logger.info(
                 "Received user message for %s/%s (from_events=%s, context_len=%d)",
                 ctx.user_id,
@@ -203,12 +226,16 @@ async def submit_reasoning(
             barrier = getattr(http_request.app.state, "intention_barrier", None)
             if barrier is not None:
                 try:
-                    await barrier.trigger(
-                        ctx.user_id,
-                        request.session_id,
-                        context=context,
-                    )
-                    if request.wait_for_intention:
+                    if intention_eligible:
+                        trigger_kwargs = {"context": context}
+                        if source_event_seq is not None:
+                            trigger_kwargs["source_event_seq"] = source_event_seq
+                        await barrier.trigger(
+                            ctx.user_id, request.session_id, **trigger_kwargs
+                        )
+                    else:
+                        barrier.invalidate(ctx.user_id, request.session_id)
+                    if request.wait_for_intention and intention_eligible:
                         timeout_override = None
                         if request.wait_timeout_ms is not None:
                             timeout_override = request.wait_timeout_ms / 1000.0
@@ -229,7 +256,8 @@ async def submit_reasoning(
         event_store = getattr(http_request.app.state, "event_store", None)
         if event_store is not None:
             try:
-                event_store.append(
+                await asyncio.to_thread(
+                    event_store.append,
                     ctx.user_id,
                     request.session_id,
                     [
@@ -329,7 +357,8 @@ async def submit_checkpoint(
         event_store = getattr(http_request.app.state, "event_store", None)
         if event_store is not None:
             try:
-                event_store.append(
+                await asyncio.to_thread(
+                    event_store.append,
                     ctx.user_id,
                     request.session_id,
                     [

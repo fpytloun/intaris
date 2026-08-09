@@ -276,7 +276,8 @@ async def evaluate(
         event_store = getattr(http_request.app.state, "event_store", None)
         if event_store is not None:
             try:
-                event_store.append(
+                await asyncio.to_thread(
+                    event_store.append,
                     ctx.user_id,
                     request.session_id,
                     [

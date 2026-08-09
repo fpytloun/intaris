@@ -83,7 +83,7 @@ Intaris is a guardrails service that sits between AI agents and their tools. Eve
 | **Redaction** | `redactor.py` | Secret redaction before audit storage |
 | **Rate Limiting** | `ratelimit.py` | In-memory sliding window rate limiter per (user_id, session_id) |
 | **Webhook** | `webhook.py` | Async webhook client with HMAC-SHA256 signing |
-| **Event Store** | `events/` | Session recording: chunked ndjson storage, write buffering |
+| **Event Store** | `events/` | Session recording: chunked ndjson storage, write buffering, bounded immutable S3 chunk cache |
 | **MCP Proxy** | `mcp/` | Upstream MCP connections, tool aggregation, call routing |
 | **Session** | `session.py` | Session CRUD, counter management, paginated listing, idle sweep |
 | **Audit** | `audit.py` | Audit log CRUD and querying |
@@ -117,7 +117,9 @@ Client integrations (OpenCode plugin, Claude Code hooks) have a 5-second timeout
 
 ### User-Driven Intention Model
 
-Session intention is immutable except by user action. Agent tool calls never redefine intention. The `IntentionBarrier` coordinates between the `/reasoning` endpoint (which receives user messages) and the `/evaluate` endpoint (which waits for pending intention updates) to ensure the evaluator always sees the freshest user-stated intention.
+Session intention is immutable except by eligible user action. Agent tool calls never redefine intention. The `IntentionBarrier` coordinates eligible intention updates with `/evaluate`.
+
+All user messages remain in event and audit history. Evaluator, judge, injection detection, and behavioral analysis can use ineligible messages as context.
 
 ### Multi-Tenancy
 
@@ -166,9 +168,19 @@ If the parent session is terminated or suspended, child sessions are automatical
 
 Coordinates real-time intention updates between user messages and tool evaluations:
 
-1. `POST /reasoning` receives a user message -> triggers async LLM intention regeneration
+1. `POST /reasoning` receives an eligible user message -> triggers async LLM intention regeneration
 2. `POST /evaluate` calls `await barrier.wait()` -> blocks up to 1s if an update is pending
-3. New user messages cancel and restart the update (only the latest runs to completion)
+3. A newer eligible message supersedes the pending update.
+4. A newer ineligible message invalidates the pending update without changing intention.
+5. Event sequence allocation atomically advances a relational, per-session user-message high-water sequence.
+6. Intention persistence uses one conditional update against that high-water sequence.
+7. Later assistant and tool events do not invalidate an update. Any later user message makes the conditional update fail.
+
+Canonical `user_message` events use `data.intention_eligible`. Missing values
+default to `true`. Direct `/reasoning` messages remain eligible for compatibility.
+During startup, Intaris scans historical event logs for existing sessions.
+This reconciliation restores monotonic event and user-message high-water state
+before background bootstrap workers start.
 
 Human approval notes can also trigger a best-effort intention refresh after
 `POST /decision` succeeds. This path is restricted to final human approvals
@@ -186,7 +198,7 @@ Enforces parent/child session intention compatibility:
 
 ### One-Time Bootstrap
 
-Sessions that never receive user messages (e.g., MCP proxy sessions) keep their generic initial intention. At evaluate call 10, if `intention_source` is still `"initial"`, a single refinement fires via the background task queue. This is capped at exactly one update to prevent agent drift.
+Sessions that never receive user messages (e.g., MCP proxy sessions) keep their generic initial intention. At evaluate call 10, a single refinement can fire through the background task queue. The durable `user_message_observed` state gates both task creation and persistence. Eligible and ineligible user messages permanently suppress bootstrap, including after restart.
 
 ## Behavioral Analysis
 

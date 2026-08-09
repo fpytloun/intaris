@@ -22,7 +22,8 @@ import functools
 import json
 import logging
 import time
-from typing import Any
+import uuid
+from typing import Any, Callable
 
 from intaris.audit import AuditStore
 from intaris.db import Database
@@ -127,6 +128,8 @@ def generate_intention(
     intention_source: str = "user",
     context: str | None = None,
     decision_context: dict[str, Any] | None = None,
+    source_event_seq: int | None = None,
+    freshness_check: Callable[[], bool] | None = None,
 ) -> str | None:
     """Generate an updated intention from reasoning payloads and tool calls.
 
@@ -154,6 +157,9 @@ def generate_intention(
             and wrapped in boundary tags for anti-injection protection.
         decision_context: Optional structured human-decision context for
             decision-triggered intention refreshes.
+        source_event_seq: Durable source user-message sequence for stale-write
+            suppression. Direct reasoning and bootstrap updates omit it.
+        freshness_check: Optional in-process current-generation check.
 
     Returns:
         The new intention string, or None if no update was needed.
@@ -212,6 +218,13 @@ def generate_intention(
     for record in recent_reasoning:
         content = str(record.get("content") or "").strip()
         if not content:
+            continue
+        args = record.get("args_redacted")
+        if (
+            content.startswith("User message:")
+            and isinstance(args, dict)
+            and args.get("intention_eligible") is False
+        ):
             continue
         if latest_user_message is None and content.startswith("User message:"):
             latest_user_message = content[len("User message:") :].strip() or None
@@ -384,13 +397,41 @@ def generate_intention(
         old_title = current_title or ""
         old_intention = current_intention or ""
 
-        session_store.update_session(
+        if freshness_check is not None and not freshness_check():
+            logger.info(
+                "Suppressed stale intention update for user=%s session=%s "
+                "(generation superseded)",
+                user_id,
+                session_id,
+            )
+            return None
+        if freshness_check is not None and not freshness_check():
+            return None
+
+        expected_user_message_seq = source_event_seq
+        guard_user_message_seq = intention_source == "user"
+        if guard_user_message_seq and source_event_seq is None:
+            expected_user_message_seq = session.get("latest_user_message_seq")
+        updated = session_store.update_generated_intention(
             session_id,
             user_id=user_id,
             intention=intention,
             intention_source=intention_source,
             title=title,
+            expected_user_message_seq=expected_user_message_seq,
+            guard_user_message_seq=guard_user_message_seq,
+            require_no_user_message=intention_source == "bootstrap",
         )
+        if not updated:
+            logger.info(
+                "Suppressed stale intention update for user=%s session=%s "
+                "source=%s source_seq=%s (durable guard changed)",
+                user_id,
+                session_id,
+                intention_source,
+                source_event_seq,
+            )
+            return None
 
         logger.info(
             "Intention refreshed for user=%s session=%s source=%s old_title=%r new_title=%r old_preview=%r new_preview=%r",
@@ -491,6 +532,7 @@ class IntentionBarrier:
         # race condition without relying on a client-supplied hint.
         # Set at the start of trigger(), cleared when _run() completes.
         self._last_user_message_time: dict[tuple[str, str], float] = {}
+        self._generation_tokens: dict[tuple[str, str], str] = {}
 
         # Metrics
         self.wait_count: int = 0
@@ -542,6 +584,7 @@ class IntentionBarrier:
         *,
         context: str | None = None,
         decision_context: dict[str, Any] | None = None,
+        source_event_seq: int | None = None,
     ) -> None:
         """Start an immediate intention update. Non-blocking.
 
@@ -560,8 +603,11 @@ class IntentionBarrier:
                 last response) to help interpret short user replies.
             decision_context: Optional structured human decision context
                 for decision-triggered refreshes.
+            source_event_seq: Durable sequence of the eligible source event.
         """
         key = (user_id, session_id)
+        generation_token = str(uuid.uuid4())
+        self._generation_tokens[key] = generation_token
 
         # Record that a user message triggered an update for this session.
         # Used by wait() to detect the /evaluate-before-/reasoning race
@@ -584,7 +630,14 @@ class IntentionBarrier:
 
         event = asyncio.Event()
         task = asyncio.create_task(
-            self._run(key, event, context=context, decision_context=decision_context)
+            self._run(
+                key,
+                event,
+                context=context,
+                decision_context=decision_context,
+                source_event_seq=source_event_seq,
+                generation_token=generation_token,
+            )
         )
         self._pending[key] = (event, task)
 
@@ -621,12 +674,18 @@ class IntentionBarrier:
         Unblocks any evaluate endpoint waiting on the barrier.
         """
         key = (user_id, session_id)
+        self._generation_tokens.pop(key, None)
         old = self._pending.pop(key, None)
         if old is not None:
             old_event, old_task = old
             if not old_task.done():
                 old_task.cancel()
             old_event.set()  # Unblock any waiters
+
+    def invalidate(self, user_id: str, session_id: str) -> None:
+        """Invalidate an update after an ineligible user message."""
+        self.cancel(user_id, session_id)
+        self._last_user_message_time.pop((user_id, session_id), None)
 
     async def wait(
         self,
@@ -773,6 +832,8 @@ class IntentionBarrier:
         *,
         context: str | None = None,
         decision_context: dict[str, Any] | None = None,
+        source_event_seq: int | None = None,
+        generation_token: str,
     ) -> None:
         """Run generate_intention() in a thread executor, then signal.
 
@@ -784,6 +845,8 @@ class IntentionBarrier:
             key: (user_id, session_id) tuple.
             event: Event to set when the update completes.
             context: Optional conversational context for intention generation.
+            source_event_seq: Durable sequence of the eligible source event.
+            generation_token: In-process freshness token for this update.
         """
         user_id, session_id = key
         # Snapshot the timestamp set by trigger() so the finally block
@@ -808,6 +871,10 @@ class IntentionBarrier:
                     event_store=self._event_store,
                     context=context,
                     decision_context=decision_context,
+                    source_event_seq=source_event_seq,
+                    freshness_check=lambda: (
+                        self._generation_tokens.get(key) == generation_token
+                    ),
                 ),
             )
 
@@ -867,3 +934,5 @@ class IntentionBarrier:
             # newer trigger's timestamp).
             if self._last_user_message_time.get(key) == my_trigger_time:
                 self._last_user_message_time.pop(key, None)
+            if self._generation_tokens.get(key) == generation_token:
+                self._generation_tokens.pop(key, None)

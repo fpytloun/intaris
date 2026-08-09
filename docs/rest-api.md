@@ -300,7 +300,26 @@ Submit agent reasoning text for behavioral analysis.
 }
 ```
 
-When content starts with `"User message:"`, triggers the IntentionBarrier to regenerate the session intention.
+When direct content starts with `"User message:"`, Intaris triggers the IntentionBarrier. This direct path remains eligible for backward compatibility.
+
+If `from_events` is `true`, Intaris reads the latest user event. Intaris always stores this message in reasoning and audit context.
+
+For canonical `user_message` events, `data.intention_eligible` controls intention updates. The field has these rules:
+
+- The value must be a JSON boolean.
+- A missing value defaults to `true`.
+- An ineligible message does not trigger or refine the session intention.
+- Evaluator and judge prompts can still use an ineligible message as reasoning context.
+- Any user message permanently suppresses the no-user-message bootstrap.
+
+Intaris records a durable per-session high-water sequence for user messages.
+Generated intentions use a conditional database update against this sequence.
+Later assistant and tool events do not invalidate the update. A later user
+message always invalidates it, regardless of eligibility.
+
+At startup, Intaris reconciles these values from authoritative historical
+event logs before it starts background bootstrap scheduling. Reconciliation
+recognizes canonical events and legacy `message` events with `role: "user"`.
 
 ### POST /checkpoint
 
@@ -398,6 +417,11 @@ For Cognis LLM-exposure auditing, `system_message`, `developer_message`,
 `user_message`, and `assistant_message` carry metadata like `role`, `content`,
 `content_type`, `source`, `turn_id`, `position`, and `hash` inside `data`.
 `context_snapshot` stores `entries`, `extras`, and `captured_at` inside `data`.
+
+A canonical `user_message` can include `data.intention_eligible`. Intaris
+rejects non-boolean values. Existing events without this field remain eligible.
+For fail-safe legacy reads, Intaris treats malformed stored values as ineligible.
+The event metadata is immutable after append.
 
 **Response:**
 
@@ -816,6 +840,10 @@ Real-time event streaming via WebSocket.
 
 Health check endpoint (no authentication required).
 
+The response includes process-local runtime, database, event-store, and S3
+performance counters and cumulative latency histograms. Route metrics use route
+templates instead of concrete session identifiers to keep cardinality bounded.
+
 **Response:**
 
 ```json
@@ -823,6 +851,20 @@ Health check endpoint (no authentication required).
   "status": "ok",
   "version": "0.5.0"
 }
+```
+
+### GET /metrics
+
+Prometheus text exposition for process-local HTTP, event-loop, database,
+event-store, S3, and event-cache metrics. This endpoint does not require
+authentication. It is served from the dedicated metrics listener on port
+`9090`, not from the main API listener.
+
+```text
+# TYPE intaris_http_requests_total counter
+intaris_http_requests_total{method="GET",route="/health",status_group="2xx"} 42
+# TYPE intaris_http_request_duration_milliseconds histogram
+intaris_http_request_duration_milliseconds_bucket{le="50",method="GET",route="/health",status_group="2xx"} 41
 ```
 
 ## Error Responses

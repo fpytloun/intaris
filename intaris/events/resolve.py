@@ -7,16 +7,32 @@ context from the event store when ``from_events=True``.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ResolvedUserMessage:
+    """A user message resolved from durable session events."""
+
+    content: str
+    assistant_context: str | None
+    seq: int
+    intention_eligible: bool
+
+    def __iter__(self):
+        """Preserve the historical two-value unpacking contract."""
+        yield self.content
+        yield self.assistant_context
 
 
 def resolve_last_user_message(
     event_store: Any,
     user_id: str,
     session_id: str,
-) -> tuple[str, str | None] | None:
+) -> ResolvedUserMessage | None:
     """Extract the last user message and assistant context from the event store.
 
     Handles both event type conventions used across integrations:
@@ -37,10 +53,9 @@ def resolve_last_user_message(
         session_id: Session to read events from.
 
     Returns:
-        A ``(user_content, assistant_context)`` tuple where
-        ``user_content`` is the raw user message text and
-        ``assistant_context`` is the last assistant response (or ``None``).
-        Returns ``None`` if no user message event was found.
+        The latest user message, its preceding assistant context, durable
+        sequence number, and intention eligibility. Returns ``None`` if no
+        user message event was found.
     """
     # Flush buffered events to storage so cross-worker reads succeed
     try:
@@ -65,6 +80,7 @@ def resolve_last_user_message(
     user_content: str | None = None
     user_seq: int | None = None
     user_message_id: str | None = None
+    intention_eligible = True
 
     # Walk events in reverse chronological order (newest first) to find
     # the latest user message first.
@@ -78,6 +94,7 @@ def resolve_last_user_message(
             user_message_id = (
                 str(data.get("messageID") or data.get("message_id") or "") or None
             )
+            intention_eligible = _is_intention_eligible(event_type, data)
             break
 
     if user_content is None:
@@ -104,7 +121,12 @@ def resolve_last_user_message(
         len(assistant_context) if assistant_context else 0,
         len(events),
     )
-    return user_content, assistant_context
+    return ResolvedUserMessage(
+        content=user_content,
+        assistant_context=assistant_context,
+        seq=user_seq or 0,
+        intention_eligible=intention_eligible,
+    )
 
 
 def _resolve_assistant_context(
@@ -197,6 +219,14 @@ def _extract_user_text(event_type: str, data: dict[str, Any]) -> str | None:
         # Integration convention: type=message, data.role=user, data.text
         return (data.get("text") or "").strip() or None
     return None
+
+
+def _is_intention_eligible(event_type: str, data: dict[str, Any]) -> bool:
+    """Resolve intention eligibility with a fail-safe legacy fallback."""
+    if event_type != "user_message":
+        return True
+    value = data.get("intention_eligible", True)
+    return value if isinstance(value, bool) else False
 
 
 def _extract_assistant_text(event_type: str, data: dict[str, Any]) -> str | None:

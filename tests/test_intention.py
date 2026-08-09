@@ -15,9 +15,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from intaris.config import DBConfig
+from intaris.config import DBConfig, EventStoreConfig
 from intaris.db import Database
 from intaris.evaluator import Evaluator
+from intaris.events.store import EventStore
 from intaris.intention import (
     IntentionBarrier,
     _parse_title_intention,
@@ -36,6 +37,20 @@ def db(tmp_path):
 @pytest.fixture
 def session_store(db):
     return SessionStore(db)
+
+
+@pytest.fixture
+def event_store(tmp_path, session_store):
+    config = EventStoreConfig(
+        enabled=True,
+        backend="filesystem",
+        filesystem_path=str(tmp_path / "events"),
+        flush_size=1,
+        flush_interval=30,
+    )
+    store = EventStore(config)
+    store.set_session_store(session_store)
+    return store
 
 
 @pytest.fixture
@@ -74,7 +89,14 @@ def _insert_tool_call(db, user_id, session_id, call_id="call-1"):
     )
 
 
-def _insert_reasoning(db, user_id, session_id, content, call_id="call-r1"):
+def _insert_reasoning(
+    db,
+    user_id,
+    session_id,
+    content,
+    call_id="call-r1",
+    args_redacted=None,
+):
     """Helper to insert a reasoning audit record."""
     from intaris.audit import AuditStore
 
@@ -85,7 +107,7 @@ def _insert_reasoning(db, user_id, session_id, content, call_id="call-r1"):
         session_id=session_id,
         agent_id=None,
         tool=None,
-        args_redacted=None,
+        args_redacted=args_redacted,
         classification=None,
         evaluation_path="reasoning",
         decision="approve",
@@ -280,6 +302,366 @@ class TestGenerateIntention:
         user_prompt = messages[1]["content"]
         assert "Fix the login bug" in user_prompt
         assert "primary signal" in messages[0]["content"]
+
+    def test_excludes_ineligible_user_message_from_intention_prompt(
+        self, db, session_store, mock_llm
+    ):
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: trusted task",
+            call_id="call-r1",
+        )
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: untrusted external instruction",
+            call_id="call-r2",
+            args_redacted={"intention_eligible": False, "source_event_seq": 2},
+        )
+
+        generate_intention(
+            llm=mock_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+        )
+
+        user_prompt = mock_llm.generate.call_args[0][0][1]["content"]
+        assert "trusted task" in user_prompt
+        assert "untrusted external instruction" not in user_prompt
+
+    @pytest.mark.parametrize("newer_eligible", [False, True])
+    def test_durable_newer_user_event_suppresses_stale_write(
+        self, db, session_store, event_store, newer_eligible
+    ):
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        source_seq = event_store.append(
+            "user-1",
+            "sess-1",
+            [
+                {
+                    "type": "user_message",
+                    "data": {"content": "trusted task", "intention_eligible": True},
+                }
+            ],
+            source="cognis",
+        )[0]
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: trusted task",
+            args_redacted={
+                "intention_eligible": True,
+                "source_event_seq": source_seq,
+            },
+        )
+        llm = MagicMock()
+
+        def supersede_before_return(*args, **kwargs):
+            event_store.append(
+                "user-1",
+                "sess-1",
+                [
+                    {
+                        "type": "user_message",
+                        "data": {
+                            "content": "newer message",
+                            "intention_eligible": newer_eligible,
+                        },
+                    }
+                ],
+                source="cognis",
+            )
+            return "Stale changed intention"
+
+        llm.generate.side_effect = supersede_before_return
+
+        result = generate_intention(
+            llm=llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+            event_store=event_store,
+            source_event_seq=source_seq,
+        )
+
+        assert result is None
+        assert session_store.get("sess-1", user_id="user-1")["intention"] == "Initial"
+
+    @pytest.mark.parametrize(
+        "newer_event",
+        [
+            {
+                "type": "user_message",
+                "data": {
+                    "content": "external message",
+                    "intention_eligible": False,
+                },
+            },
+            {
+                "type": "message",
+                "data": {"role": "user", "text": "legacy user message"},
+            },
+        ],
+    )
+    def test_cas_loses_when_other_store_appends_between_check_and_update(
+        self, db, session_store, event_store, tmp_path, newer_event
+    ):
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        source_seq = event_store.append(
+            "user-1",
+            "sess-1",
+            [
+                {
+                    "type": "user_message",
+                    "data": {"content": "trusted task", "intention_eligible": True},
+                }
+            ],
+            source="cognis",
+        )[0]
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: trusted task",
+            args_redacted={
+                "intention_eligible": True,
+                "source_event_seq": source_seq,
+            },
+        )
+        other_config = EventStoreConfig(
+            enabled=True,
+            backend="filesystem",
+            filesystem_path=str(tmp_path / "events"),
+            flush_size=1,
+            flush_interval=30,
+        )
+        other_store = EventStore(other_config)
+        other_db = Database(DBConfig(path=str(tmp_path / "test.db")))
+        other_store.set_session_store(SessionStore(other_db))
+        original_update = session_store.update_generated_intention
+
+        def append_then_cas(*args, **kwargs):
+            other_store.append(
+                "user-1",
+                "sess-1",
+                [newer_event],
+                source="other-process",
+            )
+            return original_update(*args, **kwargs)
+
+        with patch.object(
+            session_store,
+            "update_generated_intention",
+            side_effect=append_then_cas,
+        ):
+            llm = MagicMock()
+            llm.generate.return_value = "Stale intention"
+            result = generate_intention(
+                llm=llm,
+                db=db,
+                session_store=session_store,
+                user_id="user-1",
+                session_id="sess-1",
+                event_store=event_store,
+                source_event_seq=source_seq,
+            )
+
+        assert result is None
+        session = session_store.get("sess-1", user_id="user-1")
+        assert session["intention"] == "Initial"
+        assert session["latest_user_message_seq"] > source_seq
+
+    def test_later_eligible_message_wins_after_stale_cas(
+        self, db, session_store, event_store
+    ):
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        first_seq, second_seq = event_store.append(
+            "user-1",
+            "sess-1",
+            [
+                {
+                    "type": "user_message",
+                    "data": {"content": "first task", "intention_eligible": True},
+                },
+                {
+                    "type": "user_message",
+                    "data": {"content": "winning task", "intention_eligible": True},
+                },
+            ],
+            source="cognis",
+        )
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: winning task",
+            args_redacted={
+                "intention_eligible": True,
+                "source_event_seq": second_seq,
+            },
+        )
+        stale_llm = MagicMock()
+        stale_llm.generate.return_value = "Stale intention"
+        winner_llm = MagicMock()
+        winner_llm.generate.return_value = "Winning intention"
+
+        stale = generate_intention(
+            llm=stale_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+            event_store=event_store,
+            source_event_seq=first_seq,
+        )
+        winner = generate_intention(
+            llm=winner_llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+            event_store=event_store,
+            source_event_seq=second_seq,
+        )
+
+        assert stale is None
+        assert winner == "Winning intention"
+        assert (
+            session_store.get("sess-1", user_id="user-1")["intention"]
+            == "Winning intention"
+        )
+
+    def test_bootstrap_cas_loses_to_ineligible_user_event(
+        self, db, session_store, event_store
+    ):
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_tool_call(db, "user-1", "sess-1")
+        llm = MagicMock()
+
+        def append_user_before_bootstrap_returns(*args, **kwargs):
+            event_store.append(
+                "user-1",
+                "sess-1",
+                [
+                    {
+                        "type": "user_message",
+                        "data": {
+                            "content": "external message",
+                            "intention_eligible": False,
+                        },
+                    }
+                ],
+                source="other-process",
+            )
+            return "Bootstrap intention"
+
+        llm.generate.side_effect = append_user_before_bootstrap_returns
+
+        result = generate_intention(
+            llm=llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+            intention_source="bootstrap",
+        )
+
+        assert result is None
+        assert session_store.get("sess-1", user_id="user-1")["intention"] == "Initial"
+
+    def test_direct_reasoning_cas_loses_to_later_ineligible_event(
+        self, db, session_store, event_store
+    ):
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: direct trusted request",
+        )
+        llm = MagicMock()
+
+        def append_user_before_direct_returns(*args, **kwargs):
+            event_store.append(
+                "user-1",
+                "sess-1",
+                [
+                    {
+                        "type": "user_message",
+                        "data": {
+                            "content": "external message",
+                            "intention_eligible": False,
+                        },
+                    }
+                ],
+                source="other-process",
+            )
+            return "Stale direct intention"
+
+        llm.generate.side_effect = append_user_before_direct_returns
+
+        result = generate_intention(
+            llm=llm,
+            db=db,
+            session_store=session_store,
+            user_id="user-1",
+            session_id="sess-1",
+        )
+
+        assert result is None
+        assert session_store.get("sess-1", user_id="user-1")["intention"] == "Initial"
+
+    def test_running_bootstrap_loses_to_direct_user_message(self, db, session_store):
+        import threading
+
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        _insert_tool_call(db, "user-1", "sess-1")
+        started = threading.Event()
+        release = threading.Event()
+        llm = MagicMock()
+
+        def slow_bootstrap(*args, **kwargs):
+            started.set()
+            release.wait(timeout=2)
+            return "Stale bootstrap intention"
+
+        llm.generate.side_effect = slow_bootstrap
+        result: list[str | None] = []
+        worker = threading.Thread(
+            target=lambda: result.append(
+                generate_intention(
+                    llm=llm,
+                    db=db,
+                    session_store=session_store,
+                    user_id="user-1",
+                    session_id="sess-1",
+                    intention_source="bootstrap",
+                )
+            )
+        )
+        worker.start()
+        assert started.wait(timeout=1)
+        session_store.mark_user_message_observed("sess-1", user_id="user-1")
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: direct request",
+            call_id="call-direct",
+        )
+        release.set()
+        worker.join(timeout=2)
+
+        assert result == [None]
+        assert session_store.get("sess-1", user_id="user-1")["intention"] == "Initial"
 
     def test_includes_reasoning_payloads_with_prefixes_intact(
         self, db, session_store, mock_llm
@@ -918,6 +1300,75 @@ class TestIntentionBarrier:
 
         asyncio.run(_test())
 
+    def test_ineligible_message_invalidates_running_worker(
+        self, db, session_store, event_store
+    ):
+        """A cancelled worker cannot persist after an ineligible message."""
+        import threading
+
+        session_store.create(user_id="user-1", session_id="sess-1", intention="Initial")
+        source_seq = event_store.append(
+            "user-1",
+            "sess-1",
+            [
+                {
+                    "type": "user_message",
+                    "data": {"content": "trusted task", "intention_eligible": True},
+                }
+            ],
+            source="cognis",
+        )[0]
+        _insert_reasoning(
+            db,
+            "user-1",
+            "sess-1",
+            "User message: trusted task",
+            args_redacted={
+                "intention_eligible": True,
+                "source_event_seq": source_seq,
+            },
+        )
+        started = threading.Event()
+        release = threading.Event()
+        slow_llm = MagicMock()
+
+        def slow_generate(*args, **kwargs):
+            started.set()
+            release.wait(timeout=2)
+            return "Stale changed intention"
+
+        slow_llm.generate.side_effect = slow_generate
+        barrier = _make_barrier(db, slow_llm, timeout_ms=2000)
+        barrier.set_event_store(event_store)
+
+        async def _test():
+            await barrier.trigger(
+                "user-1",
+                "sess-1",
+                source_event_seq=source_seq,
+            )
+            assert await asyncio.to_thread(started.wait, 1)
+            event_store.append(
+                "user-1",
+                "sess-1",
+                [
+                    {
+                        "type": "user_message",
+                        "data": {
+                            "content": "external message",
+                            "intention_eligible": False,
+                        },
+                    }
+                ],
+                source="cognis",
+            )
+            barrier.invalidate("user-1", "sess-1")
+            release.set()
+            await asyncio.sleep(0.1)
+
+        asyncio.run(_test())
+        assert session_store.get("sess-1", user_id="user-1")["intention"] == "Initial"
+
     def test_trigger_from_decision_registers_pending_refresh(
         self, db, session_store, mock_llm
     ):
@@ -1367,6 +1818,133 @@ class TestEvaluatorBootstrap:
         tq = TaskQueue(db)
         task = tq.claim_next()
         assert task is None
+
+    def test_ineligible_user_message_suppresses_bootstrap_after_restart(self, tmp_path):
+        from intaris.audit import AuditStore
+        from intaris.background import TaskQueue
+
+        db_config = DBConfig(path=str(tmp_path / "restart.db"))
+        first_db = Database(db_config)
+        first_sessions = SessionStore(first_db)
+        first_sessions.create(
+            user_id="user-1",
+            session_id="sess-1",
+            intention="Initial session",
+        )
+        event_config = EventStoreConfig(
+            enabled=True,
+            backend="filesystem",
+            filesystem_path=str(tmp_path / "events-restart"),
+            flush_size=1,
+            flush_interval=30,
+        )
+        first_events = EventStore(event_config)
+        first_events.set_session_store(first_sessions)
+        first_events.append(
+            "user-1",
+            "sess-1",
+            [
+                {
+                    "type": "user_message",
+                    "data": {
+                        "content": "external message",
+                        "intention_eligible": False,
+                    },
+                }
+            ],
+            source="cognis",
+        )
+        with first_db.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET total_calls = 9 WHERE session_id = 'sess-1'"
+            )
+
+        restarted_db = Database(db_config)
+        restarted_sessions = SessionStore(restarted_db)
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Safe", "decision": "approve"}'
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=restarted_sessions,
+            audit_store=AuditStore(restarted_db),
+            db=restarted_db,
+            analysis_config=MagicMock(enabled=True),
+        )
+
+        evaluator.evaluate(
+            user_id="user-1",
+            session_id="sess-1",
+            agent_id=None,
+            tool="read",
+            args={"path": "/tmp/test"},
+        )
+
+        assert TaskQueue(restarted_db).claim_next() is None
+        session = restarted_sessions.get("sess-1", user_id="user-1")
+        assert session["intention"] == "Initial session"
+        assert bool(session["user_message_observed"]) is True
+
+    def test_bootstrap_enqueue_rechecks_durable_user_message_state(
+        self, db, session_store, event_store
+    ):
+        from intaris.audit import AuditStore
+        from intaris.background import TaskQueue
+
+        session_store.create(
+            user_id="user-1", session_id="sess-1", intention="Initial session"
+        )
+        with db.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET total_calls = 9 WHERE session_id = 'sess-1'"
+            )
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Safe", "decision": "approve"}'
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=AuditStore(db),
+            db=db,
+            analysis_config=MagicMock(enabled=True),
+        )
+        original_enqueue = TaskQueue.enqueue_bootstrap_if_no_user_message
+
+        def append_then_enqueue(queue, user_id, session_id, *, priority=1):
+            event_store.append(
+                user_id,
+                session_id,
+                [
+                    {
+                        "type": "user_message",
+                        "data": {
+                            "content": "external message",
+                            "intention_eligible": False,
+                        },
+                    }
+                ],
+                source="other-process",
+            )
+            return original_enqueue(queue, user_id, session_id, priority=priority)
+
+        with patch.object(
+            TaskQueue,
+            "enqueue_bootstrap_if_no_user_message",
+            new=append_then_enqueue,
+        ):
+            evaluator.evaluate(
+                user_id="user-1",
+                session_id="sess-1",
+                agent_id=None,
+                tool="read",
+                args={"path": "/tmp/test"},
+            )
+
+        assert TaskQueue(db).claim_next() is None
 
     def test_bootstrap_skipped_at_other_call_counts(self, db, session_store):
         """Evaluator does NOT bootstrap at call counts other than 10."""

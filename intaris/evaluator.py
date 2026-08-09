@@ -686,7 +686,7 @@ class Evaluator:
         # One-time intention bootstrap for sessions without user messages.
         # Sessions that never receive user messages (Claude Code, MCP proxy)
         # keep their generic initial intention. At call 10, if no user
-        # messages have been received (intention_source is still "initial"),
+        # messages have been received (durably recorded on the session),
         # trigger a single refinement from tool patterns. Capped at exactly
         # one update to prevent agent drift from rewriting the intention.
         total = session.get("total_calls", 0)
@@ -701,14 +701,7 @@ class Evaluator:
                 from intaris.background import TaskQueue
 
                 tq = TaskQueue(self._db)
-                if not tq.cancel_duplicate("intention_update", user_id, session_id):
-                    tq.enqueue(
-                        "intention_update",
-                        user_id,
-                        session_id=session_id,
-                        payload={"trigger": "bootstrap"},
-                        priority=1,
-                    )
+                tq.enqueue_bootstrap_if_no_user_message(user_id, session_id)
             except Exception:
                 logger.debug(
                     "Failed to enqueue bootstrap intention update",

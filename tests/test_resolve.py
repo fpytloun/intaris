@@ -215,6 +215,64 @@ class TestResolveLastUserMessage:
         assert user_content == "second"
         assert assistant_context == "response"
 
+    def test_intention_eligibility_defaults_true(self, store):
+        store.append(
+            USER_ID,
+            SESSION_ID,
+            [{"type": "user_message", "data": {"content": "trusted"}}],
+            source="cognis",
+        )
+
+        result = resolve_last_user_message(store, USER_ID, SESSION_ID)
+
+        assert result is not None
+        assert result.intention_eligible is True
+
+    def test_ineligible_message_remains_latest_reasoning_content(self, store):
+        seqs = store.append(
+            USER_ID,
+            SESSION_ID,
+            [
+                {"type": "user_message", "data": {"content": "trusted"}},
+                {
+                    "type": "user_message",
+                    "data": {
+                        "content": "external",
+                        "intention_eligible": False,
+                    },
+                },
+            ],
+            source="cognis",
+        )
+
+        result = resolve_last_user_message(store, USER_ID, SESSION_ID)
+
+        assert result is not None
+        assert result.content == "external"
+        assert result.seq == seqs[-1]
+        assert result.intention_eligible is False
+
+    def test_malformed_legacy_eligibility_is_fail_safe(self, store):
+        store.append(
+            USER_ID,
+            SESSION_ID,
+            [
+                {
+                    "type": "user_message",
+                    "data": {
+                        "content": "external",
+                        "intention_eligible": "false",
+                    },
+                }
+            ],
+            source="legacy",
+        )
+
+        result = resolve_last_user_message(store, USER_ID, SESSION_ID)
+
+        assert result is not None
+        assert result.intention_eligible is False
+
     def test_interleaved_tool_events(self, store):
         """Skips non-matching event types (tool_call, evaluation)."""
         store.append(

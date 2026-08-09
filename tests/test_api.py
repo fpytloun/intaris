@@ -19,10 +19,11 @@ from starlette.testclient import TestClient
 
 
 @pytest.fixture(autouse=True)
-def _reset_server_globals():
+def _reset_server_globals(monkeypatch):
     """Reset server module globals between tests."""
     import intaris.server as srv
 
+    monkeypatch.setenv("METRICS_ENABLED", "false")
     srv._config = None
     srv._db = None
     srv._evaluator = None
@@ -46,6 +47,7 @@ def env_no_auth(tmp_db):
         "DB_PATH": tmp_db,
         "DATA_DIR": str(os.path.dirname(tmp_db)),
         "RATE_LIMIT": "60",
+        "METRICS_ENABLED": "false",
     }
     with patch.dict(os.environ, env, clear=False):
         # Clear any auth-related env vars
@@ -68,6 +70,7 @@ def env_with_auth(tmp_db):
         "DATA_DIR": str(os.path.dirname(tmp_db)),
         "INTARIS_API_KEY": "test-api-key",
         "RATE_LIMIT": "60",
+        "METRICS_ENABLED": "false",
     }
     with patch.dict(os.environ, env, clear=False):
         for key in ("INTARIS_API_KEYS", "WEBHOOK_URL", "WEBHOOK_SECRET"):
@@ -98,6 +101,37 @@ def client_with_auth(env_with_auth):
 def _auth_headers(token: str = "test-api-key") -> dict:
     """Create auth headers."""
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_shutdown_flushes_buffered_session_events(env_no_auth):
+    """Lifespan shutdown persists events that remain below flush thresholds."""
+    from intaris.config import EventStoreConfig
+    from intaris.events.backend import FilesystemEventBackend
+    from intaris.server import create_app
+
+    headers = {"X-User-Id": "shutdown-user", "X-Agent-Id": "shutdown-agent"}
+    with TestClient(create_app()) as client:
+        create = client.post(
+            "/api/v1/intention",
+            json={"session_id": "shutdown-session", "intention": "shutdown test"},
+            headers=headers,
+        )
+        assert create.status_code == 200
+        append = client.post(
+            "/api/v1/session/shutdown-session/events",
+            json={"type": "message", "data": {"content": "persist me"}},
+            headers=headers,
+        )
+        assert append.status_code == 200
+
+    backend = FilesystemEventBackend(
+        EventStoreConfig(
+            backend="filesystem",
+            filesystem_path=os.path.join(env_no_auth["DATA_DIR"], "events"),
+        )
+    )
+    events = backend.read("shutdown-user", "shutdown-session")
+    assert any(event.get("data", {}).get("content") == "persist me" for event in events)
 
 
 def test_search_initialization_does_not_block_startup(env_no_auth, monkeypatch):
@@ -263,11 +297,46 @@ class TestHealth:
         data = resp.json()
         assert data["healthy"] is True
         assert data["service"] == "intaris"
+        assert data["database"]["query_latency"]["count"] > 0
+        assert "event_loop_delay" in data["runtime"]
+
+        second = client_no_auth.get("/health").json()
+        assert any(
+            key.startswith("GET /health 2xx") for key in second["runtime"]["http"]
+        )
+
+    def test_unmatched_routes_use_one_bounded_metric_key(self, client_no_auth):
+        for index in range(20):
+            assert client_no_auth.get(f"/missing/{index}").status_code == 404
+
+        http = client_no_auth.get("/health").json()["runtime"]["http"]
+
+        assert "GET <unmatched> 4xx" in http
+        assert not any("/missing/" in key for key in http)
 
     def test_health_no_auth_required(self, client_with_auth):
         """Health endpoint works without auth."""
         resp = client_with_auth.get("/health")
         assert resp.status_code == 200
+
+    def test_metrics_are_not_exposed_on_main_listener(self, client_with_auth):
+        resp = client_with_auth.get("/metrics")
+
+        assert resp.status_code == 401
+
+    def test_metrics_are_absent_from_unauthenticated_main_app(self, client_no_auth):
+        assert client_no_auth.get("/metrics").status_code == 404
+
+    def test_dedicated_prometheus_app_requires_no_auth(self, client_with_auth):
+        from intaris.server import create_metrics_app
+
+        with TestClient(create_metrics_app(client_with_auth.app)) as metrics_client:
+            resp = metrics_client.get("/metrics")
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/plain")
+        assert "intaris_up 1" in resp.text
+        assert "intaris_database_query_latency_milliseconds_count" in resp.text
 
     def test_health_reports_background_worker_status(self, client_no_auth):
         resp = client_no_auth.get("/health")
@@ -1531,6 +1600,11 @@ class TestAudit:
             headers=headers,
         )
         assert append.status_code == 200
+        flush = client_no_auth.post(
+            "/api/v1/session/sess-user-events/events/flush",
+            headers=headers,
+        )
+        assert flush.status_code == 200
 
         resp = client_no_auth.get(
             "/api/v1/audit",
@@ -2159,6 +2233,28 @@ class TestAnalysisEndpoints:
         assert data["ok"] is True
         assert "call_id" in data
 
+    def test_direct_user_reasoning_marks_user_message_observed(self, client_no_auth):
+        from intaris.server import _get_db
+        from intaris.session import SessionStore
+
+        headers = {"X-User-Id": "user-direct-message"}
+        _create_session(client_no_auth, "sess-direct-message", headers)
+
+        resp = client_no_auth.post(
+            "/api/v1/reasoning",
+            json={
+                "session_id": "sess-direct-message",
+                "content": "User message: direct trusted request",
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        session = SessionStore(_get_db()).get(
+            "sess-direct-message", user_id="user-direct-message"
+        )
+        assert bool(session["user_message_observed"]) is True
+
     def test_submit_reasoning_sanitizes_injection(self, client_no_auth):
         """POST /reasoning strips injection patterns."""
         headers = {"X-User-Id": "user-reason-inj"}
@@ -2280,9 +2376,11 @@ class TestAnalysisEndpoints:
         assert record["content"] == (
             "User message: Ok I allow to push ainews into origin:main. Try again"
         )
-        assert record["args_redacted"] == {
-            "context": "I can push ainews into origin/main for you."
-        }
+        assert record["args_redacted"]["context"] == (
+            "I can push ainews into origin/main for you."
+        )
+        assert record["args_redacted"]["intention_eligible"] is True
+        assert isinstance(record["args_redacted"]["source_event_seq"], int)
 
         events_resp = client_no_auth.get(
             "/api/v1/session/sess-reason-events/events",
@@ -2295,6 +2393,103 @@ class TestAnalysisEndpoints:
         assert events[0]["data"]["call_id"] == call_id
         assert events[0]["data"]["content"] == record["content"]
         assert events[0]["data"]["from_events"] is True
+
+    def test_ineligible_event_is_audited_without_triggering_intention(
+        self, client_no_auth
+    ):
+        from intaris.audit import AuditStore
+        from intaris.server import _get_db
+
+        headers = {"X-User-Id": "user-ineligible"}
+        _create_session(client_no_auth, "sess-ineligible", headers)
+
+        class _Barrier:
+            def __init__(self):
+                self.triggered = False
+                self.invalidated = False
+                self.source_event_seq = None
+
+            async def trigger(self, *args, **kwargs):
+                self.triggered = True
+                self.source_event_seq = kwargs.get("source_event_seq")
+
+            def invalidate(self, *args):
+                self.invalidated = True
+
+        barrier = _Barrier()
+        _set_app_state(client_no_auth, "intention_barrier", barrier)
+        event_resp = client_no_auth.post(
+            "/api/v1/session/sess-ineligible/events",
+            json={
+                "type": "user_message",
+                "data": {
+                    "content": "untrusted external instruction",
+                    "intention_eligible": False,
+                },
+            },
+            headers=headers,
+        )
+        assert event_resp.status_code == 200
+
+        resp = client_no_auth.post(
+            "/api/v1/reasoning",
+            json={"session_id": "sess-ineligible", "from_events": True},
+            headers=headers,
+        )
+
+        assert resp.status_code == 200
+        assert barrier.triggered is False
+        assert barrier.invalidated is True
+        record = AuditStore(_get_db()).get_by_call_id(
+            resp.json()["call_id"], user_id="user-ineligible"
+        )
+        assert record["content"] == "User message: untrusted external instruction"
+        assert record["args_redacted"]["intention_eligible"] is False
+
+        event_resp = client_no_auth.post(
+            "/api/v1/session/sess-ineligible/events",
+            json={
+                "type": "user_message",
+                "data": {
+                    "content": "trusted follow-up",
+                    "intention_eligible": True,
+                },
+            },
+            headers=headers,
+        )
+        assert event_resp.status_code == 200
+        eligible_seq = event_resp.json()["last_seq"]
+
+        follow_up = client_no_auth.post(
+            "/api/v1/reasoning",
+            json={"session_id": "sess-ineligible", "from_events": True},
+            headers=headers,
+        )
+
+        assert follow_up.status_code == 200
+        assert barrier.triggered is True
+        assert barrier.source_event_seq == eligible_seq
+
+    @pytest.mark.parametrize("value", ["false", 0, None])
+    def test_event_rejects_non_boolean_intention_eligibility(
+        self, client_no_auth, value
+    ):
+        headers = {"X-User-Id": "user-invalid-eligibility"}
+        _create_session(client_no_auth, "sess-invalid-eligibility", headers)
+
+        resp = client_no_auth.post(
+            "/api/v1/session/sess-invalid-eligibility/events",
+            json={
+                "type": "user_message",
+                "data": {
+                    "content": "message",
+                    "intention_eligible": value,
+                },
+            },
+            headers=headers,
+        )
+
+        assert resp.status_code == 422
 
     def test_submit_checkpoint(self, client_no_auth):
         """POST /checkpoint stores checkpoint in audit log."""

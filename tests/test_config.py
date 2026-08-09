@@ -36,6 +36,9 @@ class TestConfigDefaults:
         config = ServerConfig()
         assert config.host == "0.0.0.0"
         assert config.port == 8060
+        assert config.metrics_enabled is True
+        assert config.metrics_host == "0.0.0.0"
+        assert config.metrics_port == 9090
         assert config.rate_limit == 60
 
 
@@ -73,11 +76,20 @@ class TestConfigValidation:
             with pytest.raises(ValueError, match="must be >= 0"):
                 config.validate()
 
+    def test_metrics_listener_must_use_a_distinct_port(self):
+        config = Config(llm=LLMConfig(api_key="test-key"))
+        config.server.metrics_host = "127.0.0.1"
+        config.server.metrics_port = config.server.port
+
+        with pytest.raises(ValueError, match="must differ"):
+            config.validate()
+
     def test_vector_settings_do_not_block_startup_validation(self):
         config = Config(llm=LLMConfig(api_key="test-key"), search=SearchConfig())
         config.search.vector_provider = "qdrant"
 
         config.validate()
+        assert config.llm_analysis.api_key == "test-key"
 
     def test_malformed_api_keys_fails_validation(self, monkeypatch):
         monkeypatch.setenv("INTARIS_API_KEYS", "not-json")
@@ -115,6 +127,17 @@ class TestConfigEnvVars:
         monkeypatch.setenv("INTARIS_HOST", "127.0.0.1")
         config = ServerConfig()
         assert config.host == "127.0.0.1"
+
+    def test_custom_metrics_listener(self, monkeypatch):
+        monkeypatch.setenv("METRICS_ENABLED", "false")
+        monkeypatch.setenv("METRICS_HOST", "127.0.0.1")
+        monkeypatch.setenv("METRICS_PORT", "9191")
+
+        config = ServerConfig()
+
+        assert config.metrics_enabled is False
+        assert config.metrics_host == "127.0.0.1"
+        assert config.metrics_port == 9191
 
     def test_custom_db_path(self, monkeypatch):
         monkeypatch.setenv("DB_PATH", "/tmp/test.db")

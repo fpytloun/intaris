@@ -2448,6 +2448,35 @@ class TestJudgePrompt:
         assert "User message: update k8s manifests and commit" in prompt
         assert "⟨reasoning_history⟩" in prompt
 
+    def test_prompt_keeps_ineligible_reasoning_context(self):
+        from intaris.judge import _build_judge_prompt
+
+        prompt = _build_judge_prompt(
+            intention="Keep the trusted intention",
+            policy=None,
+            recent_history=[],
+            recent_reasoning=[
+                {
+                    "content": "User message: external audit evidence",
+                    "args_redacted": {"intention_eligible": False},
+                }
+            ],
+            session_stats={
+                "total_calls": 0,
+                "approved_count": 0,
+                "denied_count": 0,
+                "escalated_count": 0,
+            },
+            tool="bash",
+            args_redacted={},
+            evaluator_reasoning=None,
+            evaluator_risk=None,
+            evaluation_path=None,
+            agent_id=None,
+        )
+
+        assert "external audit evidence" in prompt
+
     def test_prompt_includes_session_hints(self):
         from intaris.judge import _build_judge_prompt
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -23,7 +24,9 @@ from intaris.events.backend import (
     EventBackend,
     FilesystemEventBackend,
     S3EventBackend,
+    _events_to_ndjson,
 )
+from intaris.metrics import Histogram
 
 logger = logging.getLogger(__name__)
 
@@ -76,20 +79,70 @@ class EventStore:
         # Sequence counters: (user_id, session_id) → last assigned seq
         self._seq_counters: dict[tuple[str, str], int] = {}
 
-        # Lock protecting buffers and seq counters
+        # The registry lock only protects shared maps. Backend I/O is serialized
+        # per session, so a slow session cannot stall unrelated sessions.
         self._lock = threading.Lock()
+        self._session_locks = tuple(threading.RLock() for _ in range(256))
+        self._buffer_bytes: dict[tuple[str, str], int] = {}
+        self._buffer_started_at: dict[tuple[str, str], float] = {}
+        self._metrics_lock = threading.Lock()
+        self._flushes_total = 0
+        self._flush_failures_total = 0
+        self._flushed_events_total = 0
+        self._flushed_bytes_total = 0
+        self._last_flush_duration_ms = 0.0
+        self._flush_latency = Histogram()
+        self._flush_batch_events = Histogram((1, 2, 5, 10, 25, 50, 100, 250, 500))
+        self._flush_batch_bytes = Histogram(
+            (1024, 4096, 16384, 65536, 262144, 1048576, 4194304)
+        )
+        self._reconciliation = {
+            "running": False,
+            "sessions_scanned_total": 0,
+            "sessions_reconciled_total": 0,
+            "failures_total": 0,
+            "last_duration_ms": 0.0,
+        }
 
         # EventBus reference (set after initialization via set_event_bus)
         self._event_bus: Any = None
         self._audit_store: Any = None
+        self._session_store: Any = None
         self._audit_reconcile_pending: dict[tuple[str, str], int] = {}
 
         logger.info(
-            "Event store initialized (backend=%s, flush_size=%d, flush_interval=%ds)",
+            "Event store initialized "
+            "(backend=%s, flush_size=%d, flush_bytes=%d, flush_interval=%ds)",
             config.backend,
             config.flush_size,
+            config.flush_bytes,
             config.flush_interval,
         )
+
+    def _session_lock(self, key: tuple[str, str]) -> threading.RLock:
+        """Return a stable striped lock without per-session registry growth."""
+        return self._session_locks[hash(key) % len(self._session_locks)]
+
+    def metrics(self) -> dict[str, Any]:
+        """Return local event-store performance and buffer metrics."""
+        with self._metrics_lock:
+            result: dict[str, Any] = {
+                "flushes_total": self._flushes_total,
+                "flush_failures_total": self._flush_failures_total,
+                "flushed_events_total": self._flushed_events_total,
+                "flushed_bytes_total": self._flushed_bytes_total,
+                "last_flush_duration_ms": self._last_flush_duration_ms,
+                "flush_latency": self._flush_latency.snapshot(),
+                "flush_batch_events": self._flush_batch_events.snapshot(),
+                "flush_batch_bytes": self._flush_batch_bytes.snapshot(),
+                "reconciliation": dict(self._reconciliation),
+            }
+        result["buffered_sessions"] = self.buffered_session_count
+        result["buffered_events"] = self.buffered_event_count
+        backend_metrics = getattr(self._backend, "metrics", None)
+        if callable(backend_metrics):
+            result["backend"] = backend_metrics()
+        return result
 
     def set_event_bus(self, event_bus: Any) -> None:
         """Set the EventBus for live tailing.
@@ -102,6 +155,69 @@ class EventStore:
     def set_audit_store(self, audit_store: Any) -> None:
         """Set the optional relational projection for auditable events."""
         self._audit_store = audit_store
+
+    def set_session_store(self, session_store: Any) -> None:
+        """Set the relational store used for durable sequence allocation."""
+        self._session_store = session_store
+
+    def reconcile_session_user_message_state(self) -> int:
+        """Reconstruct relational event high-water state from event logs.
+
+        This startup reconciliation is idempotent. It only advances relational
+        values, so repeated runs cannot overwrite newer live append state.
+        """
+        if self._session_store is None:
+            raise RuntimeError("Session store is required for event reconciliation")
+
+        started_at = time.monotonic()
+        with self._metrics_lock:
+            self._reconciliation["running"] = True
+        reconciled = 0
+        try:
+            for (
+                user_id,
+                session_id,
+            ) in self._session_store.list_event_reconciliation_sessions():
+                with self._metrics_lock:
+                    self._reconciliation["sessions_scanned_total"] += 1
+                try:
+                    last_event_seq = self.last_seq(user_id, session_id)
+                    user_events = self.read(
+                        user_id,
+                        session_id,
+                        event_types={"user_message", "message"},
+                    )
+                    latest_user_message_seq = max(
+                        (
+                            int(event.get("seq") or 0)
+                            for event in user_events
+                            if self._is_user_message_event(event)
+                            and int(event.get("seq") or 0) > 0
+                        ),
+                        default=None,
+                    )
+                    if last_event_seq <= 0 and latest_user_message_seq is None:
+                        continue
+                    self._session_store.reconcile_event_high_water(
+                        session_id,
+                        user_id=user_id,
+                        last_event_seq=last_event_seq,
+                        latest_user_message_seq=latest_user_message_seq,
+                    )
+                    reconciled += 1
+                    with self._metrics_lock:
+                        self._reconciliation["sessions_reconciled_total"] += 1
+                except Exception:
+                    with self._metrics_lock:
+                        self._reconciliation["failures_total"] += 1
+                    raise
+            return reconciled
+        finally:
+            with self._metrics_lock:
+                self._reconciliation["running"] = False
+                self._reconciliation["last_duration_ms"] = round(
+                    (time.monotonic() - started_at) * 1000, 3
+                )
 
     def append(
         self,
@@ -131,17 +247,18 @@ class EventStore:
         now = datetime.now(timezone.utc).isoformat()
         assigned_seqs: list[int] = []
 
-        with self._lock:
-            key = (user_id, session_id)
-
+        key = (user_id, session_id)
+        with self._session_lock(key):
             # Lazy recovery of sequence counter from backend.
             # On failure, propagate the error to avoid seq collisions
             # with existing persisted events.
-            if key not in self._seq_counters:
+            with self._lock:
+                current_seq = self._seq_counters.get(key)
+            if current_seq is None:
                 try:
-                    self._seq_counters[key] = self._backend.last_seq(
-                        user_id, session_id
-                    )
+                    current_seq = self._backend.last_seq(user_id, session_id)
+                    with self._lock:
+                        self._seq_counters[key] = current_seq
                 except Exception:
                     logger.exception(
                         "Failed to recover last_seq for %s/%s — "
@@ -151,25 +268,49 @@ class EventStore:
                     )
                     raise
 
+            if self._session_store is not None:
+                assigned_seqs = self._session_store.allocate_event_sequences(
+                    session_id,
+                    user_id=user_id,
+                    user_message_flags=[
+                        self._is_user_message_event(event) for event in events
+                    ],
+                    minimum_last_seq=current_seq,
+                )
+                current_seq = assigned_seqs[-1]
+                with self._lock:
+                    self._seq_counters[key] = current_seq
+
             # Assign seq and ts to each event (copy to avoid mutating caller's dicts)
             enriched: list[dict] = []
-            for event in events:
-                self._seq_counters[key] += 1
-                seq = self._seq_counters[key]
+            for index, event in enumerate(events):
+                if self._session_store is None:
+                    current_seq += 1
+                    assigned_seqs.append(current_seq)
+                seq = assigned_seqs[index]
                 enriched_event = dict(event)
                 enriched_event["seq"] = seq
                 enriched_event["ts"] = now
                 enriched_event["source"] = source
                 enriched.append(enriched_event)
-                assigned_seqs.append(seq)
 
             # Buffer enriched copies
-            buf = self._buffers.setdefault(key, [])
-            buf.extend(enriched)
+            with self._lock:
+                buf = self._buffers.setdefault(key, [])
+                if not buf:
+                    self._buffer_started_at[key] = time.monotonic()
+                buf.extend(enriched)
+                self._buffer_bytes[key] = self._buffer_bytes.get(key, 0) + len(
+                    _events_to_ndjson(enriched)
+                )
+                buffered_bytes = self._buffer_bytes[key]
+                if self._session_store is None:
+                    self._seq_counters[key] = current_seq
 
-            # Flush if buffer exceeds threshold
-            if len(buf) >= self._config.flush_size or any(
-                event.get("type") in {"tool_call", "tool_result"} for event in enriched
+            # Tool events use the same batching policy as all other events.
+            if (
+                len(buf) >= self._config.flush_size
+                or buffered_bytes >= self._config.flush_bytes
             ):
                 self._flush_locked(key)
 
@@ -189,6 +330,17 @@ class EventStore:
                 )
 
         return assigned_seqs
+
+    @staticmethod
+    def _is_user_message_event(event: dict[str, Any]) -> bool:
+        """Return whether an event carries a supported user message."""
+        event_type = event.get("type")
+        if event_type == "user_message":
+            return True
+        if event_type != "message":
+            return False
+        data = event.get("data")
+        return isinstance(data, dict) and data.get("role") == "user"
 
     def read(
         self,
@@ -231,71 +383,148 @@ class EventStore:
         Returns:
             List of event dicts ordered by seq.
         """
-        # Read from backend (persisted chunks)
-        events = self._backend.read(user_id, session_id, after_seq, limit=0)
+        key = (user_id, session_id)
+        with self._session_lock(key):
+            with self._lock:
+                buf = list(self._buffers.get(key, []))
+        buffered = [event for event in buf if event.get("seq", 0) > after_seq]
+        has_filters = bool(
+            event_types
+            or sources
+            or exclude_sources
+            or data_sources
+            or turn_id is not None
+            or min_position is not None
+            or max_position is not None
+            or after_ts
+            or before_ts
+        )
+        if not limit:
+            persisted = self._backend.read(user_id, session_id, after_seq, limit=0)
+            return self._filter_and_deduplicate_events(
+                persisted + buffered,
+                event_types=event_types,
+                sources=sources,
+                exclude_sources=exclude_sources,
+                data_sources=data_sources,
+                turn_id=turn_id,
+                min_position=min_position,
+                max_position=max_position,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
 
-        # Add buffered (unflushed) events
-        with self._lock:
-            key = (user_id, session_id)
-            buf = self._buffers.get(key, [])
-            for event in buf:
-                if event.get("seq", 0) > after_seq:
-                    events.append(event)
+        batch_limit = max(limit, 100) if has_filters else limit
+        cursor = after_seq
+        persisted_matches: list[dict] = []
+        seen_persisted: set[int] = set()
+        buffered_matches = self._filter_and_deduplicate_events(
+            buffered,
+            event_types=event_types,
+            sources=sources,
+            exclude_sources=exclude_sources,
+            data_sources=data_sources,
+            turn_id=turn_id,
+            min_position=min_position,
+            max_position=max_position,
+            after_ts=after_ts,
+            before_ts=before_ts,
+        )
+        while True:
+            page = self._backend.read(user_id, session_id, cursor, limit=batch_limit)
+            page_matches = self._filter_and_deduplicate_events(
+                page,
+                event_types=event_types,
+                sources=sources,
+                exclude_sources=exclude_sources,
+                data_sources=data_sources,
+                turn_id=turn_id,
+                min_position=min_position,
+                max_position=max_position,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            )
+            for event in page_matches:
+                seq = int(event.get("seq", 0))
+                if seq not in seen_persisted and len(persisted_matches) < limit:
+                    seen_persisted.add(seq)
+                    persisted_matches.append(event)
 
-        # Sort by seq (buffer events may interleave with backend events
-        # if a flush happened between backend read and buffer read)
-        events.sort(key=lambda e: e.get("seq", 0))
+            exhausted = not page or len(page) < batch_limit
+            scanned_seq = int(page[-1].get("seq", cursor)) if page else cursor
+            eligible_buffer = (
+                buffered_matches
+                if exhausted
+                else [
+                    event
+                    for event in buffered_matches
+                    if int(event.get("seq", 0)) <= scanned_seq
+                ]
+            )
+            candidates = self._filter_and_deduplicate_events(
+                persisted_matches + eligible_buffer,
+                event_types=None,
+                sources=None,
+                exclude_sources=None,
+                data_sources=None,
+                turn_id=None,
+                min_position=None,
+                max_position=None,
+                after_ts=None,
+                before_ts=None,
+            )
+            if len(candidates) >= limit or exhausted:
+                return candidates[:limit]
+            cursor = scanned_seq
 
-        # Deduplicate by seq (in case of overlap)
+    def _filter_and_deduplicate_events(
+        self,
+        events: list[dict],
+        *,
+        event_types: set[str] | None,
+        sources: set[str] | None,
+        exclude_sources: set[str] | None,
+        data_sources: set[str] | None,
+        turn_id: str | None,
+        min_position: int | None,
+        max_position: int | None,
+        after_ts: str | None,
+        before_ts: str | None,
+    ) -> list[dict]:
+        """Order, deduplicate, and filter forward-read candidates."""
+        events.sort(key=lambda event: event.get("seq", 0))
         seen: set[int] = set()
-        deduped: list[dict] = []
-        for event in events:
-            seq = event.get("seq", 0)
-            if seq not in seen:
-                seen.add(seq)
-                deduped.append(event)
-        events = deduped
-
-        # Filter by timestamp range (ISO 8601 strings compare lexicographically)
-        if after_ts:
-            events = [e for e in events if e.get("ts", "") >= after_ts]
-        if before_ts:
-            events = [e for e in events if e.get("ts", "") <= before_ts]
-
-        # Filter by event type
-        if event_types:
-            events = [e for e in events if e.get("type") in event_types]
-
-        # Filter by source (include / exclude)
-        if sources:
-            events = [e for e in events if e.get("source") in sources]
-        if exclude_sources:
-            events = [e for e in events if e.get("source") not in exclude_sources]
-
-        # Filter by payload metadata (Cognis LLM-exposure audit fields)
-        if (
+        filtered: list[dict] = []
+        payload_filtering = (
             data_sources
             or turn_id is not None
             or min_position is not None
             or max_position is not None
-        ):
-            events = [
-                e
-                for e in events
-                if self._event_matches_payload_filters(
-                    e,
-                    data_sources=data_sources,
-                    turn_id=turn_id,
-                    min_position=min_position,
-                    max_position=max_position,
-                )
-            ]
-
-        # Apply limit
-        if limit:
-            events = events[:limit]
-
-        return events
+        )
+        for event in events:
+            seq = int(event.get("seq", 0))
+            if seq in seen:
+                continue
+            seen.add(seq)
+            if not self._event_matches_filters(
+                event,
+                event_types=event_types,
+                sources=sources,
+                exclude_sources=exclude_sources,
+                after_ts=after_ts,
+                before_ts=before_ts,
+            ):
+                continue
+            if payload_filtering and not self._event_matches_payload_filters(
+                event,
+                data_sources=data_sources,
+                turn_id=turn_id,
+                min_position=min_position,
+                max_position=max_position,
+            ):
+                continue
+            filtered.append(event)
+        return filtered
 
     def read_seqs(
         self,
@@ -318,9 +547,11 @@ class EventStore:
 
         events = self._backend.read_seqs(user_id, session_id, seqs)
 
-        with self._lock:
-            key = (user_id, session_id)
-            for event in self._buffers.get(key, []):
+        key = (user_id, session_id)
+        with self._session_lock(key):
+            with self._lock:
+                buffer_events = list(self._buffers.get(key, []))
+            for event in buffer_events:
                 if event.get("seq") in seqs:
                     events.append(event)
 
@@ -388,9 +619,10 @@ class EventStore:
         if before_seq <= 0 or limit <= 0:
             return []
 
-        with self._lock:
-            key = (user_id, session_id)
-            buffer_events = list(self._buffers.get(key, []))
+        key = (user_id, session_id)
+        with self._session_lock(key):
+            with self._lock:
+                buffer_events = list(self._buffers.get(key, []))
 
         payload_filtering = (
             data_sources
@@ -517,9 +749,10 @@ class EventStore:
             or min_position is not None
             or max_position is not None
         ):
-            with self._lock:
-                key = (user_id, session_id)
-                buffer_events = list(self._buffers.get(key, []))
+            key = (user_id, session_id)
+            with self._session_lock(key):
+                with self._lock:
+                    buffer_events = list(self._buffers.get(key, []))
 
             filtered_buffer = [
                 event
@@ -595,9 +828,10 @@ class EventStore:
 
             return filtered_buffer[-limit:]
 
-        with self._lock:
-            key = (user_id, session_id)
-            buffer_events = list(self._buffers.get(key, []))
+        key = (user_id, session_id)
+        with self._session_lock(key):
+            with self._lock:
+                buffer_events = list(self._buffers.get(key, []))
 
         filtered_buffer = [
             event
@@ -656,10 +890,12 @@ class EventStore:
 
     def last_seq(self, user_id: str, session_id: str) -> int:
         """Get the last sequence number (from buffer or backend)."""
-        with self._lock:
-            key = (user_id, session_id)
-            if key in self._seq_counters:
-                return self._seq_counters[key]
+        key = (user_id, session_id)
+        with self._session_lock(key):
+            with self._lock:
+                current_seq = self._seq_counters.get(key)
+            if current_seq is not None:
+                return current_seq
         return self._backend.last_seq(user_id, session_id)
 
     def flush_session(self, user_id: str, session_id: str) -> None:
@@ -668,7 +904,7 @@ class EventStore:
         Called on session completion, termination, or suspension.
         """
         key = (user_id, session_id)
-        with self._lock:
+        with self._session_lock(key):
             self._flush_locked(key)
         self._reconcile_pending_audit({key})
 
@@ -679,26 +915,62 @@ class EventStore:
         periodic flush background task.
         """
         with self._lock:
-            for key in list(self._buffers.keys()):
+            keys = list(self._buffers)
+        for key in keys:
+            with self._session_lock(key):
                 self._flush_locked(key)
+        with self._lock:
             pending = set(self._audit_reconcile_pending)
         self._reconcile_pending_audit(pending)
 
+    def flush_stale(self) -> int:
+        """Flush buffers that reached the configured maximum age."""
+        cutoff = time.monotonic() - self._config.flush_interval
+        with self._lock:
+            keys = [
+                key
+                for key, started_at in self._buffer_started_at.items()
+                if started_at <= cutoff
+            ]
+        flushed = 0
+        for key in keys:
+            with self._session_lock(key):
+                with self._lock:
+                    started_at = self._buffer_started_at.get(key, float("inf"))
+                    buffered = len(self._buffers.get(key, []))
+                if started_at > cutoff:
+                    continue
+                flushed += buffered
+                self._flush_locked(key)
+        if keys:
+            self._reconcile_pending_audit(set(keys))
+        sweep_cache = getattr(self._backend, "sweep_cache", None)
+        if callable(sweep_cache):
+            sweep_cache()
+        return flushed
+
     def delete_session(self, user_id: str, session_id: str) -> None:
         """Delete all events for a session (storage + buffer)."""
-        with self._lock:
-            key = (user_id, session_id)
-            self._buffers.pop(key, None)
-            self._seq_counters.pop(key, None)
+        key = (user_id, session_id)
+        with self._session_lock(key):
+            with self._lock:
+                self._buffers.pop(key, None)
+                self._buffer_bytes.pop(key, None)
+                self._buffer_started_at.pop(key, None)
+                self._seq_counters.pop(key, None)
         self._backend.delete_session(user_id, session_id)
 
     def delete_all_for_user(self, user_id: str) -> None:
         """Delete all events for a user (storage + buffer)."""
         with self._lock:
             keys_to_remove = [k for k in self._buffers if k[0] == user_id]
-            for key in keys_to_remove:
-                self._buffers.pop(key, None)
-                self._seq_counters.pop(key, None)
+        for key in keys_to_remove:
+            with self._session_lock(key):
+                with self._lock:
+                    self._buffers.pop(key, None)
+                    self._buffer_bytes.pop(key, None)
+                    self._buffer_started_at.pop(key, None)
+                    self._seq_counters.pop(key, None)
         self._backend.delete_all_for_user(user_id)
 
     @staticmethod
@@ -760,9 +1032,11 @@ class EventStore:
 
     def exists(self, user_id: str, session_id: str) -> bool:
         """Check if any events exist for a session (storage or buffer)."""
-        with self._lock:
-            key = (user_id, session_id)
-            if self._buffers.get(key):
+        key = (user_id, session_id)
+        with self._session_lock(key):
+            with self._lock:
+                buffered = bool(self._buffers.get(key))
+            if buffered:
                 return True
         return self._backend.exists(user_id, session_id)
 
@@ -782,14 +1056,17 @@ class EventStore:
         """
         removed = 0
         with self._lock:
-            stale = [
-                k
-                for k in self._seq_counters
-                if k not in active_sessions and k not in self._buffers
-            ]
-            for k in stale:
-                del self._seq_counters[k]
-                removed += 1
+            candidates = list(self._seq_counters)
+        for key in candidates:
+            with self._session_lock(key):
+                with self._lock:
+                    if (
+                        key not in active_sessions
+                        and key not in self._buffers
+                        and key in self._seq_counters
+                    ):
+                        del self._seq_counters[key]
+                        removed += 1
         if removed:
             logger.debug("Swept %d stale seq counters", removed)
         return removed
@@ -895,14 +1172,25 @@ class EventStore:
     def buffered_event_count(self) -> int:
         """Total number of buffered (unflushed) events across all sessions."""
         with self._lock:
-            return sum(len(buf) for buf in self._buffers.values())
+            keys = list(self._buffers)
+        total = 0
+        for key in keys:
+            with self._session_lock(key):
+                with self._lock:
+                    total += len(self._buffers.get(key, []))
+        return total
 
     def _flush_locked(self, key: tuple[str, str]) -> None:
-        """Flush buffer for a session to the backend. Must hold self._lock."""
-        buf = self._buffers.pop(key, [])
+        """Flush one detached session buffer while holding its session lock."""
+        with self._lock:
+            buf = self._buffers.pop(key, [])
+            self._buffer_bytes.pop(key, None)
+            self._buffer_started_at.pop(key, None)
         if not buf:
             return
         user_id, session_id = key
+        payload_bytes = len(_events_to_ndjson(buf))
+        started_at = time.monotonic()
         try:
             self._backend.append(user_id, session_id, buf)
             if self._audit_store is not None:
@@ -931,6 +1219,14 @@ class EventStore:
                 buf[0]["seq"],
                 buf[-1]["seq"],
             )
+            with self._metrics_lock:
+                self._flushes_total += 1
+                self._flushed_events_total += len(buf)
+                self._flushed_bytes_total += payload_bytes
+                self._last_flush_duration_ms = (time.monotonic() - started_at) * 1000
+                self._flush_latency.observe(self._last_flush_duration_ms)
+                self._flush_batch_events.observe(len(buf))
+                self._flush_batch_bytes.observe(payload_bytes)
         except Exception:
             # Put events back in buffer on failure so they aren't lost.
             # Cap total buffer size to prevent OOM on persistent failure.
@@ -941,8 +1237,13 @@ class EventStore:
                 user_id,
                 session_id,
             )
-            existing = self._buffers.get(key, [])
-            combined = buf + existing
+            with self._metrics_lock:
+                self._flush_failures_total += 1
+                self._last_flush_duration_ms = (time.monotonic() - started_at) * 1000
+                self._flush_latency.observe(self._last_flush_duration_ms)
+            with self._lock:
+                existing = self._buffers.get(key, [])
+                combined = buf + existing
             if len(combined) > _MAX_BUFFER_PER_SESSION:
                 dropped = len(combined) - _MAX_BUFFER_PER_SESSION
                 logger.error(
@@ -952,4 +1253,7 @@ class EventStore:
                     dropped,
                 )
                 combined = combined[-_MAX_BUFFER_PER_SESSION:]
-            self._buffers[key] = combined
+            with self._lock:
+                self._buffers[key] = combined
+                self._buffer_bytes[key] = len(_events_to_ndjson(combined))
+                self._buffer_started_at.setdefault(key, time.monotonic())

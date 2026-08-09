@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from intaris.audit import AuditStore
 from intaris.background import TaskQueue
 from intaris.config import DBConfig
-from intaris.db import Database
+from intaris.db import _SCHEMA_SQL_PG, _SCHEMA_SQL_SQLITE, Database
 from intaris.session import SessionStore
 
 TEST_USER = "test-user"
@@ -40,6 +42,18 @@ def task_queue(db):
 class TestSessionStore:
     """Test session CRUD operations."""
 
+    def test_database_metrics_record_queries_and_transactions(self, db):
+        before = db.metrics()
+        with db.cursor() as cur:
+            cur.execute("SELECT 1")
+            assert cur.fetchone()[0] == 1
+        after = db.metrics()
+
+        assert after["query_latency"]["count"] == (before["query_latency"]["count"] + 1)
+        assert after["transaction_latency"]["count"] == (
+            before["transaction_latency"]["count"] + 1
+        )
+
     def test_create_session(self, session_store):
         session = session_store.create(
             user_id=TEST_USER,
@@ -51,6 +65,132 @@ class TestSessionStore:
         assert session["intention"] == "Implement user auth"
         assert session["status"] == "active"
         assert session["total_calls"] == 0
+        assert session["last_event_seq"] == 0
+        assert session["latest_user_message_seq"] is None
+        assert bool(session["user_message_observed"]) is False
+
+    def test_event_sequence_allocation_tracks_only_user_high_water(self, session_store):
+        session_store.create(
+            user_id=TEST_USER,
+            session_id="sess-events",
+            intention="Test",
+        )
+
+        seqs = session_store.allocate_event_sequences(
+            "sess-events",
+            user_id=TEST_USER,
+            user_message_flags=[True, False, False],
+        )
+
+        assert seqs == [1, 2, 3]
+        session = session_store.get("sess-events", user_id=TEST_USER)
+        assert session["last_event_seq"] == 3
+        assert session["latest_user_message_seq"] == 1
+        assert bool(session["user_message_observed"]) is True
+
+    def test_generated_intention_cas_uses_user_message_high_water(self, session_store):
+        session_store.create(
+            user_id=TEST_USER,
+            session_id="sess-cas",
+            intention="Initial",
+        )
+        user_seq = session_store.allocate_event_sequences(
+            "sess-cas",
+            user_id=TEST_USER,
+            user_message_flags=[True],
+        )[0]
+        session_store.allocate_event_sequences(
+            "sess-cas",
+            user_id=TEST_USER,
+            user_message_flags=[False, False],
+        )
+
+        updated = session_store.update_generated_intention(
+            "sess-cas",
+            user_id=TEST_USER,
+            intention="Updated",
+            intention_source="user",
+            title=None,
+            expected_user_message_seq=user_seq,
+            guard_user_message_seq=True,
+        )
+
+        assert updated is True
+        assert (
+            session_store.get("sess-cas", user_id=TEST_USER)["intention"] == "Updated"
+        )
+
+    def test_schema_backend_parity_for_user_message_state(self):
+        for schema in (_SCHEMA_SQL_SQLITE, _SCHEMA_SQL_PG):
+            assert "last_event_seq" in schema
+            assert "latest_user_message_seq" in schema
+            assert "user_message_observed" in schema
+
+    def test_migration_backfills_observed_user_message(self, tmp_path):
+        path = tmp_path / "migration.db"
+        prechange_schema = (
+            _SCHEMA_SQL_SQLITE.replace("    last_event_seq INTEGER DEFAULT 0,\n", "")
+            .replace("    latest_user_message_seq INTEGER,\n", "")
+            .replace("    user_message_observed INTEGER DEFAULT 0,\n", "")
+        )
+        conn = sqlite3.connect(path)
+        conn.executescript(prechange_schema)
+        conn.execute(
+            """
+            INSERT INTO sessions
+                (user_id, session_id, intention, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                TEST_USER,
+                "sess-migration",
+                "Initial",
+                "2026-08-01T00:00:00+00:00",
+                "2026-08-01T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO audit_log
+                (id, call_id, record_type, user_id, session_id, timestamp,
+                 evaluation_path, decision, latency_ms, content)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "audit-migration",
+                "reasoning-migration",
+                "reasoning",
+                TEST_USER,
+                "sess-migration",
+                "2026-08-01T00:01:00+00:00",
+                "reasoning",
+                "approve",
+                0,
+                "User message: existing message",
+            ),
+        )
+        columns_before = {
+            row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        conn.commit()
+        conn.close()
+        assert "user_message_observed" not in columns_before
+
+        config = DBConfig(path=str(path))
+        migrated_db = Database(config)
+        migrated = SessionStore(migrated_db).get("sess-migration", user_id=TEST_USER)
+        with migrated_db.cursor() as cur:
+            cur.execute("PRAGMA table_info(sessions)")
+            columns_after = {row["name"] for row in cur.fetchall()}
+
+        assert {
+            "last_event_seq",
+            "latest_user_message_seq",
+            "user_message_observed",
+        }.issubset(columns_after)
+        assert migrated["last_event_seq"] == 0
+        assert migrated["latest_user_message_seq"] is None
+        assert bool(migrated["user_message_observed"]) is True
 
     def test_create_with_details(self, session_store):
         session = session_store.create(

@@ -34,7 +34,7 @@ RUN python -c "from fastembed import SparseTextEmbedding; SparseTextEmbedding(mo
 ENV DATA_DIR=/data
 RUN mkdir -p /data
 
-EXPOSE 8060
+EXPOSE 8060 9090
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

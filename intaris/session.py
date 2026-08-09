@@ -238,6 +238,214 @@ class SessionStore:
 
         return self.get(session_id, user_id=user_id)
 
+    def allocate_event_sequences(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        user_message_flags: list[bool],
+        minimum_last_seq: int = 0,
+    ) -> list[int]:
+        """Allocate event sequences and advance durable user-message state."""
+        if not user_message_flags:
+            return []
+        count = len(user_message_flags)
+        last_user_offset = max(
+            (
+                index
+                for index, is_user_message in enumerate(user_message_flags, start=1)
+                if is_user_message
+            ),
+            default=0,
+        )
+        base_sql = (
+            "CASE WHEN COALESCE(last_event_seq, 0) < ? "
+            "THEN ? ELSE COALESCE(last_event_seq, 0) END"
+        )
+        returning = (
+            " RETURNING last_event_seq" if self._db.backend == "postgresql" else ""
+        )
+        with self._db.cursor() as cur:
+            cur.execute(
+                f"""
+                UPDATE sessions
+                SET latest_user_message_seq = CASE
+                        WHEN ? > 0 THEN {base_sql} + ?
+                        ELSE latest_user_message_seq
+                    END,
+                    user_message_observed = CASE
+                        WHEN ? > 0 THEN TRUE
+                        ELSE user_message_observed
+                    END,
+                    last_event_seq = {base_sql} + ?
+                WHERE session_id = ? AND user_id = ?{returning}
+                """,
+                (
+                    last_user_offset,
+                    minimum_last_seq,
+                    minimum_last_seq,
+                    last_user_offset,
+                    last_user_offset,
+                    minimum_last_seq,
+                    minimum_last_seq,
+                    count,
+                    session_id,
+                    user_id,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"Session {session_id} not found")
+            if self._db.backend != "postgresql":
+                cur.execute(
+                    "SELECT last_event_seq FROM sessions "
+                    "WHERE session_id = ? AND user_id = ?",
+                    (session_id, user_id),
+                )
+            row = cur.fetchone()
+        last_seq = int(row["last_event_seq"])
+        return list(range(last_seq - count + 1, last_seq + 1))
+
+    def observe_user_message(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        event_seq: int,
+    ) -> None:
+        """Advance durable user-message state for a pre-migration event."""
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET latest_user_message_seq = CASE
+                        WHEN latest_user_message_seq IS NULL
+                          OR latest_user_message_seq < ?
+                        THEN ?
+                        ELSE latest_user_message_seq
+                    END,
+                    last_event_seq = CASE
+                        WHEN COALESCE(last_event_seq, 0) < ?
+                        THEN ?
+                        ELSE last_event_seq
+                    END,
+                    user_message_observed = TRUE
+                WHERE session_id = ? AND user_id = ?
+                """,
+                (event_seq, event_seq, event_seq, event_seq, session_id, user_id),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"Session {session_id} not found")
+
+    def mark_user_message_observed(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+    ) -> None:
+        """Permanently suppress bootstrap for a direct user message."""
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET user_message_observed = TRUE
+                WHERE session_id = ? AND user_id = ?
+                """,
+                (session_id, user_id),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"Session {session_id} not found")
+
+    def list_event_reconciliation_sessions(self) -> list[tuple[str, str]]:
+        """List session identities that can have authoritative event logs."""
+        with self._db.cursor() as cur:
+            cur.execute("SELECT user_id, session_id FROM sessions")
+            rows = cur.fetchall()
+        return [(str(row["user_id"]), str(row["session_id"])) for row in rows]
+
+    def reconcile_event_high_water(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        last_event_seq: int,
+        latest_user_message_seq: int | None,
+    ) -> None:
+        """Merge high-water state reconstructed from historical event logs."""
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET last_event_seq = CASE
+                        WHEN COALESCE(last_event_seq, 0) < ?
+                        THEN ?
+                        ELSE last_event_seq
+                    END,
+                    latest_user_message_seq = CASE
+                        WHEN ? IS NULL THEN latest_user_message_seq
+                        WHEN latest_user_message_seq IS NULL
+                          OR latest_user_message_seq < ?
+                        THEN ?
+                        ELSE latest_user_message_seq
+                    END,
+                    user_message_observed = CASE
+                        WHEN ? IS NOT NULL THEN TRUE
+                        ELSE user_message_observed
+                    END
+                WHERE session_id = ? AND user_id = ?
+                """,
+                (
+                    last_event_seq,
+                    last_event_seq,
+                    latest_user_message_seq,
+                    latest_user_message_seq,
+                    latest_user_message_seq,
+                    latest_user_message_seq,
+                    session_id,
+                    user_id,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise ValueError(f"Session {session_id} not found")
+
+    def update_generated_intention(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        intention: str,
+        intention_source: str,
+        title: str | None,
+        expected_user_message_seq: int | None = None,
+        guard_user_message_seq: bool = False,
+        require_no_user_message: bool = False,
+    ) -> bool:
+        """Persist a generated intention only while its durable guard holds."""
+        now = datetime.now(timezone.utc).isoformat()
+        conditions = ["session_id = ?", "user_id = ?"]
+        params: list[Any] = [intention, intention_source, title, now]
+        condition_params: list[Any] = [session_id, user_id]
+        if guard_user_message_seq:
+            if expected_user_message_seq is None:
+                conditions.append("latest_user_message_seq IS NULL")
+            else:
+                conditions.append("latest_user_message_seq = ?")
+                condition_params.append(expected_user_message_seq)
+        if require_no_user_message:
+            conditions.append("user_message_observed = FALSE")
+            conditions.append("intention_source = 'initial'")
+        params.extend(condition_params)
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE sessions
+                SET intention = ?, intention_source = ?,
+                    title = COALESCE(?, title), updated_at = ?
+                WHERE """
+                + " AND ".join(conditions),
+                params,
+            )
+            return cur.rowcount == 1
+
     def increment_counter(
         self, session_id: str, decision: str, *, user_id: str
     ) -> None:

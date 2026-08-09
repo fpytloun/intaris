@@ -13,15 +13,20 @@ Chunk filenames encode the sequence range for efficient filtering.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 from urllib.parse import quote
 
 from intaris.config import EventStoreConfig
+from intaris.events.cache import create_event_chunk_cache
+from intaris.metrics import Histogram
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +511,7 @@ class S3EventBackend:
     def __init__(self, config: EventStoreConfig) -> None:
         import boto3
         from botocore.config import Config as BotoConfig
+        from botocore.exceptions import ClientError
 
         kwargs: dict[str, Any] = {
             "endpoint_url": config.s3_endpoint,
@@ -517,7 +523,30 @@ class S3EventBackend:
             kwargs["region_name"] = config.s3_region
 
         self._client = boto3.client("s3", **kwargs)
+        self._client_error_type = ClientError
+        self._endpoint_identity = config.s3_endpoint
         self._bucket = config.s3_bucket
+        self._chunk_cache_ttl = max(0.0, config.s3_chunk_cache_ttl)
+        self._cache_lock = threading.Lock()
+        self._chunk_cache: dict[
+            tuple[str, str], tuple[float, list[tuple[int, int, str]]]
+        ] = {}
+        self._object_versions: dict[str, str] = {}
+        self._write_prefix_cache: dict[tuple[str, str], str] = {}
+        self._chunk_cache_hits = 0
+        self._chunk_cache_misses = 0
+        self._list_requests = 0
+        self._get_requests = 0
+        self._put_requests = 0
+        self._bytes_read = 0
+        self._bytes_written = 0
+        self._operation_latency = {
+            "list": Histogram(),
+            "get": Histogram(),
+            "put": Histogram(),
+        }
+        self._cache_max_entries = 4096
+        self._event_cache = create_event_chunk_cache(config)
         self._ensure_bucket()
 
     def _ensure_bucket(self) -> None:
@@ -565,7 +594,17 @@ class S3EventBackend:
 
         Returns list of (start_seq, end_seq, key) tuples.
         """
+        cache_key = (user_id, session_id)
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._chunk_cache.get(cache_key)
+            if cached is not None and now - cached[0] <= self._chunk_cache_ttl:
+                self._chunk_cache_hits += 1
+                return list(cached[1])
+            self._chunk_cache_misses += 1
+
         chunks: list[tuple[int, int, str]] = []
+        discovered_versions: dict[str, str] = {}
         for prefix in self._prefix_candidates(user_id, session_id):
             continuation_token = None
 
@@ -573,7 +612,15 @@ class S3EventBackend:
                 kwargs: dict[str, Any] = {"Bucket": self._bucket, "Prefix": prefix}
                 if continuation_token:
                     kwargs["ContinuationToken"] = continuation_token
-                response = self._client.list_objects_v2(**kwargs)
+                started_at = time.monotonic()
+                try:
+                    response = self._client.list_objects_v2(**kwargs)
+                finally:
+                    self._operation_latency["list"].observe(
+                        (time.monotonic() - started_at) * 1000
+                    )
+                    with self._cache_lock:
+                        self._list_requests += 1
 
                 for obj in response.get("Contents", []):
                     key = obj["Key"]
@@ -581,37 +628,129 @@ class S3EventBackend:
                     parsed = _parse_chunk_filename(filename)
                     if parsed:
                         chunks.append((parsed[0], parsed[1], key))
+                        etag = str(obj.get("ETag") or "").strip('"')
+                        if etag:
+                            discovered_versions[key] = etag
 
                 if not response.get("IsTruncated"):
                     break
                 continuation_token = response.get("NextContinuationToken")
 
         chunks.sort(key=lambda c: c[0])
+        with self._cache_lock:
+            previous = self._chunk_cache.get(cache_key)
+            if previous is not None:
+                for _, _, key in previous[1]:
+                    self._object_versions.pop(key, None)
+            self._chunk_cache[cache_key] = (now, list(chunks))
+            self._object_versions.update(discovered_versions)
+            self._trim_caches_locked()
         return chunks
+
+    def _trim_caches_locked(self) -> None:
+        """Bound process-local metadata caches. Must hold ``_cache_lock``."""
+        while len(self._chunk_cache) > self._cache_max_entries:
+            _, chunks = self._chunk_cache.pop(next(iter(self._chunk_cache)))
+            for _, _, key in chunks:
+                self._object_versions.pop(key, None)
+        while len(self._write_prefix_cache) > self._cache_max_entries:
+            self._write_prefix_cache.pop(next(iter(self._write_prefix_cache)))
+
+    def _write_prefix(self, user_id: str, session_id: str) -> str:
+        """Return the stable write prefix, discovering legacy data once."""
+        cache_key = (user_id, session_id)
+        with self._cache_lock:
+            cached = self._write_prefix_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        prefixes = self._prefix_candidates(user_id, session_id)
+        prefix = prefixes[0]
+        for candidate in prefixes:
+            started_at = time.monotonic()
+            try:
+                response = self._client.list_objects_v2(
+                    Bucket=self._bucket, Prefix=candidate, MaxKeys=1
+                )
+            finally:
+                self._operation_latency["list"].observe(
+                    (time.monotonic() - started_at) * 1000
+                )
+                with self._cache_lock:
+                    self._list_requests += 1
+            if response.get("Contents"):
+                prefix = candidate
+                break
+
+        with self._cache_lock:
+            self._write_prefix_cache[cache_key] = prefix
+            self._trim_caches_locked()
+        return prefix
 
     def append(self, user_id: str, session_id: str, events: list[dict]) -> None:
         if not events:
             return
-        prefixes = self._prefix_candidates(user_id, session_id)
-        prefix = prefixes[0]
-        for candidate in prefixes:
-            response = self._client.list_objects_v2(
-                Bucket=self._bucket, Prefix=candidate, MaxKeys=1
-            )
-            if response.get("Contents"):
-                prefix = candidate
-                break
+        prefix = self._write_prefix(user_id, session_id)
         start_seq = events[0]["seq"]
         end_seq = events[-1]["seq"]
         filename = _chunk_filename(start_seq, end_seq)
         key = prefix + filename
 
-        self._client.put_object(
-            Bucket=self._bucket,
-            Key=key,
-            Body=_events_to_ndjson(events),
-            ContentType="application/x-ndjson",
-        )
+        body = _events_to_ndjson(events)
+        started_at = time.monotonic()
+        wrote_object = False
+        object_version = ""
+        try:
+            response = self._client.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=body,
+                ContentType="application/x-ndjson",
+                IfNoneMatch="*",
+            )
+            object_version = str(response.get("ETag") or "").strip('"')
+            wrote_object = True
+        except self._client_error_type as exc:
+            status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            if status != 412:
+                raise
+            existing = self._download_object(key)
+            if existing != body:
+                raise RuntimeError(
+                    f"Immutable event chunk collision for s3://{self._bucket}/{key}"
+                ) from exc
+            object_version = hashlib.sha256(body).hexdigest()
+        finally:
+            self._operation_latency["put"].observe(
+                (time.monotonic() - started_at) * 1000
+            )
+            with self._cache_lock:
+                self._put_requests += 1
+        if wrote_object:
+            with self._cache_lock:
+                self._bytes_written += len(body)
+        if not object_version:
+            object_version = hashlib.sha256(body).hexdigest()
+        with self._cache_lock:
+            self._object_versions[key] = object_version
+        try:
+            self._event_cache.put(
+                self._object_cache_key(key, version=object_version),
+                body,
+            )
+        except OSError:
+            logger.warning(
+                "Could not populate event cache after S3 write", exc_info=True
+            )
+        cache_key = (user_id, session_id)
+        chunk = (start_seq, end_seq, key)
+        with self._cache_lock:
+            cached = self._chunk_cache.get(cache_key)
+            if cached is not None:
+                chunks = [item for item in cached[1] if item[2] != key]
+                chunks.append(chunk)
+                chunks.sort(key=lambda item: item[0])
+                self._chunk_cache[cache_key] = (cached[0], chunks)
 
     def read(
         self,
@@ -626,8 +765,7 @@ class S3EventBackend:
         for start_seq, end_seq, key in chunks:
             if end_seq <= after_seq:
                 continue
-            response = self._client.get_object(Bucket=self._bucket, Key=key)
-            data = response["Body"].read()
+            data = self._get_object(key)
             events = _ndjson_to_events(data)
             for event in events:
                 if event.get("seq", 0) > after_seq:
@@ -635,6 +773,39 @@ class S3EventBackend:
                     if limit and len(result) >= limit:
                         return result
         return result
+
+    def _get_object(self, key: str) -> bytes:
+        """Read one immutable object through the configured local cache."""
+        return self._event_cache.get_or_load(
+            self._object_cache_key(key),
+            lambda: self._download_object(key),
+        )
+
+    def _download_object(self, key: str) -> bytes:
+        """Read one object from S3 and update remote operation metrics."""
+        started_at = time.monotonic()
+        try:
+            response = self._client.get_object(Bucket=self._bucket, Key=key)
+            data = response["Body"].read()
+        finally:
+            self._operation_latency["get"].observe(
+                (time.monotonic() - started_at) * 1000
+            )
+            with self._cache_lock:
+                self._get_requests += 1
+        with self._cache_lock:
+            self._bytes_read += len(data)
+        return data
+
+    def _object_cache_key(self, key: str, *, version: str | None = None) -> str:
+        if version is None:
+            with self._cache_lock:
+                version = self._object_versions.get(key, "unversioned")
+        return f"{self._endpoint_identity}\0{self._bucket}\0{key}\0{version}"
+
+    def sweep_cache(self) -> int:
+        """Run bounded local event cache maintenance."""
+        return self._event_cache.sweep()
 
     def read_seqs(
         self,
@@ -651,8 +822,7 @@ class S3EventBackend:
         for start_seq, end_seq, key in chunks:
             if not any(start_seq <= seq <= end_seq for seq in seqs):
                 continue
-            response = self._client.get_object(Bucket=self._bucket, Key=key)
-            data = response["Body"].read()
+            data = self._get_object(key)
             events = _ndjson_to_events(data)
             for event in events:
                 if event.get("seq") in seqs:
@@ -682,8 +852,7 @@ class S3EventBackend:
         for start_seq, _, key in reversed(chunks):
             if start_seq >= before_seq:
                 continue
-            response = self._client.get_object(Bucket=self._bucket, Key=key)
-            data = response["Body"].read()
+            data = self._get_object(key)
             events = _ndjson_to_events(data)
             for event in reversed(events):
                 if event.get("seq", 0) >= before_seq:
@@ -722,8 +891,7 @@ class S3EventBackend:
         result: list[dict] = []
 
         for _, _, key in reversed(chunks):
-            response = self._client.get_object(Bucket=self._bucket, Key=key)
-            data = response["Body"].read()
+            data = self._get_object(key)
             events = _ndjson_to_events(data)
             for event in reversed(events):
                 if _event_matches_filters(
@@ -753,8 +921,7 @@ class S3EventBackend:
         for start_seq, end_seq, key in chunks:
             if end_seq <= after_seq:
                 continue
-            response = self._client.get_object(Bucket=self._bucket, Key=key)
-            data = response["Body"].read()
+            data = self._get_object(key)
             events = _ndjson_to_events(data)
             for event in events:
                 if event.get("seq", 0) > after_seq:
@@ -769,10 +936,23 @@ class S3EventBackend:
     def delete_session(self, user_id: str, session_id: str) -> None:
         for prefix in self._prefix_candidates(user_id, session_id):
             self._delete_by_prefix(prefix)
+        with self._cache_lock:
+            cached = self._chunk_cache.pop((user_id, session_id), None)
+            if cached is not None:
+                for _, _, key in cached[1]:
+                    self._object_versions.pop(key, None)
+            self._write_prefix_cache.pop((user_id, session_id), None)
 
     def delete_all_for_user(self, user_id: str) -> None:
         for prefix in self._user_prefix_candidates(user_id):
             self._delete_by_prefix(prefix)
+        with self._cache_lock:
+            for key in [key for key in self._chunk_cache if key[0] == user_id]:
+                cached = self._chunk_cache.pop(key, None)
+                if cached is not None:
+                    for _, _, object_key in cached[1]:
+                        self._object_versions.pop(object_key, None)
+                self._write_prefix_cache.pop(key, None)
 
     def _delete_by_prefix(self, prefix: str) -> None:
         """Delete all S3 objects under a prefix, respecting the 1000-object batch limit."""
@@ -785,7 +965,15 @@ class S3EventBackend:
             }
             if continuation_token:
                 kwargs["ContinuationToken"] = continuation_token
-            response = self._client.list_objects_v2(**kwargs)
+            started_at = time.monotonic()
+            try:
+                response = self._client.list_objects_v2(**kwargs)
+            finally:
+                self._operation_latency["list"].observe(
+                    (time.monotonic() - started_at) * 1000
+                )
+                with self._cache_lock:
+                    self._list_requests += 1
             objects = response.get("Contents", [])
             if objects:
                 self._client.delete_objects(
@@ -798,9 +986,38 @@ class S3EventBackend:
 
     def exists(self, user_id: str, session_id: str) -> bool:
         for prefix in self._prefix_candidates(user_id, session_id):
-            response = self._client.list_objects_v2(
-                Bucket=self._bucket, Prefix=prefix, MaxKeys=1
-            )
+            started_at = time.monotonic()
+            try:
+                response = self._client.list_objects_v2(
+                    Bucket=self._bucket, Prefix=prefix, MaxKeys=1
+                )
+            finally:
+                self._operation_latency["list"].observe(
+                    (time.monotonic() - started_at) * 1000
+                )
+                with self._cache_lock:
+                    self._list_requests += 1
             if response.get("Contents"):
                 return True
         return False
+
+    def metrics(self) -> dict[str, Any]:
+        """Return local S3 request, transfer, and cache metrics."""
+        with self._cache_lock:
+            result = {
+                "chunk_cache_hits_total": self._chunk_cache_hits,
+                "chunk_cache_misses_total": self._chunk_cache_misses,
+                "list_requests_total": self._list_requests,
+                "get_requests_total": self._get_requests,
+                "put_requests_total": self._put_requests,
+                "bytes_read_total": self._bytes_read,
+                "bytes_written_total": self._bytes_written,
+                "chunk_cache_entries": len(self._chunk_cache),
+                "write_prefix_cache_entries": len(self._write_prefix_cache),
+            }
+        result["operation_latency"] = {
+            operation: histogram.snapshot()
+            for operation, histogram in self._operation_latency.items()
+        }
+        result["event_cache"] = self._event_cache.metrics()
+        return result

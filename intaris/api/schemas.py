@@ -545,15 +545,22 @@ class SessionEvent(BaseModel):
         description=(
             "Event payload (client-native for reconstruction). Cognis message "
             "events store role/content/content_type/source/turn_id/position/hash "
-            "inside this object; context_snapshot stores entries/extras/captured_at."
+            "inside this object. user_message.intention_eligible must be boolean "
+            "and defaults to true. context_snapshot stores entries/extras/captured_at."
         ),
         json_schema_extra={"maxProperties": 200},
     )
 
     @model_validator(mode="after")
     def _validate_data_size(self) -> SessionEvent:
-        """Reject oversized event payloads to prevent memory exhaustion."""
+        """Reject invalid or oversized event payloads."""
         import json
+
+        if self.type == "user_message" and "intention_eligible" in self.data:
+            if not isinstance(self.data["intention_eligible"], bool):
+                raise ValueError(
+                    "user_message data.intention_eligible must be a boolean"
+                )
 
         raw = json.dumps(self.data, separators=(",", ":"))
         if len(raw) > 1_048_576:  # 1 MB

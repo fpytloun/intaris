@@ -20,10 +20,12 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from typing import Any, Generator
 
 from intaris.config import DBConfig
+from intaris.metrics import Histogram
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +133,40 @@ class _PgCursorWrapper:
         self._cursor.close()
 
 
+class _ObservedCursor:
+    """Cursor proxy that records SQL execution latency without query text."""
+
+    def __init__(self, cursor: Any, histogram: Histogram) -> None:
+        self._cursor = cursor
+        self._histogram = histogram
+
+    def execute(self, sql: str, params: Any = None) -> Any:
+        started_at = time.monotonic()
+        try:
+            if params is None:
+                return self._cursor.execute(sql)
+            return self._cursor.execute(sql, params)
+        finally:
+            self._histogram.observe((time.monotonic() - started_at) * 1000)
+
+    def executemany(self, sql: str, params: Any) -> Any:
+        started_at = time.monotonic()
+        try:
+            return self._cursor.executemany(sql, params)
+        finally:
+            self._histogram.observe((time.monotonic() - started_at) * 1000)
+
+    def executescript(self, sql: str) -> Any:
+        started_at = time.monotonic()
+        try:
+            return self._cursor.executescript(sql)
+        finally:
+            self._histogram.observe((time.monotonic() - started_at) * 1000)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+
 # ── Database Class ────────────────────────────────────────────────────
 
 
@@ -148,6 +184,9 @@ class Database:
 
     def __init__(self, config: DBConfig):
         self._backend = config.backend
+        self._query_latency = Histogram()
+        self._transaction_latency = Histogram()
+        self._pool_wait_latency = Histogram()
 
         if self._backend == "postgresql":
             self._init_postgresql(config)
@@ -160,6 +199,15 @@ class Database:
     def backend(self) -> str:
         """Return the active backend name: "sqlite" or "postgresql"."""
         return self._backend
+
+    def metrics(self) -> dict[str, Any]:
+        """Return process-local database performance metrics."""
+        return {
+            "backend": self._backend,
+            "query_latency": self._query_latency.snapshot(),
+            "transaction_latency": self._transaction_latency.snapshot(),
+            "pool_wait_latency": self._pool_wait_latency.snapshot(),
+        }
 
     # ── SQLite Backend ────────────────────────────────────────────
 
@@ -217,8 +265,10 @@ class Database:
         """Get a connection from the PostgreSQL pool."""
         import psycopg2.extras
 
+        started_at = time.monotonic()
         if self._pool_semaphore is not None:
             self._pool_semaphore.acquire()
+        self._pool_wait_latency.observe((time.monotonic() - started_at) * 1000)
 
         try:
             conn = self._pool.getconn()
@@ -274,10 +324,13 @@ class Database:
         For PostgreSQL, wraps the cursor to translate ``?`` → ``%s``.
         """
         if self._backend == "postgresql":
+            started_at = time.monotonic()
             conn = self._get_pg_connection()
             try:
                 raw_cursor = conn.cursor()
-                wrapper = _PgCursorWrapper(raw_cursor)
+                wrapper = _ObservedCursor(
+                    _PgCursorWrapper(raw_cursor), self._query_latency
+                )
                 try:
                     yield wrapper
                 finally:
@@ -288,13 +341,20 @@ class Database:
                 raise
             finally:
                 self._put_pg_connection(conn)
+                self._transaction_latency.observe(
+                    (time.monotonic() - started_at) * 1000
+                )
         else:
+            started_at = time.monotonic()
             with self.connection() as conn:
-                cursor = conn.cursor()
+                cursor = _ObservedCursor(conn.cursor(), self._query_latency)
                 try:
                     yield cursor
                 finally:
                     cursor.close()
+                    self._transaction_latency.observe(
+                        (time.monotonic() - started_at) * 1000
+                    )
 
     # ── Schema Management ─────────────────────────────────────────
 
@@ -368,6 +428,37 @@ class Database:
                 "intention_source TEXT DEFAULT 'initial'"
             )
             logger.info("Migration: added intention_source column to sessions")
+
+        if not self._sqlite_column_exists(conn, "sessions", "last_event_seq"):
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN last_event_seq INTEGER DEFAULT 0"
+            )
+            logger.info("Migration: added last_event_seq column to sessions")
+        if not self._sqlite_column_exists(conn, "sessions", "latest_user_message_seq"):
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN latest_user_message_seq INTEGER"
+            )
+            logger.info("Migration: added latest_user_message_seq column to sessions")
+        if not self._sqlite_column_exists(conn, "sessions", "user_message_observed"):
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN "
+                "user_message_observed INTEGER DEFAULT 0"
+            )
+            logger.info("Migration: added user_message_observed column to sessions")
+        conn.execute(
+            """
+            UPDATE sessions
+            SET user_message_observed = 1
+            WHERE user_message_observed = 0
+              AND EXISTS (
+                  SELECT 1 FROM audit_log
+                  WHERE audit_log.user_id = sessions.user_id
+                    AND audit_log.session_id = sessions.session_id
+                    AND audit_log.record_type = 'reasoning'
+                    AND audit_log.content LIKE 'User message:%'
+              )
+            """
+        )
 
         self._migrate_analysis_tasks_check_sqlite(conn)
 
@@ -862,6 +953,9 @@ class Database:
                 ("audit_log", "profile_version", "INTEGER"),
                 ("audit_log", "intention", "TEXT"),
                 ("sessions", "intention_source", "TEXT DEFAULT 'initial'"),
+                ("sessions", "last_event_seq", "BIGINT DEFAULT 0"),
+                ("sessions", "latest_user_message_seq", "BIGINT"),
+                ("sessions", "user_message_observed", "BOOLEAN DEFAULT FALSE"),
                 ("sessions", "status_reason", "TEXT"),
                 ("sessions", "agent_id", "TEXT"),
                 ("notification_channels", "events", "TEXT"),
@@ -889,6 +983,20 @@ class Database:
             cur.execute(
                 "UPDATE sessions SET last_activity_at = updated_at "
                 "WHERE last_activity_at IS NULL"
+            )
+            cur.execute(
+                """
+                UPDATE sessions
+                SET user_message_observed = TRUE
+                WHERE user_message_observed = FALSE
+                  AND EXISTS (
+                      SELECT 1 FROM audit_log
+                      WHERE audit_log.user_id = sessions.user_id
+                        AND audit_log.session_id = sessions.session_id
+                        AND audit_log.record_type = 'reasoning'
+                        AND audit_log.content LIKE 'User message:%%'
+                  )
+                """
             )
 
             # Backfill agent_id from audit_log where null
@@ -1106,6 +1214,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     escalated_count INTEGER DEFAULT 0,
     status TEXT DEFAULT 'active',
     last_summary_attempt_at TEXT,
+    last_event_seq INTEGER DEFAULT 0,
+    latest_user_message_seq INTEGER,
+    user_message_observed INTEGER DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (user_id, session_id)
@@ -1412,6 +1523,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     alignment_overridden BOOLEAN DEFAULT FALSE,
     last_alignment TEXT,
     title TEXT,
+    last_event_seq BIGINT DEFAULT 0,
+    latest_user_message_seq BIGINT,
+    user_message_observed BOOLEAN DEFAULT FALSE,
     PRIMARY KEY (user_id, session_id)
 );
 

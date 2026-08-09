@@ -280,6 +280,7 @@ def test_projection_failure_is_repaired_from_durable_events(tmp_path):
         ],
         source="cognis",
     )
+    store.flush_session("alice", "sess-1")
     assert len(EventStore(config).read("alice", "sess-1")) == 1
 
     audit = EventAuditStore(db)

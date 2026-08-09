@@ -409,7 +409,13 @@ async def append_events(
     event_dicts = [{"type": e.type, "data": e.data} for e in events]
 
     try:
-        seqs = event_store.append(ctx.user_id, session_id, event_dicts, source=source)
+        seqs = await asyncio.to_thread(
+            event_store.append,
+            ctx.user_id,
+            session_id,
+            event_dicts,
+            source=source,
+        )
     except Exception as e:
         if idempotency_store is not None and claimed_idempotency:
             idempotency_store.delete(ctx.user_id, session_id, idempotency_key or "")
@@ -584,7 +590,8 @@ async def read_events(
 
     try:
         if exact_seqs:
-            events = event_store.read_seqs(
+            events = await asyncio.to_thread(
+                event_store.read_seqs,
                 ctx.user_id,
                 session_id,
                 seqs=exact_seqs,
@@ -600,7 +607,8 @@ async def read_events(
             )
         elif last_n:
             fetch_limit = last_n + 1
-            events = event_store.read_tail(
+            events = await asyncio.to_thread(
+                event_store.read_tail,
                 ctx.user_id,
                 session_id,
                 limit=fetch_limit,
@@ -616,7 +624,8 @@ async def read_events(
             )
         elif before_seq is not None:
             fetch_limit = limit + 1
-            events = event_store.read_before(
+            events = await asyncio.to_thread(
+                event_store.read_before,
                 ctx.user_id,
                 session_id,
                 before_seq=before_seq,
@@ -634,7 +643,8 @@ async def read_events(
         else:
             # Request one extra to determine has_more
             fetch_limit = limit + 1 if limit else 0
-            events = event_store.read(
+            events = await asyncio.to_thread(
+                event_store.read,
                 ctx.user_id,
                 session_id,
                 after_seq=after_seq,
@@ -667,7 +677,7 @@ async def read_events(
         has_more = True
         events = events[:limit]
 
-    last_seq = event_store.last_seq(ctx.user_id, session_id)
+    last_seq = await asyncio.to_thread(event_store.last_seq, ctx.user_id, session_id)
 
     return EventReadResponse(
         events=events,
@@ -751,7 +761,9 @@ async def export_events(
     )
 
     session = _get_session_or_404(ctx.user_id, session_id)
-    event_last_seq = event_store.last_seq(ctx.user_id, session_id)
+    event_last_seq = await asyncio.to_thread(
+        event_store.last_seq, ctx.user_id, session_id
+    )
     filters = _export_filter_metadata(
         type=type,
         source=source,
@@ -765,7 +777,8 @@ async def export_events(
     )
 
     try:
-        events = event_store.read(
+        events = await asyncio.to_thread(
+            event_store.read,
             ctx.user_id,
             session_id,
             after_seq=0,
@@ -831,7 +844,7 @@ async def flush_events(
     event_store = _get_event_store(request)
 
     try:
-        event_store.flush_session(ctx.user_id, session_id)
+        await asyncio.to_thread(event_store.flush_session, ctx.user_id, session_id)
     except Exception as e:
         logger.exception("Failed to flush events for %s/%s", ctx.user_id, session_id)
         raise HTTPException(status_code=500, detail=f"Failed to flush events: {e}")
