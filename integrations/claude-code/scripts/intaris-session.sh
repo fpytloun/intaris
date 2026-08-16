@@ -103,10 +103,15 @@ elif [ "$HTTP_CODE" = "409" ]; then
         "${HEADERS[@]}" \
         -d '{"status":"active"}' \
         "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/status" >/dev/null 2>&1 || true
+    # Include the allow-paths policy on resume too — previously this only
+    # ever went out on first creation, so editing INTARIS_ALLOW_PATHS had no
+    # effect on any session that already existed (e.g. after /clear or
+    # /compact), even though this hook re-runs and recomputes the policy.
     curl -s --max-time 2 \
         -X PATCH \
         "${HEADERS[@]}" \
-        -d "$(jq -n --arg cwd "$CWD" '{details: {source: "claude-code", working_directory: $cwd}}')" \
+        -d "$(jq -n --arg cwd "$CWD" --argjson policy "$POLICY_JSON" \
+            '{details: {source: "claude-code", working_directory: $cwd}} + (if $policy != null then {policy: $policy} else {} end)')" \
         "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}" >/dev/null 2>&1 || true
 else
     log "Failed to create session (HTTP $HTTP_CODE): $RESP_BODY"
@@ -138,6 +143,7 @@ else
             denied: 0,
             escalated: 0,
             recent_tools: [],
+            call_id_map: [],
             cwd: $cwd,
             last_assistant_text: "",
             subagents: {}

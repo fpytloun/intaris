@@ -42,6 +42,7 @@ export INTARIS_FAIL_OPEN=false             # optional, defaults to false
 export INTARIS_INTENTION=""                # optional, auto-generated from cwd
 export INTARIS_ALLOW_PATHS=~/src           # optional, appended after built-in safe paths
 export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disabled)
+export INTARIS_HOOK_TIMEOUT=60             # optional, must match the PreToolUse timeout in hooks.json (seconds)
 export INTARIS_SESSION_RECORDING=false     # optional, enable session recording
 export INTARIS_DEBUG=false                 # optional, enable stderr logging
 ```
@@ -52,10 +53,11 @@ export INTARIS_DEBUG=false                 # optional, enable stderr logging
 | `INTARIS_API_KEY` | (empty) | API key for authentication. **Required** if Intaris has auth configured. |
 | `INTARIS_AGENT_ID` | `claude-code` | Agent ID sent to Intaris |
 | `INTARIS_USER_ID` | (empty) | User ID (optional if API key maps to a user) |
-| `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed only when Intaris is unreachable or returns transient `5xx` errors. Client/auth/schema errors still block. |
-| `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"Claude Code coding session in <cwd>"` |
-| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories for cross-project reads. Supports `~` expansion. Intaris always includes `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set. User entries are appended after normalization. |
+| `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed **even when** Intaris is unreachable or returns transient `5xx` errors. Client/auth/schema errors still block. A crash anywhere in the hook before a decision is printed also denies by default, via a fail-closed exit trap. |
+| `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"Claude Code coding session in <cwd>"`, refreshed from each user prompt if unset. |
+| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories for cross-project reads. Supports `~` expansion. Intaris always includes `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set — plus each directory's resolved physical path (e.g. `/private/tmp/*` on macOS) if it differs. User entries are appended after normalization. |
 | `INTARIS_CHECKPOINT_INTERVAL` | `25` | Evaluate calls between periodic checkpoints. `0` = disabled. |
+| `INTARIS_HOOK_TIMEOUT` | `60` | The PreToolUse hook's actual configured timeout in seconds — must match `hooks.json`. Used to derive the internal safety budget (a 5s margin below this). |
 | `INTARIS_SESSION_RECORDING` | `false` | Enable session recording for playback and analysis. |
 | `INTARIS_DEBUG` | `false` | Enable debug logging to stderr. |
 
@@ -114,7 +116,7 @@ Look for `[intaris]` messages in stderr:
 [intaris] Evaluating: bash
 [intaris] bash: approve (fast, 12ms, risk=)
 [intaris] Sending checkpoint #1
-[intaris] Signaling completion for session: cc-<session-id>
+[intaris] Transitioning session to idle: cc-<session-id>
 ```
 
 ## Setup -- MCP Proxy (Approach B)

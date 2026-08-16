@@ -223,6 +223,16 @@ class EventBackend(Protocol):
         """
         ...
 
+    def available_seq_ranges(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> list[tuple[int, int]]:
+        """Return available chunk ranges ordered by start sequence."""
+        ...
+
     def delete_session(self, user_id: str, session_id: str) -> None:
         """Delete all event chunks for a session."""
         ...
@@ -484,6 +494,19 @@ class FilesystemEventBackend:
             return 0
         return chunks[-1][1]  # end_seq of last chunk
 
+    def available_seq_ranges(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> list[tuple[int, int]]:
+        chunks: list[tuple[int, int, Path]] = []
+        for session_dir in self._session_dir_candidates(user_id, session_id):
+            chunks.extend(self._list_chunks(session_dir))
+        chunks.sort(key=lambda chunk: chunk[0])
+        return [(start_seq, end_seq) for start_seq, end_seq, _ in chunks]
+
     def delete_session(self, user_id: str, session_id: str) -> None:
         for session_dir in self._session_dir_candidates(user_id, session_id):
             if session_dir.exists():
@@ -589,7 +612,13 @@ class S3EventBackend:
                 candidates.append(legacy)
         return candidates
 
-    def _list_chunks(self, user_id: str, session_id: str) -> list[tuple[int, int, str]]:
+    def _list_chunks(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> list[tuple[int, int, str]]:
         """List chunk objects sorted by start sequence.
 
         Returns list of (start_seq, end_seq, key) tuples.
@@ -598,7 +627,11 @@ class S3EventBackend:
         now = time.monotonic()
         with self._cache_lock:
             cached = self._chunk_cache.get(cache_key)
-            if cached is not None and now - cached[0] <= self._chunk_cache_ttl:
+            if (
+                not force_refresh
+                and cached is not None
+                and now - cached[0] <= self._chunk_cache_ttl
+            ):
                 self._chunk_cache_hits += 1
                 return list(cached[1])
             self._chunk_cache_misses += 1
@@ -932,6 +965,20 @@ class S3EventBackend:
         if not chunks:
             return 0
         return chunks[-1][1]  # end_seq of last chunk
+
+    def available_seq_ranges(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> list[tuple[int, int]]:
+        return [
+            (start_seq, end_seq)
+            for start_seq, end_seq, _ in self._list_chunks(
+                user_id, session_id, force_refresh=force_refresh
+            )
+        ]
 
     def delete_session(self, user_id: str, session_id: str) -> None:
         for prefix in self._prefix_candidates(user_id, session_id):

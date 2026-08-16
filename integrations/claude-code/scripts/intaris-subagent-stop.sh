@@ -30,9 +30,22 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
 AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
 AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null || true)
+STOP_HOOK_ACTIVE=$(echo "$INPUT" | jq -r '.stop_hook_active // false' 2>/dev/null || echo "false")
 
 if [ -z "$SESSION_ID" ] || [ -z "$AGENT_ID" ]; then
     log "Missing session_id or agent_id in SubagentStop input, skipping"
+    echo '{}'
+    exit 0
+fi
+
+# stop_hook_active=true means the subagent is continuing (e.g. another Stop
+# hook fed it feedback and it kept going) — it has not actually finished.
+# Signaling completion here would mark the child session "completed" and
+# delete its state file while the subagent still has calls in flight, which
+# then fall through to being evaluated against the wrong (parent) session.
+# Mirrors the same guard in intaris-stop.sh.
+if [ "$STOP_HOOK_ACTIVE" = "true" ]; then
+    log "stop_hook_active=true for agent $AGENT_ID, not completing child session"
     echo '{}'
     exit 0
 fi
@@ -109,7 +122,7 @@ if [ -f "$PARENT_FILE" ]; then
     acquire_lock "$PARENT_FILE" || { echo '{}'; exit 0; }
     if [ -f "$PARENT_FILE" ]; then
         UPDATED=$(jq --arg aid "$AGENT_ID" 'del(.subagents[$aid])' "$PARENT_FILE" 2>/dev/null || cat "$PARENT_FILE")
-        write_state "$PARENT_FILE" "$UPDATED"
+        [ -n "$UPDATED" ] && write_state "$PARENT_FILE" "$UPDATED"
     fi
     release_lock "$PARENT_FILE"
 fi

@@ -27,7 +27,7 @@ from intaris.events.backend import (
     _validate_path_component,
 )
 from intaris.events.cache import FilesystemEventChunkCache, NullEventChunkCache
-from intaris.events.store import VALID_EVENT_TYPES, EventStore
+from intaris.events.store import VALID_EVENT_TYPES, EventStore, _merge_seq_ranges
 from intaris.metrics import Histogram
 
 # ── Fixtures ──────────────────────────────────────────────────────────
@@ -180,6 +180,23 @@ class TestFilesystemEventBackend:
         assert len(result) == 2
         assert result[0]["seq"] == 1
         assert result[1]["seq"] == 2
+
+    def test_available_seq_ranges_uses_chunk_metadata(self, backend):
+        backend.append(
+            "alice",
+            "sess1",
+            [{"seq": 5, "ts": "t", "type": "message", "data": {}}],
+        )
+        backend.append(
+            "alice",
+            "sess1",
+            [
+                {"seq": 8, "ts": "t", "type": "message", "data": {}},
+                {"seq": 9, "ts": "t", "type": "message", "data": {}},
+            ],
+        )
+
+        assert backend.available_seq_ranges("alice", "sess1") == [(5, 5), (8, 9)]
 
     def test_append_and_read_with_full_email_characters(self, backend, fs_config):
         events = [
@@ -580,6 +597,72 @@ class TestEventStore:
     def test_append_empty_returns_empty(self, store):
         seqs = store.append("alice", "sess1", [])
         assert seqs == []
+
+    @pytest.mark.parametrize(
+        ("durable_last_seq", "chunks", "first_available_seq", "expected_gap"),
+        [
+            (0, [], None, None),
+            (4, [(1, 2), (3, 4)], 1, None),
+            (6, [(3, 4), (5, 6)], 3, (1, 2, "retention")),
+            (6, [(1, 2), (5, 6)], 1, (3, 4, "internal_gap")),
+            (6, [(1, 4)], 1, (5, 6, "internal_gap")),
+            (42, [], None, (1, 42, "retention")),
+        ],
+    )
+    def test_availability_semantics(
+        self,
+        store,
+        durable_last_seq,
+        chunks,
+        first_available_seq,
+        expected_gap,
+    ):
+        for start_seq, end_seq in chunks:
+            store._backend.append(
+                "alice",
+                "sess1",
+                [
+                    {"seq": seq, "ts": "t", "type": "message", "data": {}}
+                    for seq in range(start_seq, end_seq + 1)
+                ],
+            )
+
+        availability = store.availability(
+            "alice", "sess1", durable_last_seq=durable_last_seq
+        )
+
+        assert availability.last_seq == durable_last_seq
+        assert availability.first_available_seq == first_available_seq
+        if expected_gap is None:
+            assert availability.history_gap is None
+        else:
+            assert availability.history_gap is not None
+            assert (
+                availability.history_gap.from_seq,
+                availability.history_gap.to_seq,
+                availability.history_gap.reason,
+            ) == expected_gap
+
+    def test_availability_includes_buffered_events_without_suffix_gap(self, store):
+        store.append(
+            "alice",
+            "sess1",
+            [{"type": "message", "data": {}} for _ in range(3)],
+        )
+
+        availability = store.availability(
+            "alice", "sess1", durable_last_seq=store.last_seq("alice", "sess1")
+        )
+
+        assert availability.last_seq == 3
+        assert availability.first_available_seq == 1
+        assert availability.history_gap is None
+
+    def test_merge_seq_ranges_normalizes_adjacent_and_overlapping_ranges(self):
+        assert _merge_seq_ranges([(5, 7), (1, 3), (3, 5), (10, 10)]) == [
+            (1, 7),
+            (10, 10),
+        ]
 
     def test_seq_monotonic_across_appends(self, store):
         seqs1 = store.append("alice", "sess1", [{"type": "message", "data": {}}])
@@ -1736,6 +1819,89 @@ class TestS3EventBackendCache:
         assert first == second
         assert client.list_calls == 1
         assert backend.metrics()["chunk_cache_hits_total"] == 1
+
+    def test_available_seq_ranges_uses_cached_index_without_get(self):
+        client = self.FakeClient()
+        client.objects = [
+            "events/alice/session/seq_000003_000004.ndjson",
+            "events/alice/session/seq_000007_000009.ndjson",
+        ]
+        backend = self.backend(client)
+
+        assert backend.available_seq_ranges("alice", "session") == [(3, 4), (7, 9)]
+        assert backend.available_seq_ranges("alice", "session") == [(3, 4), (7, 9)]
+        assert client.list_calls == 1
+        assert backend.metrics()["get_requests_total"] == 0
+
+    def test_availability_refreshes_stale_index_that_trails_high_water(self, store):
+        client = self.FakeClient()
+        reader_backend = self.backend(client)
+        writer_backend = self.backend(client)
+        store._backend = reader_backend
+
+        assert reader_backend.available_seq_ranges("alice", "session") == []
+        writer_backend.append(
+            "alice",
+            "session",
+            [
+                {"seq": 1, "ts": "t", "type": "message", "data": {}},
+                {"seq": 2, "ts": "t", "type": "message", "data": {}},
+            ],
+        )
+
+        availability = store.availability("alice", "session", durable_last_seq=2)
+
+        assert availability.last_seq == 2
+        assert availability.first_available_seq == 1
+        assert availability.history_gap is None
+        assert reader_backend.metrics()["get_requests_total"] == 0
+        assert writer_backend.metrics()["get_requests_total"] == 0
+
+    @pytest.mark.parametrize(
+        ("objects", "durable_last_seq", "first_available_seq", "expected_gap"),
+        [
+            (
+                ["events/alice/session/seq_000003_000006.ndjson"],
+                6,
+                3,
+                (1, 2, "retention"),
+            ),
+            (
+                [
+                    "events/alice/session/seq_000001_000002.ndjson",
+                    "events/alice/session/seq_000005_000006.ndjson",
+                ],
+                6,
+                1,
+                (3, 4, "internal_gap"),
+            ),
+            ([], 42, None, (1, 42, "retention")),
+        ],
+    )
+    def test_s3_ranges_drive_availability_semantics(
+        self,
+        store,
+        objects,
+        durable_last_seq,
+        first_available_seq,
+        expected_gap,
+    ):
+        client = self.FakeClient()
+        client.objects = objects
+        store._backend = self.backend(client)
+
+        availability = store.availability(
+            "alice", "session", durable_last_seq=durable_last_seq
+        )
+
+        assert availability.first_available_seq == first_available_seq
+        assert availability.history_gap is not None
+        assert (
+            availability.history_gap.from_seq,
+            availability.history_gap.to_seq,
+            availability.history_gap.reason,
+        ) == expected_gap
+        assert store._backend.metrics()["get_requests_total"] == 0
 
     def test_append_reuses_discovered_prefix(self):
         client = self.FakeClient()

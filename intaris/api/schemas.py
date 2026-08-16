@@ -577,11 +577,29 @@ class EventAppendResponse(BaseModel):
     last_seq: int = Field(..., description="Last assigned sequence number")
 
 
+class EventHistoryGap(BaseModel):
+    """An unavailable range in the durable event history."""
+
+    from_seq: int = Field(..., ge=1, description="First unavailable sequence number")
+    to_seq: int = Field(..., ge=1, description="Last unavailable sequence number")
+    reason: Literal["retention", "internal_gap"] = Field(
+        ..., description="Why the event range is unavailable"
+    )
+
+
 class EventReadResponse(BaseModel):
     """Response from reading events."""
 
     events: list[dict[str, Any]] = Field(
         default_factory=list, description="Events ordered by seq"
     )
-    last_seq: int = Field(0, description="Last sequence number in response")
+    last_seq: int = Field(
+        0, description="Authoritative durable event sequence high-water"
+    )
+    first_available_seq: int | None = Field(
+        None, description="First sequence number still available, if any"
+    )
+    history_gap: EventHistoryGap | None = Field(
+        None, description="Earliest unavailable durable sequence range, if any"
+    )
     has_more: bool = Field(False, description="Whether more events exist")

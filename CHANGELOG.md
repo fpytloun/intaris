@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-08-16
+
+### Added
+
+- **Retained event history** -- Report the available history range for session events so clients can distinguish retained from unavailable records.
+- **Claude Code installer** -- Add an installer and hardened hook integration for Intaris guardrail sessions.
+
+### Fixed
+
+- **Event retrieval** -- Reconcile retained event availability and cache behavior when event history changes.
+- **Hook safety and concurrency** -- Close Claude Code guardrail bypass paths, preserve tool correlation, and prevent concurrent counter lost updates.
+- **Database responsiveness** -- Offload blocking database work from the API execution path.
+
+### Changed
+
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.9.0`.
+
 ## [0.8.0] - 2026-08-09
 
 ### Added

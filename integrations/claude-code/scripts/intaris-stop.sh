@@ -71,7 +71,7 @@ if [ -n "$LAST_MSG" ]; then
     acquire_lock "$SESSION_FILE" || { echo '{}'; exit 0; }
     if [ -f "$SESSION_FILE" ]; then
         UPDATED=$(jq --arg text "$LAST_MSG" '.last_assistant_text = $text' "$SESSION_FILE" 2>/dev/null || cat "$SESSION_FILE")
-        write_state "$SESSION_FILE" "$UPDATED"
+        [ -n "$UPDATED" ] && write_state "$SESSION_FILE" "$UPDATED"
     fi
     release_lock "$SESSION_FILE"
 fi
@@ -133,8 +133,11 @@ build_headers
 # -- Complete child sessions -------------------------------------------------
 
 if [ "$SUBAGENTS" != "{}" ] && [ "$SUBAGENTS" != "null" ]; then
-    # Iterate subagent mappings and signal completion for each
-    for agent_id in $(echo "$SUBAGENTS" | jq -r 'keys[]' 2>/dev/null); do
+    # Iterate subagent mappings and signal completion for each. Uses
+    # process substitution + `read -r` rather than unquoted `for x in $(...)`
+    # so an agent id is never subject to word-splitting or glob expansion.
+    while IFS= read -r agent_id; do
+        [ -z "$agent_id" ] && continue
         child_sid=$(echo "$SUBAGENTS" | jq -r --arg k "$agent_id" '.[$k]' 2>/dev/null || true)
         if [ -n "$child_sid" ]; then
             log "Completing child session: $child_sid (agent: $agent_id)"
@@ -176,7 +179,7 @@ if [ "$SUBAGENTS" != "{}" ] && [ "$SUBAGENTS" != "null" ]; then
             # Clean up child state file
             rm -f "$CHILD_FILE"
         fi
-    done
+    done < <(jq -r 'keys[]' <<< "$SUBAGENTS" 2>/dev/null || true)
 fi
 
 # -- Transition Parent Session To Idle (before transcript upload) -------------
@@ -212,54 +215,86 @@ log "Session idle signaled: $INTARIS_SESSION_ID"
 # -- Session Recording: upload transcript (best-effort, after completion) ----
 # Transcript upload runs after completion signals so session state is always
 # correct even if the hook is killed during upload (8s hook timeout).
+#
+# Stop fires once per assistant turn, not once per session, so a naive
+# "re-read and re-upload the whole file" approach re-uploads every prior
+# turn's lines on every subsequent turn (quadratic over a session) and used
+# to fork one jq process per JSONL line on top of that. Instead we persist
+# how many lines were already uploaded (transcript_upload_offset, in the
+# session state file) and only read/parse/upload the delta each time, using
+# a single jq process to parse the whole delta at once.
 
 if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
     TRANSCRIPT_PATH=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)
 
     if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
-        log "Uploading transcript from: $TRANSCRIPT_PATH"
+        TOTAL_LINES=$(wc -l < "$TRANSCRIPT_PATH" | tr -d ' ')
+        TOTAL_LINES=${TOTAL_LINES:-0}
 
-        CHUNK_SIZE=500
-        CHUNK="[]"
-        CHUNK_COUNT=0
-        TOTAL_UPLOADED=0
+        UPLOAD_OFFSET=0
+        if [ -f "$SESSION_FILE" ]; then
+            UPLOAD_OFFSET=$(jq -r '.transcript_upload_offset // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+        fi
+        case "$UPLOAD_OFFSET" in ''|*[!0-9]*) UPLOAD_OFFSET=0 ;; esac
 
-        while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            CHUNK=$(echo "$CHUNK" | jq --argjson entry "$line" \
-                '. + [{type: "transcript", data: $entry}]' 2>/dev/null || echo "$CHUNK")
-            CHUNK_COUNT=$((CHUNK_COUNT + 1))
+        # If the transcript is shorter than our recorded offset (rotated,
+        # truncated, or a stale offset from a different file), start over
+        # rather than skipping everything or reading a negative range.
+        if [ "$TOTAL_LINES" -lt "$UPLOAD_OFFSET" ]; then
+            log "Transcript shorter than recorded offset ($TOTAL_LINES < $UPLOAD_OFFSET) — resetting"
+            UPLOAD_OFFSET=0
+        fi
 
-            if [ "$CHUNK_COUNT" -ge "$CHUNK_SIZE" ]; then
+        if [ "$TOTAL_LINES" -gt "$UPLOAD_OFFSET" ]; then
+            log "Uploading transcript delta from: $TRANSCRIPT_PATH (lines $((UPLOAD_OFFSET + 1))-${TOTAL_LINES})"
+
+            CHUNK_SIZE=500
+
+            # Single jq process parses the whole delta at once instead of
+            # one process per line.
+            ALL_EVENTS=$(tail -n "+$((UPLOAD_OFFSET + 1))" "$TRANSCRIPT_PATH" | jq -c -R -s '
+                split("\n")
+                | map(select(length > 0))
+                | map((try fromjson catch null))
+                | map(select(. != null))
+                | map({type: "transcript", data: .})
+            ' 2>/dev/null || echo '[]')
+
+            NEW_COUNT=$(echo "$ALL_EVENTS" | jq 'length' 2>/dev/null || echo "0")
+
+            TOTAL_UPLOADED=0
+            i=0
+            while [ "$i" -lt "$NEW_COUNT" ]; do
+                CHUNK=$(echo "$ALL_EVENTS" | jq -c ".[$i:$((i + CHUNK_SIZE))]" 2>/dev/null || echo '[]')
                 curl -s --max-time 4 \
                     -X POST \
                     "${HEADERS[@]}" \
                     -H "X-Intaris-Source: claude-code" \
                     -d "$CHUNK" \
                     "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
-                TOTAL_UPLOADED=$((TOTAL_UPLOADED + CHUNK_COUNT))
-                CHUNK="[]"
-                CHUNK_COUNT=0
+                TOTAL_UPLOADED=$((TOTAL_UPLOADED + CHUNK_SIZE))
+                i=$((i + CHUNK_SIZE))
+            done
+
+            if [ "$NEW_COUNT" -gt 0 ]; then
+                log "Uploaded $NEW_COUNT transcript events"
+                curl -s --max-time 2 \
+                    -X POST \
+                    "${HEADERS[@]}" \
+                    "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events/flush" >/dev/null 2>&1 || true
             fi
-        done < "$TRANSCRIPT_PATH"
 
-        # Upload remaining events
-        if [ "$CHUNK_COUNT" -gt 0 ]; then
-            curl -s --max-time 4 \
-                -X POST \
-                "${HEADERS[@]}" \
-                -H "X-Intaris-Source: claude-code" \
-                -d "$CHUNK" \
-                "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
-            TOTAL_UPLOADED=$((TOTAL_UPLOADED + CHUNK_COUNT))
-        fi
-
-        if [ "$TOTAL_UPLOADED" -gt 0 ]; then
-            log "Uploaded $TOTAL_UPLOADED transcript events"
-            curl -s --max-time 2 \
-                -X POST \
-                "${HEADERS[@]}" \
-                "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events/flush" >/dev/null 2>&1 || true
+            # Advance the offset past every line we just read, regardless of
+            # whether it parsed as JSON, so a malformed line is never
+            # retried on every future turn.
+            acquire_lock "$SESSION_FILE" || true
+            if [ -f "$SESSION_FILE" ]; then
+                UPDATED_STATE=$(jq --argjson off "$TOTAL_LINES" '.transcript_upload_offset = $off' "$SESSION_FILE" 2>/dev/null || true)
+                [ -n "$UPDATED_STATE" ] && write_state "$SESSION_FILE" "$UPDATED_STATE"
+            fi
+            release_lock "$SESSION_FILE"
+        else
+            log "No new transcript lines to upload"
         fi
     else
         log "No transcript path available or file not found"

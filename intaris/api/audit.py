@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -44,7 +45,8 @@ async def list_audit(
 
     try:
         store = EventAuditStore(_get_db())
-        result = store.query(
+        result = await asyncio.to_thread(
+            store.query,
             user_id=ctx.user_id,
             source=source,
             session_id=session_id,
@@ -84,7 +86,9 @@ async def get_audit_record(
 
     try:
         store = AuditStore(_get_db())
-        record = store.get_by_call_id(call_id, user_id=ctx.user_id)
+        record = await asyncio.to_thread(
+            store.get_by_call_id, call_id, user_id=ctx.user_id
+        )
         return AuditRecord(**record)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e

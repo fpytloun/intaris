@@ -16,8 +16,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 from intaris.config import EventStoreConfig
 from intaris.events.backend import (
@@ -52,6 +53,40 @@ VALID_EVENT_TYPES = frozenset(
         "transcript",
     }
 )
+
+
+@dataclass(frozen=True)
+class EventHistoryGap:
+    """The earliest unavailable range in a durable event stream."""
+
+    from_seq: int
+    to_seq: int
+    reason: Literal["retention", "internal_gap"]
+
+
+@dataclass(frozen=True)
+class EventAvailability:
+    """Unfiltered durable event-stream availability."""
+
+    last_seq: int
+    first_available_seq: int | None
+    history_gap: EventHistoryGap | None
+
+
+def _merge_seq_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping and adjacent positive sequence ranges."""
+    normalized = sorted(
+        (max(1, start_seq), end_seq)
+        for start_seq, end_seq in ranges
+        if end_seq > 0 and end_seq >= start_seq
+    )
+    merged: list[tuple[int, int]] = []
+    for start_seq, end_seq in normalized:
+        if not merged or start_seq > merged[-1][1] + 1:
+            merged.append((start_seq, end_seq))
+            continue
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end_seq))
+    return merged
 
 
 class EventStore:
@@ -897,6 +932,113 @@ class EventStore:
             if current_seq is not None:
                 return current_seq
         return self._backend.last_seq(user_id, session_id)
+
+    def availability(
+        self,
+        user_id: str,
+        session_id: str,
+        *,
+        durable_last_seq: int | None = None,
+    ) -> EventAvailability:
+        """Return unfiltered availability relative to the durable high-water."""
+        key = (user_id, session_id)
+        with self._session_lock(key):
+            session_store = self._session_store
+            if durable_last_seq is None:
+                if session_store is None:
+                    raise RuntimeError(
+                        "Session store is required for authoritative availability"
+                    )
+                session = session_store.get(session_id, user_id=user_id)
+                durable_last_seq = int(session.get("last_event_seq") or 0)
+
+            persisted_ranges = self._backend.available_seq_ranges(user_id, session_id)
+            with self._lock:
+                buffered_events = list(self._buffers.get(key, []))
+
+            buffered_ranges = [
+                (seq, seq)
+                for event in buffered_events
+                if (seq := int(event.get("seq") or 0)) > 0
+            ]
+            observed_last_seq = max(
+                (end_seq for _, end_seq in persisted_ranges + buffered_ranges),
+                default=0,
+            )
+            if observed_last_seq > durable_last_seq and session_store is not None:
+                session_store.reconcile_event_high_water(
+                    session_id,
+                    user_id=user_id,
+                    last_event_seq=observed_last_seq,
+                    latest_user_message_seq=None,
+                )
+                session = session_store.get(session_id, user_id=user_id)
+                durable_last_seq = int(session.get("last_event_seq") or 0)
+
+            ranges = _merge_seq_ranges(persisted_ranges + buffered_ranges)
+            if durable_last_seq > 0 and (
+                not ranges or ranges[-1][1] < durable_last_seq
+            ):
+                persisted_ranges = self._backend.available_seq_ranges(
+                    user_id, session_id, force_refresh=True
+                )
+                ranges = _merge_seq_ranges(persisted_ranges + buffered_ranges)
+
+                refreshed_last_seq = max(
+                    (end_seq for _, end_seq in ranges),
+                    default=0,
+                )
+                if refreshed_last_seq > durable_last_seq and session_store is not None:
+                    session_store.reconcile_event_high_water(
+                        session_id,
+                        user_id=user_id,
+                        last_event_seq=refreshed_last_seq,
+                        latest_user_message_seq=None,
+                    )
+                    session = session_store.get(session_id, user_id=user_id)
+                    durable_last_seq = int(session.get("last_event_seq") or 0)
+
+            ranges = [
+                (start_seq, min(end_seq, durable_last_seq))
+                for start_seq, end_seq in ranges
+                if start_seq <= durable_last_seq
+            ]
+
+            if durable_last_seq == 0:
+                return EventAvailability(0, None, None)
+            if not ranges:
+                return EventAvailability(
+                    durable_last_seq,
+                    None,
+                    EventHistoryGap(1, durable_last_seq, "retention"),
+                )
+
+            first_available_seq = ranges[0][0]
+            if first_available_seq > 1:
+                return EventAvailability(
+                    durable_last_seq,
+                    first_available_seq,
+                    EventHistoryGap(1, first_available_seq - 1, "retention"),
+                )
+
+            previous_end = ranges[0][1]
+            for start_seq, end_seq in ranges[1:]:
+                if start_seq > previous_end + 1:
+                    return EventAvailability(
+                        durable_last_seq,
+                        first_available_seq,
+                        EventHistoryGap(
+                            previous_end + 1, start_seq - 1, "internal_gap"
+                        ),
+                    )
+                previous_end = max(previous_end, end_seq)
+
+            history_gap = None
+            if previous_end < durable_last_seq:
+                history_gap = EventHistoryGap(
+                    previous_end + 1, durable_last_seq, "internal_gap"
+                )
+            return EventAvailability(durable_last_seq, first_available_seq, history_gap)
 
     def flush_session(self, user_id: str, session_id: str) -> None:
         """Flush buffered events for a specific session to storage.

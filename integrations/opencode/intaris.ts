@@ -35,6 +35,7 @@
  */
 
 import type { Plugin } from "@opencode-ai/plugin"
+import { realpathSync } from "node:fs"
 
 interface RecordingEvent {
   type: string
@@ -451,12 +452,32 @@ export const IntarisPlugin: Plugin = async ({ client, worktree, directory }) => 
    * common OS temp directories, and $TMPDIR so transient scratch
    * artifacts created by shell commands do not look out-of-policy.
    */
+  // Adds `${dir}/*` plus its resolved physical-path form if that differs.
+  // On macOS, /tmp, /var/tmp and $TMPDIR are symlinks into /private/... —
+  // a literal "/tmp/*" pattern never matches an already-resolved real path
+  // like /private/tmp/claude-501/.../scratchpad, which is exactly where
+  // Claude Code's own tool scratchpad lives (the equivalent gap exists for
+  // opencode's own tool-scratch paths under $TMPDIR). Silently falls back
+  // to the literal form only if the directory doesn't exist or can't be
+  // resolved.
+  function globPatternsFor(dir: string): string[] {
+    const literal = dir.replace(/\/$/, "")
+    const patterns = [`${literal}/*`]
+    try {
+      const real = realpathSync(literal).replace(/\/$/, "")
+      if (real && real !== literal) patterns.push(`${real}/*`)
+    } catch {
+      // Directory doesn't exist yet — literal form only.
+    }
+    return patterns
+  }
+
   function buildPolicy(): Record<string, any> | null {
     const home = process.env.HOME || process.env.USERPROFILE || ""
-    const builtinPaths: string[] = ["/tmp/*", "/var/tmp/*"]
+    const builtinPaths: string[] = [...globPatternsFor("/tmp"), ...globPatternsFor("/var/tmp")]
     const tmpDir = process.env.TMPDIR
     if (tmpDir) {
-      builtinPaths.push(`${tmpDir.replace(/\/$/, "")}/*`)
+      builtinPaths.push(...globPatternsFor(tmpDir))
     }
     if (home) {
       builtinPaths.push(`${home}/.local/share/opencode/*`)

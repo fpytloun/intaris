@@ -18,3 +18,8 @@ env/
 node_modules/
 package-lock.json
 runs
+
+# Per-directory Claude Code settings created by running `claude` with cwd
+# inside this repo (e.g. integrations/claude-code/scripts/) — not part of
+# any integration, just local IDE-ish state.
+**/.claude/settings.local.json

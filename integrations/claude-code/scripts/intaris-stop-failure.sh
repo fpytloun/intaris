@@ -52,7 +52,7 @@ if [ -n "$LAST_MSG" ]; then
     acquire_lock "$SESSION_FILE" || { echo '{}'; exit 0; }
     if [ -f "$SESSION_FILE" ]; then
         UPDATED=$(jq --arg text "$LAST_MSG" '.last_assistant_text = $text' "$SESSION_FILE" 2>/dev/null || cat "$SESSION_FILE")
-        write_state "$SESSION_FILE" "$UPDATED"
+        [ -n "$UPDATED" ] && write_state "$SESSION_FILE" "$UPDATED"
     fi
     release_lock "$SESSION_FILE"
 

@@ -56,14 +56,17 @@ async def declare_intention(
         # Validate parent session exists and belongs to the same user
         if request.parent_session_id:
             try:
-                store.get(request.parent_session_id, user_id=ctx.user_id)
+                await asyncio.to_thread(
+                    store.get, request.parent_session_id, user_id=ctx.user_id
+                )
             except ValueError:
                 raise HTTPException(
                     status_code=404,
                     detail=(f"Parent session {request.parent_session_id} not found"),
                 )
 
-        store.create(
+        await asyncio.to_thread(
+            store.create,
             user_id=ctx.user_id,
             session_id=request.session_id,
             intention=request.intention,
@@ -152,7 +155,7 @@ async def get_session(
 
     try:
         store = SessionStore(_get_db())
-        session = store.get(session_id, user_id=ctx.user_id)
+        session = await asyncio.to_thread(store.get, session_id, user_id=ctx.user_id)
         return SessionResponse(**session)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
@@ -211,7 +214,8 @@ async def list_sessions(
 
     try:
         store = SessionStore(_get_db())
-        result = store.list_sessions(
+        result = await asyncio.to_thread(
+            store.list_sessions,
             user_id=ctx.user_id,
             status=status,
             agent_id=agent_id,
@@ -261,7 +265,8 @@ async def update_session(
 
     try:
         store = SessionStore(_get_db())
-        session = store.update_session(
+        session = await asyncio.to_thread(
+            store.update_session,
             session_id,
             user_id=ctx.user_id,
             details=request.details,
@@ -309,7 +314,8 @@ async def update_session_status(
 
     try:
         store = SessionStore(_get_db())
-        store.update_status(
+        await asyncio.to_thread(
+            store.update_status,
             session_id,
             request.status,
             user_id=ctx.user_id,
@@ -376,7 +382,8 @@ async def update_session_status(
             if bg_worker is not None and bg_worker.analyzer_ready:
                 try:
                     tq = bg_worker._task_queue
-                    tq.enqueue(
+                    await asyncio.to_thread(
+                        tq.enqueue,
                         "summary",
                         ctx.user_id,
                         session_id=session_id,

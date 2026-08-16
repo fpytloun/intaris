@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -36,11 +37,10 @@ async def whoami() -> dict:
     }
 
 
-@router.get("/stats")
-async def stats(
+def _compute_stats(
     request: Request,
-    ctx: SessionContext = Depends(get_session_context),
-    agent_id: str | None = Query(None, description="Filter by agent_id"),
+    ctx: SessionContext,
+    agent_id: str | None,
 ) -> dict:
     """Return aggregated statistics for the dashboard.
 
@@ -262,6 +262,16 @@ async def stats(
             status_code=500,
             detail="Internal error computing stats",
         )
+
+
+@router.get("/stats")
+async def stats(
+    request: Request,
+    ctx: SessionContext = Depends(get_session_context),
+    agent_id: str | None = Query(None, description="Filter by agent_id"),
+) -> dict:
+    """Return dashboard statistics without blocking the ASGI event loop."""
+    return await asyncio.to_thread(_compute_stats, request, ctx, agent_id)
 
 
 def _get_analysis_stats(

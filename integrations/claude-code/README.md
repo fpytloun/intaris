@@ -44,6 +44,7 @@ export INTARIS_FAIL_OPEN=false             # optional, defaults to false
 export INTARIS_INTENTION=""                # optional, auto-generated from cwd
 export INTARIS_ALLOW_PATHS=~/src           # optional, appended after built-in safe paths
 export INTARIS_CHECKPOINT_INTERVAL=25      # optional, defaults to 25 (0=disabled)
+export INTARIS_HOOK_TIMEOUT=60             # optional, must match the PreToolUse timeout in hooks.json (seconds)
 export INTARIS_ESCALATION_TIMEOUT=55       # optional, max seconds to wait for approval
 export INTARIS_SESSION_RECORDING=false     # optional, enable session recording
 export INTARIS_DEBUG=false                 # optional, enable stderr logging
@@ -55,11 +56,12 @@ export INTARIS_DEBUG=false                 # optional, enable stderr logging
 | `INTARIS_API_KEY` | (empty) | API key for authentication. **Required** if Intaris has `INTARIS_API_KEYS` set. |
 | `INTARIS_AGENT_ID` | `claude-code` | Agent ID sent to Intaris |
 | `INTARIS_USER_ID` | (empty) | User ID (optional if API key maps to a user) |
-| `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed only when Intaris is unreachable or returns transient `5xx` errors. Client/auth/schema errors still block. Default is `false` (fail-closed). |
-| `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"Claude Code coding session in <cwd>"` |
-| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories to allow reads from without LLM evaluation. Supports `~` expansion. Intaris always includes `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set. User entries are appended after normalization. |
+| `INTARIS_FAIL_OPEN` | `false` | If `true`, tool calls proceed **even when** Intaris is unreachable or returns transient `5xx` errors. Client/auth/schema errors still block. Default is `false` (fail-closed) — and a crash anywhere in the hook before a decision is printed also denies, via a fail-closed exit trap, rather than being treated as a non-blocking hook error. |
+| `INTARIS_INTENTION` | (auto) | Session intention override. Default: `"Claude Code coding session in <cwd>"`, refreshed from each user prompt on `UserPromptSubmit` if unset. |
+| `INTARIS_ALLOW_PATHS` | (empty) | Comma-separated parent directories to allow reads from without LLM evaluation. Supports `~` expansion. Intaris always includes `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set — plus each of those directories' resolved physical path (e.g. `/private/tmp/*` on macOS, where `/tmp` is a symlink) if it differs from the literal form. User entries are appended after normalization. |
 | `INTARIS_CHECKPOINT_INTERVAL` | `25` | Number of evaluate calls between periodic checkpoints. Set to `0` to disable checkpoints. Each checkpoint consumes one rate limit slot. |
-| `INTARIS_ESCALATION_TIMEOUT` | `55` | Max seconds to wait for escalation or suspension approval. The hard ceiling is 60s (the PreToolUse hook timeout). Set to `0` to use the hook timeout as the ceiling. |
+| `INTARIS_HOOK_TIMEOUT` | `60` | The PreToolUse hook's actual configured timeout in seconds — must match the `timeout` value for `PreToolUse` in `hooks.json`. Used to derive the internal safety budget (a 5s margin below this) so the hook always exits with its own deny/allow before Claude Code kills it outright. |
+| `INTARIS_ESCALATION_TIMEOUT` | `55` | Max seconds to wait for escalation or suspension approval. The hard ceiling is `INTARIS_HOOK_TIMEOUT` minus a 5s margin. Set to `0` to use that ceiling directly. |
 | `INTARIS_SESSION_RECORDING` | `false` | Enable session recording. When `true`, tool calls, results, and user messages are recorded to the event store for playback and analysis. |
 | `INTARIS_DEBUG` | `false` | Enable debug logging to stderr |
 
@@ -107,7 +109,7 @@ Look for `[intaris]` messages in stderr:
 [intaris] Evaluating: Bash
 [intaris] Bash: approve (fast, 12ms, risk=)
 [intaris] Sending checkpoint #1
-[intaris] Signaling completion for session: cc-<session-id>
+[intaris] Transitioning session to idle: cc-<session-id>
 ```
 
 ### Migration from Previous Version
@@ -146,19 +148,20 @@ Configure upstream MCP servers in Intaris (via the UI, REST API, or `MCP_CONFIG_
 
 ### Hooks Flow
 
-1. **`SessionStart`** (on startup/resume/clear/compact): Creates an Intaris session via `POST /api/v1/intention` with the working directory as context. On resume (409 conflict), re-activates the existing session. Stores session state as JSON in a temp file.
-2. **`UserPromptSubmit`** (on every user message): Forwards the user's prompt to `POST /api/v1/reasoning` with the assistant's last response as context. This enables Intaris's IntentionBarrier to track what the user is asking the agent to do.
+1. **`SessionStart`** (on startup/resume/clear/compact): Creates an Intaris session via `POST /api/v1/intention` with the working directory and allow-paths policy as context. On resume (409 conflict), re-activates the existing session and re-sends the policy too (so editing `INTARIS_ALLOW_PATHS` takes effect on the next `/clear` or `/compact`, not just on a brand-new session). Stores session state as JSON in a temp file.
+2. **`UserPromptSubmit`** (on every user message): Resumes the session to `active`, refreshes the session intention from the prompt text, and forwards the prompt to `POST /api/v1/reasoning` with the assistant's last response as context — entirely in a backgrounded, disowned subshell so the prompt is never held up waiting on any of it. This enables Intaris's IntentionBarrier to track what the user is asking the agent to do.
 3. **`PreToolUse`** (before every tool call):
    - Loads session state from the JSON temp file (or creates one lazily)
    - Calls `POST /api/v1/evaluate` with retry and exponential backoff
    - **approve**: outputs `{}` (allow)
    - **deny**: outputs deny decision via `hookSpecificOutput` (blocks execution)
-   - **escalate**: polls `GET /api/v1/audit/{call_id}` for judge/human approval
+   - **escalate**: polls `GET /api/v1/audit/{call_id}` for judge/human approval; a timeout denies with a `systemMessage` and a link into the Intaris UI, since the wait is otherwise silent
    - **suspended**: polls `GET /api/v1/session/{id}` for reactivation
    - **terminated**: blocks with termination reason
-   - Updates session statistics (call count, decision breakdown, recent tools)
+   - Updates session statistics (call count, decision breakdown, recent tools, `call_id_map`) by recomputing them from the state file's current contents inside the write's lock, not a pre-`/evaluate` snapshot, so concurrent tool calls can't lose each other's increments
    - Sends periodic checkpoints via `POST /api/v1/checkpoint` (every N calls)
-4. **`PostToolUse`** (after every tool call): Records `tool_result` events for session recording (fire-and-forget).
+   - A fail-closed exit trap guarantees a decision is always emitted: if the script exits unexpectedly (missing `jq`, a crash, a future bug) before printing one, the trap forces a deny — or an allow only if `INTARIS_FAIL_OPEN=true`
+4. **`PostToolUse`** (after every tool call): Records a `tool_result` event, correlated to its `PreToolUse` call via `tool_use_id` (looked up in the state file's `call_id_map`) rather than by matching tool name + arguments, which mis-attributed results under Claude Code's routine parallel tool calls. Backgrounded and disowned, like all recording calls.
 5. **`SubagentStart`** (when a sub-agent spawns): Creates a child Intaris session linked to the parent via `parent_session_id`. Enables hierarchical session tracking and AlignmentBarrier enforcement.
 6. **`SubagentStop`** (when a sub-agent finishes): Signals child session completion and sends an agent summary with sub-agent statistics.
 7. **`Stop`** (when Claude finishes responding):
@@ -182,11 +185,11 @@ When a tool call is escalated, the `PreToolUse` hook polls for resolution only i
 2. If the returned decision is still `escalate`, the hook receives a `call_id` and enters the polling loop
 3. The hook checks `GET /api/v1/audit/{call_id}` with exponential backoff (2s, 4s, 8s, 16s, 30s cap)
 4. If a human approves/denies in the Intaris UI, the hook returns immediately
-5. If `INTARIS_ESCALATION_TIMEOUT` is reached, the hook denies with a message directing the user to the Intaris UI
+5. If `INTARIS_ESCALATION_TIMEOUT` is reached, the hook denies. The deny includes both a `systemMessage` (surfaced directly in the terminal, so the wait is no longer silent) and a link into the Intaris UI for that session (`{INTARIS_URL}/?session_id=...`), which opens a modal showing the session's audit records
 
-Built-in cross-project read defaults for the hooks are always present: `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set. `INTARIS_ALLOW_PATHS` adds more prefixes on top of those defaults.
+Built-in cross-project read defaults for the hooks are always present: `/tmp/*`, `/var/tmp/*`, `$TMPDIR/*` when `TMPDIR` is set, and `~/.claude/plans/*` when `HOME` is set — plus each of those directories' resolved physical path (e.g. `/private/tmp/*` on macOS) if it differs from the literal form. `INTARIS_ALLOW_PATHS` adds more prefixes on top of those defaults.
 
-**Known limitation**: The PreToolUse hook timeout is 60s. Escalation approval must complete within this window. The default `INTARIS_ESCALATION_TIMEOUT=55` leaves a 5s margin. If approval takes longer, the user must retry the tool call after approving in the UI.
+**Known limitation**: The PreToolUse hook timeout is `INTARIS_HOOK_TIMEOUT` (default 60s). Escalation approval must complete within roughly that window minus a 5s margin. The default `INTARIS_ESCALATION_TIMEOUT=55` leaves that margin at the default timeout. If approval takes longer, the user must retry the tool call after approving in the UI. On timeout the hook denies rather than falling back to `permissionDecision:"ask"` — under `permissions.defaultMode: "bypassPermissions"`, an "ask" hook result resolves to a silent **allow** before Claude Code ever surfaces a prompt, which would defeat the guardrail for exactly the sessions most likely to have that mode set.
 
 ## Sub-Agent Support
 
@@ -212,9 +215,9 @@ When `INTARIS_SESSION_RECORDING=true`, the hooks record events to the Intaris ev
 
 ### How it works
 
-Unlike the OpenCode plugin (which buffers events client-side), the Claude Code hooks send events directly on each invocation since bash scripts are stateless. Each hook call sends 1-2 events via `POST /session/{id}/events`. The server-side EventStore buffers and consolidates these into chunks.
+Unlike the OpenCode plugin (which buffers events client-side and flushes on a size/interval timer), the Claude Code hooks send events directly on each invocation since each hook is a separate, short-lived bash process with nowhere to run a background timer. Each hook call sends 1-2 events via `POST /session/{id}/events`, backgrounded and disowned so the curl runs after the hook has already returned its decision. The server-side EventStore buffers and consolidates these into chunks.
 
-Recording is completely non-blocking -- all recording API calls are fire-and-forget with 2s timeouts. Recording failures never block tool execution.
+Recording is completely non-blocking -- all recording API calls are backgrounded, fire-and-forget, with 2s timeouts. Recording failures never block tool execution, and (since they're backgrounded) never add their own latency to the hook either.
 
 ### Enable recording
 
@@ -266,6 +269,9 @@ The hooks use JSON state files to track session state across hook invocations. S
   "denied": 3,
   "escalated": 1,
   "recent_tools": ["Bash", "Edit", "Read"],
+  "call_id_map": [
+    {"tool_use_id": "toolu_abc123", "call_id": "9f2e..."}
+  ],
   "cwd": "/path/to/project",
   "last_assistant_text": "I've completed the refactoring...",
   "subagents": {
@@ -274,11 +280,13 @@ The hooks use JSON state files to track session state across hook invocations. S
 }
 ```
 
+`call_id_map` (last 10 entries) lets `PostToolUse` look up the exact Intaris `call_id` for a result by the tool call's `tool_use_id`, since Claude Code's `PostToolUse` payload never actually includes a `call_id` field.
+
 State files are created by `SessionStart` and cleaned up by `SessionEnd`. Sub-agent state files follow the pattern `intaris_state_{session_id}_{agent_id}.json`.
 
 ### Concurrency
 
-All state file operations use file locking (`flock` with `mkdir` fallback) and atomic writes (write to `.tmp` then `mv`) to prevent corruption from concurrent hook invocations (e.g., parallel tool calls).
+All state file operations use `mkdir`-based file locking (atomic on POSIX; a lock older than 30s is treated as abandoned and reclaimed, bounded to a handful of attempts so a genuinely stuck lock can't spin forever) and atomic writes (write to a unique `mktemp` file, then `mv`) to prevent corruption from concurrent hook invocations (e.g., parallel tool calls). Counters (call count, approve/deny/escalate breakdown, recent tools, the `call_id_map`) are recomputed from the state file's on-disk contents inside the same lock hold as the write, not from a snapshot read before the network call to Intaris, so concurrent invocations can't lose each other's increments.
 
 ### Cleanup
 
@@ -315,7 +323,7 @@ scripts/
 - **All tool calls allowed**: If using `INTARIS_FAIL_OPEN=true`, Intaris may be unreachable. Check connectivity.
 - **Slow first tool call**: If `SessionStart` didn't fire, the first `PreToolUse` creates a session (~1-2s) before evaluating.
 - **Double evaluation**: If you see each tool call evaluated twice, you may have both hooks and MCP proxy configured. Use only one approach.
-- **`jq` not found**: The scripts require `jq` for JSON processing. Install it: `brew install jq` (macOS) or `apt install jq` (Linux). All hooks exit gracefully if `jq` is not available.
+- **`jq` not found**: The scripts require `jq` for JSON processing. Install it: `brew install jq` (macOS) or `apt install jq` (Linux). Most hooks exit gracefully (`{}`, no-op) if `jq` is missing — except `PreToolUse`, which denies the tool call (exit 2, with a reason on stderr) rather than silently allowing it, since the fail-closed guarantee has to hold even when the JSON tooling it would normally use to express that isn't available.
 - **Checkpoints not appearing**: Verify `INTARIS_CHECKPOINT_INTERVAL` is not set to `0`. Check that the rate limit is not exhausted (checkpoints share the budget with evaluate calls).
 - **Stop or SessionEnd hook not firing**: If Claude Code crashes or is killed, either hook may not fire. The `StopFailure` hook handles API errors. The server's background sweep handles abnormal exits by transitioning idle sessions after `SESSION_IDLE_TIMEOUT_MINUTES`.
 - **Escalation timeout**: If escalations always time out, check that the judge is configured (`JUDGE_MODE`) or that you can access the Intaris UI to approve/deny. The default 55s timeout can be adjusted via `INTARIS_ESCALATION_TIMEOUT`.

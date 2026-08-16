@@ -470,9 +470,32 @@ requires a positive `limit`. Results are returned in chronological order with
     {"seq": 1, "ts": "2026-03-12T10:00:00.123Z", "type": "message", "source": "user", "data": {...}}
   ],
   "last_seq": 42,
+  "first_available_seq": 1,
+  "history_gap": null,
   "has_more": true
 }
 ```
+
+`last_seq` is the authoritative durable sequence high-water for the session.
+`first_available_seq` is the first sequence that remains in event storage or
+the active write buffer. It is `null` when no events are available.
+
+`history_gap` reports the earliest unavailable durable range. A prefix gap has
+the reason `retention`. A hole between available ranges, or after the last
+available range, has the reason `internal_gap`. For example:
+
+```json
+{
+  "events": [],
+  "last_seq": 42,
+  "first_available_seq": null,
+  "history_gap": {"from_seq": 1, "to_seq": 42, "reason": "retention"},
+  "has_more": false
+}
+```
+
+Availability metadata always describes the unfiltered event stream. Event
+filters and pagination only change `events` and `has_more`.
 
 ### POST /session/{session_id}/events/flush
 

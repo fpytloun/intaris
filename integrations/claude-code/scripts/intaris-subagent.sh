@@ -152,7 +152,7 @@ acquire_lock "$PARENT_FILE" || { echo '{}'; exit 0; }
 if [ -f "$PARENT_FILE" ]; then
     UPDATED=$(jq --arg aid "$AGENT_ID" --arg csid "$CHILD_SESSION_ID" \
         '.subagents[$aid] = $csid' "$PARENT_FILE" 2>/dev/null || cat "$PARENT_FILE")
-    write_state "$PARENT_FILE" "$UPDATED"
+    [ -n "$UPDATED" ] && write_state "$PARENT_FILE" "$UPDATED"
 fi
 release_lock "$PARENT_FILE"
 

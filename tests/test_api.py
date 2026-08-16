@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import os
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -857,6 +858,158 @@ class TestSessionEvents:
         data = resp.json()
         assert data["events"] == []
         assert data["last_seq"] == 3
+        assert data["first_available_seq"] == 1
+        assert data["history_gap"] is None
+
+    def test_never_used_event_stream_reports_no_availability(self, client_no_auth):
+        headers = {"X-User-Id": "events-never-used", "X-Agent-Id": "agent-1"}
+        session_id = "sess-events-never-used"
+        _create_session(client_no_auth, session_id, headers)
+
+        from intaris.server import _get_db
+
+        event_store = client_no_auth.app.state.event_store
+        event_store.flush_session(headers["X-User-Id"], session_id)
+        event_store._backend.delete_session(headers["X-User-Id"], session_id)
+        with _get_db().cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_event_seq = 0 "
+                "WHERE user_id = ? AND session_id = ?",
+                (headers["X-User-Id"], session_id),
+            )
+
+        response = client_no_auth.get(
+            f"/api/v1/session/{session_id}/events", headers=headers
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["events"] == []
+        assert payload["last_seq"] == 0
+        assert payload["first_available_seq"] is None
+        assert payload["history_gap"] is None
+
+    def test_preexisting_chunks_reconcile_zero_durable_high_water(self, client_no_auth):
+        headers = {"X-User-Id": "events-legacy", "X-Agent-Id": "agent-1"}
+        session_id = "sess-events-legacy"
+        _create_session(client_no_auth, session_id, headers)
+
+        from intaris.server import _get_db
+
+        event_store = client_no_auth.app.state.event_store
+        event_store.flush_session(headers["X-User-Id"], session_id)
+        persisted_last_seq = event_store._backend.last_seq(
+            headers["X-User-Id"], session_id
+        )
+        assert persisted_last_seq > 0
+        with _get_db().cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_event_seq = 0 "
+                "WHERE user_id = ? AND session_id = ?",
+                (headers["X-User-Id"], session_id),
+            )
+
+        response = client_no_auth.get(
+            f"/api/v1/session/{session_id}/events", headers=headers
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["last_seq"] == persisted_last_seq
+        assert payload["first_available_seq"] == 1
+        assert payload["history_gap"] is None
+        with _get_db().cursor() as cur:
+            cur.execute(
+                "SELECT last_event_seq FROM sessions "
+                "WHERE user_id = ? AND session_id = ?",
+                (headers["X-User-Id"], session_id),
+            )
+            assert int(cur.fetchone()["last_event_seq"]) == persisted_last_seq
+
+    def test_all_deleted_event_stream_reports_durable_high_water(self, client_no_auth):
+        headers = {"X-User-Id": "events-all-deleted", "X-Agent-Id": "agent-1"}
+        session_id = "sess-events-all-deleted"
+        _create_session(client_no_auth, session_id, headers)
+
+        from intaris.server import _get_db
+
+        event_store = client_no_auth.app.state.event_store
+        event_store.flush_session(headers["X-User-Id"], session_id)
+        event_store._backend.delete_session(headers["X-User-Id"], session_id)
+        with _get_db().cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_event_seq = 42 "
+                "WHERE user_id = ? AND session_id = ?",
+                (headers["X-User-Id"], session_id),
+            )
+
+        response = client_no_auth.get(
+            f"/api/v1/session/{session_id}/events", headers=headers
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["events"] == []
+        assert payload["last_seq"] == 42
+        assert payload["first_available_seq"] is None
+        assert payload["history_gap"] == {
+            "from_seq": 1,
+            "to_seq": 42,
+            "reason": "retention",
+        }
+
+    @pytest.mark.parametrize(
+        ("chunks", "expected_first", "expected_gap"),
+        [
+            ([(3, 4), (5, 6)], 3, {"from_seq": 1, "to_seq": 2, "reason": "retention"}),
+            (
+                [(1, 2), (5, 6)],
+                1,
+                {"from_seq": 3, "to_seq": 4, "reason": "internal_gap"},
+            ),
+        ],
+    )
+    def test_event_read_reports_chunk_gaps(
+        self, client_no_auth, chunks, expected_first, expected_gap
+    ):
+        suffix = expected_gap["reason"].replace("_", "-")
+        user_id = f"events-{suffix}"
+        session_id = f"sess-events-{suffix}"
+        headers = {"X-User-Id": user_id, "X-Agent-Id": "agent-1"}
+        _create_session(client_no_auth, session_id, headers)
+
+        from intaris.server import _get_db
+
+        event_store = client_no_auth.app.state.event_store
+        event_store.flush_session(user_id, session_id)
+        event_store._backend.delete_session(user_id, session_id)
+        for start_seq, end_seq in chunks:
+            event_store._backend.append(
+                user_id,
+                session_id,
+                [
+                    {"seq": seq, "ts": "t", "type": "message", "data": {}}
+                    for seq in range(start_seq, end_seq + 1)
+                ],
+            )
+        with _get_db().cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET last_event_seq = 6 "
+                "WHERE user_id = ? AND session_id = ?",
+                (user_id, session_id),
+            )
+
+        response = client_no_auth.get(
+            f"/api/v1/session/{session_id}/events?type=evaluation",
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["events"] == []
+        assert payload["last_seq"] == 6
+        assert payload["first_available_seq"] == expected_first
+        assert payload["history_gap"] == expected_gap
 
     def test_append_events_idempotency_key_replay(self, client_no_auth):
         headers = {
@@ -2019,6 +2172,38 @@ class TestWhoami:
 class TestStats:
     """Tests for GET /stats."""
 
+    @pytest.mark.asyncio
+    async def test_stats_computation_does_not_block_event_loop(self, monkeypatch):
+        """Slow database aggregates must run outside the ASGI event loop."""
+        from intaris.api import info
+        from intaris.api.deps import SessionContext
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_compute(request, ctx, agent_id):
+            started.set()
+            assert release.wait(timeout=2)
+            return {"total_sessions": 0}
+
+        monkeypatch.setattr(info, "_compute_stats", blocking_compute)
+        task = asyncio.create_task(
+            info.stats(
+                SimpleNamespace(),
+                SessionContext(user_id="user-stats", agent_id=None, user_bound=False),
+                None,
+            )
+        )
+
+        try:
+            assert await asyncio.to_thread(started.wait, 1)
+            await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+            assert task.done() is False
+        finally:
+            release.set()
+
+        assert await task == {"total_sessions": 0}
+
     def test_stats_empty(self, client_no_auth):
         """Stats with no data returns zero counts."""
         resp = client_no_auth.get(
@@ -2145,6 +2330,64 @@ class TestStats:
                 users = resp.json()["users"]
                 # Bound user should only see their own ID
                 assert users == ["bound-user"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("module_name", "handler_name", "store_path", "method_name", "args"),
+    [
+        (
+            "intaris.api.audit",
+            "get_audit_record",
+            "intaris.audit.AuditStore",
+            "get_by_call_id",
+            ("call-id",),
+        ),
+        (
+            "intaris.api.intention",
+            "get_session",
+            "intaris.session.SessionStore",
+            "get",
+            ("session-id",),
+        ),
+    ],
+)
+async def test_database_reads_do_not_block_event_loop(
+    monkeypatch, module_name, handler_name, store_path, method_name, args
+):
+    """Database-backed API reads must run outside the ASGI event loop."""
+    import importlib
+
+    from fastapi import HTTPException
+
+    import intaris.server as srv
+    from intaris.api.deps import SessionContext
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocking_read(self, *method_args, **method_kwargs):
+        started.set()
+        assert release.wait(timeout=2)
+        raise ValueError("not found")
+
+    monkeypatch.setattr(f"{store_path}.{method_name}", blocking_read)
+    monkeypatch.setattr(srv, "_get_db", lambda: object())
+    module = importlib.import_module(module_name)
+    handler = getattr(module, handler_name)
+    ctx = SessionContext(user_id="user-read", agent_id=None, user_bound=False)
+    task = asyncio.create_task(handler(*args, ctx))
+
+    try:
+        assert await asyncio.to_thread(started.wait, 1)
+        await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        assert task.done() is False
+    finally:
+        release.set()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await task
+    assert exc_info.value.status_code == 404
 
 
 class TestConfig:

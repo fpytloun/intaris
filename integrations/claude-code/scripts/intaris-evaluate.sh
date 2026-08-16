@@ -31,6 +31,7 @@
 #   INTARIS_INTENTION            - Session intention override (default: auto-generated)
 #   INTARIS_ALLOW_PATHS          - Comma-separated parent directories to allow reads from
 #   INTARIS_CHECKPOINT_INTERVAL  - Evaluate calls between checkpoints (default: 25, 0=disabled)
+#   INTARIS_HOOK_TIMEOUT         - PreToolUse hook timeout in seconds, must match hooks.json (default: 60)
 #   INTARIS_ESCALATION_TIMEOUT   - Max seconds to wait for escalation approval (default: 55)
 #   INTARIS_SESSION_RECORDING    - Enable session recording (default: false)
 #   INTARIS_DEBUG                - Enable debug logging to stderr (default: false)
@@ -40,24 +41,68 @@ set -euo pipefail
 # Source shared library
 . "$(dirname "$0")/intaris-lib.sh"
 
+# Fail-closed safety net: if this script exits for any reason (crash, unset
+# variable, a future bug) without having emitted a decision via
+# allow_tool/deny_tool/deny_tool_raw, force a decision here instead of
+# letting Claude Code's "empty stdout + non-blocking exit" default silently
+# allow the tool. Registered before require_jq so even a jq-related crash
+# during startup is covered.
+_intaris_evaluate_failclosed_exit() {
+    if [ "${DECISION_EMITTED:-0}" != "1" ]; then
+        if [ "${INTARIS_FAIL_OPEN:-false}" = "true" ]; then
+            echo "[intaris] PreToolUse hook exited unexpectedly — allowing (INTARIS_FAIL_OPEN=true)" >&2
+            echo '{}'
+            exit 0
+        else
+            echo "[intaris] PreToolUse hook exited unexpectedly without a decision — blocking (INTARIS_FAIL_OPEN=false)" >&2
+            exit 2
+        fi
+    fi
+}
+register_exit_hook _intaris_evaluate_failclosed_exit
+
 if ! require_jq; then
-    deny_tool "[intaris] jq is required for PreToolUse enforcement but is not installed"
-    exit 0
+    deny_tool_raw "jq is required for PreToolUse enforcement but is not installed"
 fi
 
 # Record hook start time for timing budget
 HOOK_START=$(date +%s)
 
+# Derive the internal safety budget from INTARIS_HOOK_TIMEOUT (the actual
+# configured PreToolUse hook timeout) instead of a hardcoded constant that
+# used to equal INTARIS_ESCALATION_TIMEOUT's own default — which made the
+# "escalation timeout" and "hook limit reached" deny messages fire under
+# identical conditions, and meant INTARIS_ESCALATION_TIMEOUT=0 ("wait for
+# the full hook timeout") was still silently capped at 55s regardless of
+# the real configured timeout. Leave a 5s margin so this script always
+# exits cleanly with its own deny/allow before Claude Code kills it.
+HOOK_BUDGET_SECONDS=$((INTARIS_HOOK_TIMEOUT - 5))
+[ "$HOOK_BUDGET_SECONDS" -lt 5 ] && HOOK_BUDGET_SECONDS=5
+
+# The /evaluate call itself must leave enough of the budget for at least a
+# couple of escalation/suspension polls afterward, or a slow evaluate that
+# returns "escalate" can burn most of the budget before polling even starts.
+EVAL_MAX_TIME=$((HOOK_BUDGET_SECONDS - 10))
+[ "$EVAL_MAX_TIME" -lt 5 ] && EVAL_MAX_TIME=5
+
 # Read hook input from stdin
 INPUT=$(cat)
 
-# Extract fields from the hook input
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
-TOOL_INPUT=$(echo "$INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
-CWD=$(echo "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
-# Subagent context: agent_id is present when hook fires inside a subagent
-HOOK_AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
+# Extract fields from the hook input. The four scalars are pulled in one jq
+# call via a raw (-r, unescaped) join on a control character that cannot
+# appear in a session/tool/path name, then split with `read` — 1 process
+# instead of 4. tool_input stays its own call: it's a JSON object, and
+# jq's @tsv/@csv formatters add their own backslash-escaping that bash's
+# `read` does not undo, so packing arbitrary JSON through that path would
+# risk corrupting it. Plain -r output (used here) does no such re-escaping.
+IFS=$'\x1f' read -r SESSION_ID TOOL_NAME CWD HOOK_AGENT_ID <<< "$(jq -r \
+    '[(.session_id // ""), (.tool_name // ""), (.cwd // ""), (.agent_id // "")] | join("\u001f")' \
+    <<< "$INPUT" 2>/dev/null || true)"
+TOOL_INPUT=$(jq -c '.tool_input // {}' <<< "$INPUT" 2>/dev/null || echo '{}')
+# tool_use_id correlates this PreToolUse call with its matching PostToolUse
+# call (see the call_id_map state field below), so intaris-record.sh does
+# not have to guess which evaluate call a result belongs to.
+TOOL_USE_ID=$(jq -r '.tool_use_id // ""' <<< "$INPUT" 2>/dev/null || true)
 
 if [ -z "$TOOL_NAME" ]; then
     log "No tool_name in hook input, allowing"
@@ -81,6 +126,7 @@ APPROVED=0
 DENIED=0
 ESCALATED=0
 RECENT_TOOLS="[]"
+CALL_ID_MAP="[]"
 
 # Load state from a JSON state file into the global variables.
 # Usage: load_state_from "path/to/state.json"
@@ -89,12 +135,20 @@ load_state_from() {
     local file="$1"
     [ ! -f "$file" ] && return 1
     acquire_lock "$file" || return 1
-    INTARIS_SESSION_ID=$(jq -r '.session_id // empty' "$file" 2>/dev/null || true)
-    CALL_COUNT=$(jq -r '.call_count // 0' "$file" 2>/dev/null || echo "0")
-    APPROVED=$(jq -r '.approved // 0' "$file" 2>/dev/null || echo "0")
-    DENIED=$(jq -r '.denied // 0' "$file" 2>/dev/null || echo "0")
-    ESCALATED=$(jq -r '.escalated // 0' "$file" 2>/dev/null || echo "0")
+    # 5 scalar counters in one jq call instead of 5 (join()/read(), same
+    # rationale as the hook-input extraction above: -r raw output does no
+    # backslash re-escaping, unlike @tsv, so this is safe for read to split).
+    local fields
+    fields=$(jq -r \
+        '[(.session_id // ""), (.call_count // 0 | tostring), (.approved // 0 | tostring), (.denied // 0 | tostring), (.escalated // 0 | tostring)] | join("")' \
+        "$file" 2>/dev/null || true)
+    IFS=$'\x1f' read -r INTARIS_SESSION_ID CALL_COUNT APPROVED DENIED ESCALATED <<< "$fields"
+    CALL_COUNT=${CALL_COUNT:-0}
+    APPROVED=${APPROVED:-0}
+    DENIED=${DENIED:-0}
+    ESCALATED=${ESCALATED:-0}
     RECENT_TOOLS=$(jq -c '.recent_tools // []' "$file" 2>/dev/null || echo "[]")
+    CALL_ID_MAP=$(jq -c '.call_id_map // []' "$file" 2>/dev/null || echo "[]")
     release_lock "$file"
     return 0
 }
@@ -126,14 +180,21 @@ fi
 # Load parent state if we haven't loaded child state
 if [ -z "$INTARIS_SESSION_ID" ] && [ -f "$SESSION_FILE" ]; then
     acquire_lock "$SESSION_FILE" || true
-    # Try JSON format first (new format)
-    if jq -e '.session_id' "$SESSION_FILE" >/dev/null 2>&1; then
-        INTARIS_SESSION_ID=$(jq -r '.session_id // empty' "$SESSION_FILE" 2>/dev/null || true)
-        CALL_COUNT=$(jq -r '.call_count // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
-        APPROVED=$(jq -r '.approved // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
-        DENIED=$(jq -r '.denied // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
-        ESCALATED=$(jq -r '.escalated // 0' "$SESSION_FILE" 2>/dev/null || echo "0")
+    # One combined jq call covers both the "is this the new JSON format"
+    # check and the 5 scalar reads: a non-empty session_id in the parsed
+    # output means it parsed as JSON and had the field, which is exactly
+    # what the old separate `jq -e '.session_id'` probe was testing.
+    fields=$(jq -r \
+        '[(.session_id // ""), (.call_count // 0 | tostring), (.approved // 0 | tostring), (.denied // 0 | tostring), (.escalated // 0 | tostring)] | join("")' \
+        "$SESSION_FILE" 2>/dev/null || true)
+    IFS=$'\x1f' read -r INTARIS_SESSION_ID CALL_COUNT APPROVED DENIED ESCALATED <<< "$fields"
+    if [ -n "$INTARIS_SESSION_ID" ]; then
+        CALL_COUNT=${CALL_COUNT:-0}
+        APPROVED=${APPROVED:-0}
+        DENIED=${DENIED:-0}
+        ESCALATED=${ESCALATED:-0}
         RECENT_TOOLS=$(jq -c '.recent_tools // []' "$SESSION_FILE" 2>/dev/null || echo "[]")
+        CALL_ID_MAP=$(jq -c '.call_id_map // []' "$SESSION_FILE" 2>/dev/null || echo "[]")
     else
         # Legacy format: plain session ID or session_id:count
         LEGACY=$(cat "$SESSION_FILE" 2>/dev/null || true)
@@ -193,6 +254,7 @@ if [ -z "$INTARIS_SESSION_ID" ]; then
             denied: 0,
             escalated: 0,
             recent_tools: [],
+            call_id_map: [],
             cwd: $cwd,
             last_assistant_text: "",
             subagents: {}
@@ -223,7 +285,7 @@ HTTP_CODE="000"
 run_evaluate() {
     local body="$1"
     local response
-    response=$(curl -s --max-time 45 \
+    response=$(curl -s --max-time "$EVAL_MAX_TIME" \
         -w "\n%{http_code}" \
         -X POST \
         "${HEADERS[@]}" \
@@ -277,36 +339,57 @@ STATUS_REASON=$(echo "$BODY" | jq -r '.status_reason // ""' 2>/dev/null || echo 
 log "$TOOL_NAME: $DECISION ($PATH_TYPE, ${LATENCY}ms, risk=$RISK)"
 
 # -- Update Session State ----------------------------------------------------
+#
+# Recompute counters from the state file's CURRENT on-disk contents under
+# this lock, not the CALL_COUNT/APPROVED/DENIED/ESCALATED values read
+# earlier (before the possibly-45s /evaluate call). Claude Code issues
+# concurrent tool calls routinely; incrementing a snapshot taken before a
+# long network call and writing it back loses whatever increments another
+# invocation wrote in between. Recomputing from the file itself, entirely
+# inside a single lock hold, closes that race.
 
-CALL_COUNT=$((CALL_COUNT + 1))
-case "$DECISION" in
-    approve) APPROVED=$((APPROVED + 1)) ;;
-    deny) DENIED=$((DENIED + 1)) ;;
-    escalate) ESCALATED=$((ESCALATED + 1)) ;;
-esac
-
-# Update recent tools (keep last 10)
-RECENT_TOOLS=$(echo "$RECENT_TOOLS" | jq --arg t "$TOOL_NAME" '(. + [$t])[-10:]' 2>/dev/null || echo "[]")
-
-# Write updated state (preserve existing fields like last_assistant_text, subagents)
 acquire_lock "$SESSION_FILE" || true
 if [ -f "$SESSION_FILE" ]; then
     UPDATED_STATE=$(jq \
-        --argjson cc "$CALL_COUNT" \
-        --argjson ap "$APPROVED" \
-        --argjson dn "$DENIED" \
-        --argjson es "$ESCALATED" \
-        --argjson rt "$RECENT_TOOLS" \
+        --arg decision "$DECISION" \
         --arg tool "$TOOL_NAME" \
-        --argjson tool_input "$TOOL_INPUT" \
-        --arg call_id "$CALL_ID" \
-        '.call_count = $cc | .approved = $ap | .denied = $dn | .escalated = $es | .recent_tools = $rt | .last_tool_name = $tool | .last_tool_input = $tool_input | .last_call_id = $call_id' \
-        "$SESSION_FILE" 2>/dev/null)
+        --arg tid "$TOOL_USE_ID" \
+        --arg cid "$CALL_ID" \
+        '.call_count = ((.call_count // 0) + 1)
+         | (if $decision == "approve" then .approved = ((.approved // 0) + 1)
+            elif $decision == "deny" then .denied = ((.denied // 0) + 1)
+            elif $decision == "escalate" then .escalated = ((.escalated // 0) + 1)
+            else . end)
+         | .recent_tools = (((.recent_tools // []) + [$tool])[-10:])
+         | .call_id_map = (if $tid != "" then (((.call_id_map // []) + [{tool_use_id: $tid, call_id: $cid}])[-10:]) else (.call_id_map // []) end)' \
+        "$SESSION_FILE" 2>/dev/null || true)
     if [ -n "$UPDATED_STATE" ]; then
         write_state "$SESSION_FILE" "$UPDATED_STATE"
+        # Read back the authoritative post-write values for the checkpoint
+        # logic below — they may differ from the pre-evaluate snapshot.
+        CALL_COUNT=$(jq -r '.call_count // 0' <<< "$UPDATED_STATE" 2>/dev/null || echo "$CALL_COUNT")
+        APPROVED=$(jq -r '.approved // 0' <<< "$UPDATED_STATE" 2>/dev/null || echo "$APPROVED")
+        DENIED=$(jq -r '.denied // 0' <<< "$UPDATED_STATE" 2>/dev/null || echo "$DENIED")
+        ESCALATED=$(jq -r '.escalated // 0' <<< "$UPDATED_STATE" 2>/dev/null || echo "$ESCALATED")
+        RECENT_TOOLS=$(jq -c '.recent_tools // []' <<< "$UPDATED_STATE" 2>/dev/null || echo "$RECENT_TOOLS")
     fi
 else
-    # State file disappeared — recreate
+    # State file disappeared — recreate with a fresh count of 1, since there
+    # is no on-disk state to increment from.
+    CALL_COUNT=1
+    APPROVED=0
+    DENIED=0
+    ESCALATED=0
+    case "$DECISION" in
+        approve) APPROVED=1 ;;
+        deny) DENIED=1 ;;
+        escalate) ESCALATED=1 ;;
+    esac
+    RECENT_TOOLS=$(jq -n --arg t "$TOOL_NAME" '[$t]')
+    CALL_ID_MAP="[]"
+    if [ -n "$TOOL_USE_ID" ]; then
+        CALL_ID_MAP=$(jq -n --arg tid "$TOOL_USE_ID" --arg cid "$CALL_ID" '[{tool_use_id: $tid, call_id: $cid}]')
+    fi
     write_state "$SESSION_FILE" "$(jq -n \
         --arg sid "$INTARIS_SESSION_ID" \
         --argjson cc "$CALL_COUNT" \
@@ -314,11 +397,9 @@ else
         --argjson dn "$DENIED" \
         --argjson es "$ESCALATED" \
         --argjson rt "$RECENT_TOOLS" \
-        --arg tool "$TOOL_NAME" \
-        --argjson tool_input "$TOOL_INPUT" \
-        --arg call_id "$CALL_ID" \
+        --argjson cidmap "$CALL_ID_MAP" \
         --arg cwd "$CWD" \
-        '{session_id: $sid, call_count: $cc, approved: $ap, denied: $dn, escalated: $es, recent_tools: $rt, cwd: $cwd, last_assistant_text: "", last_tool_name: $tool, last_tool_input: $tool_input, last_call_id: $call_id, subagents: {}}')"
+        '{session_id: $sid, call_count: $cc, approved: $ap, denied: $dn, escalated: $es, recent_tools: $rt, call_id_map: $cidmap, cwd: $cwd, last_assistant_text: "", subagents: {}}')"
 fi
 release_lock "$SESSION_FILE"
 
@@ -335,11 +416,14 @@ if [ "$INTARIS_CHECKPOINT_INTERVAL" -gt 0 ] 2>/dev/null && [ $((CALL_COUNT % INT
         '{session_id: $sid, content: $content}')
 
     log "Sending checkpoint #${CHECKPOINT_NUM}"
-    curl -s --max-time 2 \
+    # Backgrounded (and disowned) so this fire-and-forget call doesn't add
+    # its own round-trip latency to the tool call's PreToolUse hook.
+    ( curl -s --max-time 2 \
         -X POST \
         "${HEADERS[@]}" \
         -d "$CHECKPOINT_BODY" \
-        "${INTARIS_URL}/api/v1/checkpoint" >/dev/null 2>&1 || true
+        "${INTARIS_URL}/api/v1/checkpoint" >/dev/null 2>&1 || true ) &
+    disown
 fi
 
 # -- Session Recording (fire-and-forget) ------------------------------------
@@ -362,25 +446,30 @@ if [ "$INTARIS_SESSION_RECORDING" = "true" ]; then
             }
         }]')
 
-    curl -s --max-time 2 \
+    # Backgrounded (and disowned) — this recording call runs before the
+    # allow/deny decision is even printed below, so leaving it synchronous
+    # added its own round-trip to every recorded tool call.
+    ( curl -s --max-time 2 \
         -X POST \
         "${HEADERS[@]}" \
         -H "X-Intaris-Source: claude-code" \
         -d "$RECORD_BODY" \
-        "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
+        "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true ) &
+    disown
 fi
 
 # -- Helper: Check Timing Budget --------------------------------------------
 
 # Returns 0 if we still have time, 1 if we should exit.
-# This is the outer safety ceiling (55s from hook entry) that prevents the
-# hook from being killed by Claude Code's 60s timeout. The user-configured
+# This is the outer safety ceiling (HOOK_BUDGET_SECONDS from hook entry,
+# derived from INTARIS_HOOK_TIMEOUT) that prevents the hook from being
+# killed by Claude Code's own hook timeout. The user-configured
 # INTARIS_ESCALATION_TIMEOUT is checked separately inside each polling loop.
 check_timing_budget() {
     local now
     now=$(date +%s)
     local elapsed=$((now - HOOK_START))
-    if [ $elapsed -ge 55 ]; then
+    if [ $elapsed -ge "$HOOK_BUDGET_SECONDS" ]; then
         return 1
     fi
     return 0
@@ -388,14 +477,15 @@ check_timing_budget() {
 
 persist_last_recorded_call() {
     local persisted_call_id="$1"
+    [ -z "$TOOL_USE_ID" ] && return 0
     acquire_lock "$SESSION_FILE" || true
     if [ -f "$SESSION_FILE" ]; then
-        UPDATED_STATE=$(jq \
-            --arg tool "$TOOL_NAME" \
-            --argjson tool_input "$TOOL_INPUT" \
-            --arg call_id "$persisted_call_id" \
-            '.last_tool_name = $tool | .last_tool_input = $tool_input | .last_call_id = $call_id' \
-            "$SESSION_FILE" 2>/dev/null)
+        local existing_map
+        existing_map=$(jq -c '.call_id_map // []' "$SESSION_FILE" 2>/dev/null || echo "[]")
+        local new_map
+        new_map=$(echo "$existing_map" | jq --arg tid "$TOOL_USE_ID" --arg cid "$persisted_call_id" \
+            '(. + [{tool_use_id: $tid, call_id: $cid}])[-10:]' 2>/dev/null || echo "[]")
+        UPDATED_STATE=$(jq --argjson cidmap "$new_map" '.call_id_map = $cidmap' "$SESSION_FILE" 2>/dev/null)
         if [ -n "$UPDATED_STATE" ]; then
             write_state "$SESSION_FILE" "$UPDATED_STATE"
         fi
@@ -468,6 +558,14 @@ reactivate_completed_session() {
     handle_reactivation_decision "$re_decision" "$re_reasoning" "$re_call_id" "$re_session_status" "$re_status_reason"
 }
 
+# A deep link into the Intaris UI for this session (opens the Sessions tab
+# with a modal showing this session's audit records — confirmed against
+# intaris/ui/static/js/app.js's handleDeepLink, which supports ?session_id=
+# but not a direct per-call_id link).
+intaris_ui_session_url() {
+    printf '%s/?session_id=%s' "${INTARIS_URL%/}" "$INTARIS_SESSION_ID"
+}
+
 # -- Handle Session Suspension -----------------------------------------------
 
 handle_suspension() {
@@ -482,13 +580,13 @@ handle_suspension() {
         if [ "$INTARIS_ESCALATION_TIMEOUT" -gt 0 ] 2>/dev/null; then
             local elapsed=$(($(date +%s) - HOOK_START))
             if [ $elapsed -ge "$INTARIS_ESCALATION_TIMEOUT" ]; then
-                deny_tool "[intaris] Session suspension timeout: $status_reason. Reactivate or terminate in the Intaris UI."
+                deny_tool "[intaris] Session suspension timeout: $status_reason. Reactivate or terminate in the Intaris UI: $(intaris_ui_session_url)" \
+                    "Intaris paused this session and it was not reactivated in time. Reactivate or terminate it in the Intaris UI, then retry: $(intaris_ui_session_url)"
                 exit 0
             fi
         fi
 
-        local delay=${poll_backoff[$poll_attempt]}
-        [ -z "$delay" ] && delay=30
+        local delay=${poll_backoff[$poll_attempt]:-30}
         sleep "$delay"
         poll_attempt=$((poll_attempt + 1))
 
@@ -540,11 +638,22 @@ handle_suspension() {
     done
 
     # Timing budget exhausted
-    deny_tool "[intaris] Session suspension timeout (hook limit reached): $status_reason. Reactivate in the Intaris UI."
+    deny_tool "[intaris] Session suspension timeout (hook limit reached): $status_reason. Reactivate in the Intaris UI: $(intaris_ui_session_url)" \
+        "Intaris paused this session and it was not reactivated in time. Reactivate it in the Intaris UI, then retry: $(intaris_ui_session_url)"
     exit 0
 }
 
 # -- Handle Escalation -------------------------------------------------------
+#
+# On timeout this denies rather than falling back to
+# hookSpecificOutput.permissionDecision:"ask". That was considered and
+# deliberately dropped: under `permissions.defaultMode: "bypassPermissions"`
+# (a common Claude Code config, including for whoever is reading this),
+# Claude Code's permission classifier resolves to "allow" before an "ask"
+# hook result is ever consulted — so "ask" would silently ALLOW the tool
+# call the guardrail was trying to escalate, in both interactive and
+# headless sessions. Denying on timeout is the only option here that can't
+# quietly defeat itself depending on the caller's permission mode.
 
 handle_escalation() {
     local call_id="$1"
@@ -560,13 +669,13 @@ handle_escalation() {
         if [ "$INTARIS_ESCALATION_TIMEOUT" -gt 0 ] 2>/dev/null; then
             local elapsed=$(($(date +%s) - HOOK_START))
             if [ $elapsed -ge "$INTARIS_ESCALATION_TIMEOUT" ]; then
-                deny_tool "[intaris] ESCALATION TIMEOUT ($call_id): $reasoning. Approve or deny in the Intaris UI, then retry."
+                deny_tool "[intaris] ESCALATION TIMEOUT ($call_id): $reasoning. Approve or deny in the Intaris UI, then retry: $(intaris_ui_session_url)" \
+                    "Intaris escalated this tool call for review and it was not resolved in time. Approve or deny it in the Intaris UI, then retry the tool call: $(intaris_ui_session_url)"
                 exit 0
             fi
         fi
 
-        local delay=${poll_backoff[$poll_attempt]}
-        [ -z "$delay" ] && delay=30
+        local delay=${poll_backoff[$poll_attempt]:-30}
         sleep "$delay"
         poll_attempt=$((poll_attempt + 1))
 
@@ -620,7 +729,8 @@ handle_escalation() {
     done
 
     # Timing budget exhausted
-    deny_tool "[intaris] ESCALATED ($call_id): $reasoning. Approve or deny in the Intaris UI, then retry."
+    deny_tool "[intaris] ESCALATED ($call_id): $reasoning. Approve or deny in the Intaris UI, then retry: $(intaris_ui_session_url)" \
+        "Intaris escalated this tool call for review and it was not resolved in time. Approve or deny it in the Intaris UI, then retry the tool call: $(intaris_ui_session_url)"
     exit 0
 }
 

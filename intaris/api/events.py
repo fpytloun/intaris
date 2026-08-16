@@ -677,11 +677,31 @@ async def read_events(
         has_more = True
         events = events[:limit]
 
-    last_seq = await asyncio.to_thread(event_store.last_seq, ctx.user_id, session_id)
+    try:
+        availability = await asyncio.to_thread(
+            event_store.availability, ctx.user_id, session_id
+        )
+    except Exception as e:
+        logger.exception(
+            "Failed to read event availability for %s/%s", ctx.user_id, session_id
+        )
+        raise HTTPException(
+            status_code=500, detail=f"Failed to read event availability: {e}"
+        )
 
     return EventReadResponse(
         events=events,
-        last_seq=last_seq,
+        last_seq=availability.last_seq,
+        first_available_seq=availability.first_available_seq,
+        history_gap=(
+            {
+                "from_seq": availability.history_gap.from_seq,
+                "to_seq": availability.history_gap.to_seq,
+                "reason": availability.history_gap.reason,
+            }
+            if availability.history_gap is not None
+            else None
+        ),
         has_more=has_more,
     )
 

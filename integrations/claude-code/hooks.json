@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-session.sh",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-prompt.sh",
-            "timeout": 10000
+            "timeout": 10
           }
         ]
       }
@@ -29,7 +29,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-evaluate.sh",
-            "timeout": 60000
+            "timeout": 60
           }
         ]
       }
@@ -40,7 +40,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-record.sh",
-            "timeout": 3000
+            "timeout": 3
           }
         ]
       }
@@ -51,7 +51,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-subagent.sh",
-            "timeout": 5000
+            "timeout": 5
           }
         ]
       }
@@ -62,7 +62,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-subagent-stop.sh",
-            "timeout": 8000
+            "timeout": 8
           }
         ]
       }
@@ -73,7 +73,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-stop.sh",
-            "timeout": 8000
+            "timeout": 8
           }
         ]
       }
@@ -84,7 +84,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-stop-failure.sh",
-            "timeout": 3000
+            "timeout": 3
           }
         ]
       }
@@ -95,7 +95,7 @@
           {
             "type": "command",
             "command": "~/.claude/scripts/intaris-session-end.sh",
-            "timeout": 3000
+            "timeout": 3
           }
         ]
       }

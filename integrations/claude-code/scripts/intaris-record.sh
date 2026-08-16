@@ -46,6 +46,8 @@ TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty' 2>/dev/null || true)
 TOOL_INPUT=$(echo "$INPUT" | jq -c '.tool_input // {}' 2>/dev/null || echo '{}')
 TOOL_RESPONSE=$(echo "$INPUT" | jq -c '.tool_response // null' 2>/dev/null || echo 'null')
 CALL_ID=$(echo "$INPUT" | jq -r '.call_id // empty' 2>/dev/null || true)
+TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
+DURATION_MS=$(echo "$INPUT" | jq -r '.duration_ms // empty' 2>/dev/null || true)
 # Subagent context
 HOOK_AGENT_ID=$(echo "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)
 
@@ -87,12 +89,16 @@ if [ -z "$INTARIS_SESSION_ID" ]; then
     exit 0
 fi
 
-if [ -z "$CALL_ID" ] && [ -f "$SESSION_FILE" ]; then
-    STATE_TOOL_NAME=$(jq -r '.last_tool_name // empty' "$SESSION_FILE" 2>/dev/null || true)
-    STATE_TOOL_INPUT=$(jq -c '.last_tool_input // {}' "$SESSION_FILE" 2>/dev/null || echo '{}')
-    if [ "$STATE_TOOL_NAME" = "$TOOL_NAME" ] && [ "$STATE_TOOL_INPUT" = "$TOOL_INPUT" ]; then
-        CALL_ID=$(jq -r '.last_call_id // empty' "$SESSION_FILE" 2>/dev/null || true)
-    fi
+# Look up this call's Intaris call_id by tool_use_id (set by
+# intaris-evaluate.sh's PreToolUse call_id_map). Claude Code never actually
+# sends a `call_id` field on PostToolUse — the field read above always
+# comes back empty — so this is the real correlation path, replacing a
+# previous heuristic that matched on tool name + args and mis-attributed
+# results under Claude Code's routine parallel tool calls.
+if [ -z "$CALL_ID" ] && [ -n "$TOOL_USE_ID" ] && [ -f "$SESSION_FILE" ]; then
+    CALL_ID=$(jq -r --arg tid "$TOOL_USE_ID" \
+        '(.call_id_map // []) | map(select(.tool_use_id == $tid)) | last | .call_id // empty' \
+        "$SESSION_FILE" 2>/dev/null || true)
 fi
 
 build_headers
@@ -103,11 +109,13 @@ EVENT_BODY=$(jq -n \
     --arg call_id "$CALL_ID" \
     --argjson args "$TOOL_INPUT" \
     --argjson output "$TOOL_RESPONSE" \
+    --argjson duration_ms "${DURATION_MS:-null}" \
     '[{
         type: "tool_result",
         data: {
             tool: $tool,
             call_id: $call_id,
+            duration_ms: $duration_ms,
             args: $args,
             output: $output
         }
@@ -115,13 +123,15 @@ EVENT_BODY=$(jq -n \
 
 log "Recording tool_result for: $TOOL_NAME"
 
-# Send event (fire-and-forget, 2s timeout)
+# Output empty first, then send the event backgrounded (and disowned) —
+# this hook's only job is this one fire-and-forget POST, so there is no
+# reason to hold PostToolUse open for up to 2s waiting on it.
+echo '{}'
+
 curl -s --max-time 2 \
     -X POST \
     "${HEADERS[@]}" \
     -H "X-Intaris-Source: claude-code" \
     -d "$EVENT_BODY" \
-    "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 || true
-
-# Output empty (recording never blocks)
-echo '{}'
+    "${INTARIS_URL}/api/v1/session/${INTARIS_SESSION_ID}/events" >/dev/null 2>&1 &
+disown
