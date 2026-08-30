@@ -13,7 +13,7 @@ import os
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -164,13 +164,18 @@ def test_event_reconciliation_is_deferred_at_startup(env_no_auth):
         assert app.state.event_reconciliation_task is None
 
 
-def test_search_initialization_disables_vector_tier(monkeypatch):
-    """Startup must not import or initialize the optional vector backend."""
+def test_search_initialization_preserves_configured_vector_tier(monkeypatch):
+    """Deferred initialization must retain the configured vector backend."""
     import intaris.server as srv
     from intaris.config import SearchConfig
 
     captured = {}
-    service = SimpleNamespace(lexical_backend="sqlite", vector_backend_name="disabled")
+    registered_services = []
+    service = SimpleNamespace(
+        lexical_backend="sqlite",
+        vector_backend_name="qdrant",
+        start=AsyncMock(),
+    )
     app = SimpleNamespace(state=SimpleNamespace(search_initializing=True))
 
     def build_search_service(db, config):
@@ -179,14 +184,68 @@ def test_search_initialization_disables_vector_tier(monkeypatch):
 
     monkeypatch.setattr(srv, "_build_search_service", build_search_service)
     monkeypatch.setattr(srv, "_get_db", lambda: object())
+    from intaris import analyzer
+    from intaris.audit import AuditStore
+
+    monkeypatch.setattr(
+        analyzer,
+        "set_search_service",
+        lambda registered: registered_services.append(registered),
+    )
+    monkeypatch.setattr(
+        AuditStore,
+        "set_search_service",
+        lambda registered: registered_services.append(registered),
+    )
 
     config = SearchConfig()
     config.vector_provider = "qdrant"
     config.embedding_model = "test-embedding-model"
     asyncio.run(srv._initialize_search(app, config))
 
-    assert captured["config"].vector_provider == "disabled"
+    assert captured["config"] is config
+    assert captured["config"].vector_provider == "qdrant"
+    service.start.assert_awaited_once()
+    assert registered_services == [service, service]
     assert app.state.search_service is service
+    assert app.state.search_initializing is False
+
+
+def test_search_initialization_clears_hooks_when_indexer_start_fails(monkeypatch):
+    """A failed indexer must not leave writers bound to a stopped service."""
+    import intaris.server as srv
+    from intaris.config import SearchConfig
+
+    registered_services = []
+    service = SimpleNamespace(
+        lexical_backend="sqlite",
+        vector_backend_name="qdrant",
+        start=AsyncMock(side_effect=RuntimeError("indexer unavailable")),
+        stop=AsyncMock(),
+    )
+    app = SimpleNamespace(state=SimpleNamespace(search_initializing=True))
+
+    monkeypatch.setattr(srv, "_build_search_service", lambda db, config: service)
+    monkeypatch.setattr(srv, "_get_db", lambda: object())
+    from intaris import analyzer
+    from intaris.audit import AuditStore
+
+    monkeypatch.setattr(
+        analyzer,
+        "set_search_service",
+        lambda registered: registered_services.append(registered),
+    )
+    monkeypatch.setattr(
+        AuditStore,
+        "set_search_service",
+        lambda registered: registered_services.append(registered),
+    )
+
+    asyncio.run(srv._initialize_search(app, SearchConfig()))
+
+    service.stop.assert_awaited_once()
+    assert registered_services == [service, service, None, None]
+    assert app.state.search_service is None
     assert app.state.search_initializing is False
 
 

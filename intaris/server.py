@@ -14,7 +14,6 @@ import logging
 import os
 import sys
 import time
-from dataclasses import replace
 from typing import Any
 
 import uvicorn
@@ -609,13 +608,8 @@ async def _stop_task(task: asyncio.Task[None] | None, *, timeout: float) -> None
 
 async def _initialize_search(app, config: SearchConfig) -> None:
     """Initialize optional search after the HTTP server starts serving."""
+    search_service = None
     try:
-        if config.vector_enabled():
-            logger.warning(
-                "Search vector tier is disabled at runtime to keep Intaris startup "
-                "responsive; lexical search remains available"
-            )
-            config = replace(config, vector_provider="disabled")
         search_service = await asyncio.to_thread(
             _build_search_service, _get_db(), config
         )
@@ -632,10 +626,37 @@ async def _initialize_search(app, config: SearchConfig) -> None:
         return
 
     app.state.search_service = search_service
-    app.state.search_initializing = False
     api_app = getattr(app.state, "_api_app", None)
     if api_app is not None:
         api_app.state.search_service = search_service
+
+    # Wire writers before the indexer starts. Writes during the remaining
+    # startup interval enqueue durable work for the indexer to process.
+    from intaris import analyzer as _analyzer
+    from intaris.audit import AuditStore as _AuditStore
+
+    _AuditStore.set_search_service(search_service)
+    _analyzer.set_search_service(search_service)
+
+    try:
+        await search_service.start()
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        app.state.search_service = None
+        app.state.search_initializing = False
+        if api_app is not None:
+            api_app.state.search_service = None
+            api_app.state.search_initializing = False
+        _AuditStore.set_search_service(None)
+        _analyzer.set_search_service(None)
+        with contextlib.suppress(Exception):
+            await search_service.stop()
+        logger.exception("Search indexer failed to start; continuing without search")
+        return
+
+    app.state.search_initializing = False
+    if api_app is not None:
         api_app.state.search_initializing = False
     logger.info(
         "Search initialized (lexical=%s, vector=%s)",
