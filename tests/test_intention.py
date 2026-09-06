@@ -2053,6 +2053,296 @@ class TestIntentionSourceColumn:
             ]
         }
 
+    @pytest.mark.parametrize(
+        ("args", "context", "expected"),
+        [
+            (
+                {"command": "touch marker", "workdir": "/target/worktree"},
+                {
+                    "working_directory": "/active/worktree",
+                    "executor_environment": {"cwd": "/executor/cwd"},
+                },
+                "/target/worktree",
+            ),
+            (
+                {"command": "touch marker"},
+                {
+                    "working_directory": "/active/worktree",
+                    "executor_environment": {"cwd": "/executor/cwd"},
+                },
+                "/active/worktree",
+            ),
+            (
+                {"command": "touch marker"},
+                {"executor_environment": {"cwd": "/executor/cwd"}},
+                "/executor/cwd",
+            ),
+            (
+                {"command": "touch marker", "workdir": "nested"},
+                {"working_directory": "/active/worktree"},
+                "/active/worktree/nested",
+            ),
+        ],
+    )
+    def test_write_evaluation_uses_call_scoped_working_directory(
+        self, db, session_store, args, context, expected
+    ):
+        from intaris.audit import AuditStore
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Safe", "decision": "approve"}'
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-call-cwd",
+            intention="Create the requested marker",
+            details={"working_directory": "/session/worktree"},
+            policy={"allow_paths": ["/*"]},
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=AuditStore(db),
+            db=db,
+        )
+
+        evaluator.evaluate(
+            user_id="user-1",
+            session_id="sess-call-cwd",
+            agent_id=None,
+            tool="bash",
+            args=args,
+            context=context,
+        )
+
+        messages = llm.generate.call_args[0][0]
+        user_prompt = messages[1]["content"]
+        assert f'"project_path": "{expected}"' in user_prompt
+        assert f'"working_directory": "{expected}"' in user_prompt
+
+    def test_unavailable_executor_context_does_not_use_stale_session_cwd(
+        self, db, session_store
+    ):
+        from intaris.audit import AuditStore
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Safe", "decision": "approve"}'
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-unavailable-executor",
+            intention="Apply the requested source change",
+            details={"working_directory": "/stale/executor/worktree"},
+            policy={"allow_paths": ["/stale/executor/*"]},
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=AuditStore(db),
+            db=db,
+        )
+
+        evaluator.evaluate(
+            user_id="user-1",
+            session_id="sess-unavailable-executor",
+            agent_id=None,
+            tool="bash",
+            args={"command": "touch marker"},
+            context={
+                "executor_environment": {
+                    "available": False,
+                    "executor_id": "other-executor",
+                }
+            },
+        )
+
+        messages = llm.generate.call_args[0][0]
+        user_prompt = messages[1]["content"]
+        assert '"path_policy"' not in user_prompt
+        assert '"project_path"' not in user_prompt
+        assert "/stale/executor/worktree" not in user_prompt
+
+    def test_write_evaluation_includes_allowed_absolute_target_without_cwd(
+        self, db, session_store
+    ):
+        from intaris.audit import AuditStore
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Safe", "decision": "approve"}'
+        )
+        target = "/home/riker/src/cognis/.worktrees/fix/tests/test_agent.py"
+        patch = f"""*** Begin Patch
+*** Update File: {target}
+@@
+-old
++new
+*** End Patch"""
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-policy-target",
+            intention="Apply the requested source change",
+            policy={"allow_paths": ["/home/riker/*"]},
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=AuditStore(db),
+            db=db,
+        )
+
+        evaluator.evaluate(
+            user_id="user-1",
+            session_id="sess-policy-target",
+            agent_id=None,
+            tool="apply_patch",
+            args={"patchText": patch},
+        )
+
+        messages = llm.generate.call_args[0][0]
+        user_prompt = messages[1]["content"]
+        assert '"target_paths": [' in user_prompt
+        assert f'"{target}"' in user_prompt
+        assert '"all_targets_allowed_by_policy": true' in user_prompt
+        assert '"any_target_denied_by_policy": false' in user_prompt
+        assert '"project_path"' not in user_prompt
+
+    def test_write_evaluation_includes_denied_absolute_target_without_cwd(
+        self, db, session_store
+    ):
+        from intaris.audit import AuditStore
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": false, "risk": "high", '
+            '"reasoning": "Denied path", "decision": "deny"}'
+        )
+        target = "/home/riker/.ssh/config"
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-policy-denied-target",
+            intention="Apply the requested source change",
+            policy={
+                "allow_paths": ["/home/riker/*"],
+                "deny_paths": ["/home/riker/.ssh/*"],
+            },
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=AuditStore(db),
+            db=db,
+        )
+
+        evaluator.evaluate(
+            user_id="user-1",
+            session_id="sess-policy-denied-target",
+            agent_id=None,
+            tool="apply_patch",
+            args={
+                "patchText": (
+                    f"*** Begin Patch\n*** Update File: {target}\n"
+                    "@@\n-old\n+new\n*** End Patch"
+                )
+            },
+        )
+
+        messages = llm.generate.call_args[0][0]
+        user_prompt = messages[1]["content"]
+        assert '"all_targets_allowed_by_policy": true' in user_prompt
+        assert '"any_target_denied_by_policy": true' in user_prompt
+
+    def test_write_evaluation_omits_relative_target_policy_without_cwd(
+        self, db, session_store
+    ):
+        from intaris.audit import AuditStore
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Safe", "decision": "approve"}'
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-policy-relative-target",
+            intention="Apply the requested source change",
+            policy={"allow_paths": ["/home/riker/*"]},
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=AuditStore(db),
+            db=db,
+        )
+
+        evaluator.evaluate(
+            user_id="user-1",
+            session_id="sess-policy-relative-target",
+            agent_id=None,
+            tool="apply_patch",
+            args={
+                "patchText": (
+                    "*** Begin Patch\n*** Update File: src/app.py\n"
+                    "@@\n-old\n+new\n*** End Patch"
+                )
+            },
+        )
+
+        messages = llm.generate.call_args[0][0]
+        user_prompt = messages[1]["content"]
+        assert '"path_policy"' not in user_prompt
+        assert '"project_path"' not in user_prompt
+
+    def test_write_evaluation_omits_mixed_target_policy_without_cwd(
+        self, db, session_store
+    ):
+        from intaris.audit import AuditStore
+
+        llm = MagicMock()
+        llm.generate.return_value = (
+            '{"aligned": true, "risk": "low", '
+            '"reasoning": "Safe", "decision": "approve"}'
+        )
+        session_store.create(
+            user_id="user-1",
+            session_id="sess-policy-mixed-targets",
+            intention="Apply the requested source changes",
+            policy={"allow_paths": ["/home/riker/*"]},
+        )
+        evaluator = Evaluator(
+            llm=llm,
+            session_store=session_store,
+            audit_store=AuditStore(db),
+            db=db,
+        )
+
+        evaluator.evaluate(
+            user_id="user-1",
+            session_id="sess-policy-mixed-targets",
+            agent_id=None,
+            tool="apply_patch",
+            args={
+                "patchText": (
+                    "*** Begin Patch\n"
+                    "*** Update File: /home/riker/src/app.py\n"
+                    "@@\n-old\n+new\n"
+                    "*** Update File: ../other.py\n"
+                    "@@\n-old\n+new\n"
+                    "*** End Patch"
+                )
+            },
+        )
+
+        messages = llm.generate.call_args[0][0]
+        user_prompt = messages[1]["content"]
+        assert '"path_policy"' not in user_prompt
+        assert '"project_path"' not in user_prompt
+
     def test_default_intention_source(self, session_store):
         """New sessions have intention_source='initial'."""
         session = session_store.create(

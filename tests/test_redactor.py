@@ -86,6 +86,48 @@ class TestPasswordRedaction:
         assert "my_secret_key_123" not in result["command"]
         assert "[REDACTED:credential]" in result["command"]
 
+    def test_curl_long_user_redacts_password_only(self):
+        result = redact(
+            {"command": "curl --user admin:secret123 https://grafana.example/api"}
+        )
+        assert result["command"] == (
+            "curl --user admin:[REDACTED:password] https://grafana.example/api"
+        )
+
+    def test_curl_long_user_equals_and_quotes(self):
+        result = redact(
+            {"command": "curl --user='reader:p@ss:word' https://example.test"}
+        )
+        assert result["command"] == (
+            "curl --user='reader:[REDACTED:password]' https://example.test"
+        )
+
+    def test_curl_short_user_forms(self):
+        args = {
+            "commands": [
+                'curl -u "admin:secret123" https://example.test',
+                "curl -uadmin:secret456 https://example.test",
+            ]
+        }
+        result = redact(args)
+        assert result["commands"] == [
+            'curl -u "admin:[REDACTED:password]" https://example.test',
+            "curl -uadmin:[REDACTED:password] https://example.test",
+        ]
+
+    def test_curl_empty_user_and_quoted_password_with_spaces(self):
+        args = {
+            "commands": [
+                "curl -u :secret123 https://example.test",
+                "curl --user 'admin:secret phrase' https://example.test",
+            ]
+        }
+        result = redact(args)
+        assert result["commands"] == [
+            "curl -u :[REDACTED:password] https://example.test",
+            "curl --user 'admin:[REDACTED:password]' https://example.test",
+        ]
+
 
 class TestSensitiveKeys:
     """Test sensitive key name detection."""
@@ -219,6 +261,15 @@ class TestFalsePositives:
         args = {"count": 42, "enabled": True, "ratio": 3.14}
         result = redact(args)
         assert result == args
+
+    def test_colon_values_without_curl_user_flag_are_unchanged(self):
+        args = {
+            "command": (
+                "curl https://localhost:3000/api "
+                "-H 'Host: grafana.example' --connect-timeout 5"
+            )
+        }
+        assert redact(args) == args
 
 
 class TestFalsePositiveRegression:

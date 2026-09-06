@@ -137,6 +137,41 @@ def _resolve_tool_paths_for_context(
     return resolve_tool_paths(tool, args, working_directory)
 
 
+def _effective_working_directory(
+    tool: str,
+    args: dict[str, Any],
+    context: dict[str, Any] | None,
+    session_details: dict[str, Any],
+) -> str | None:
+    """Resolve the directory that applies to this specific tool call."""
+
+    context = context or {}
+    executor_environment = context.get("executor_environment")
+    executor_metadata_present = isinstance(executor_environment, dict)
+    candidates = [
+        context.get("working_directory"),
+        (executor_environment.get("cwd") if executor_metadata_present else None),
+    ]
+    if not executor_metadata_present:
+        candidates.append(session_details.get("working_directory"))
+    base_directory = next(
+        (
+            os.path.normpath(value)
+            for value in candidates
+            if isinstance(value, str) and os.path.isabs(value)
+        ),
+        None,
+    )
+    if tool == "bash":
+        tool_workdir = args.get("workdir")
+        if isinstance(tool_workdir, str) and tool_workdir:
+            if os.path.isabs(tool_workdir):
+                return os.path.normpath(tool_workdir)
+            if base_directory:
+                return os.path.normpath(os.path.join(base_directory, tool_workdir))
+    return base_directory
+
+
 def _build_path_policy_context(
     *,
     resolved_paths: list[str],
@@ -437,9 +472,9 @@ class Evaluator:
         # Get session policy for classifier
         session_policy = session.get("policy")
 
-        # Extract working directory for path-aware classification
+        # Resolve the call-scoped working directory for path-aware classification.
         details = session.get("details") or {}
-        working_directory: str | None = details.get("working_directory") or None
+        working_directory = _effective_working_directory(tool, args, context, details)
 
         # Resolve parent intention for sub-sessions (intention chain).
         # Sub-agent tool calls must be aligned with BOTH the parent
@@ -554,20 +589,27 @@ class Evaluator:
                             outside_paths,
                         )
 
-        # Inject project_path and deterministic path-policy facts into LLM
-        # context for WRITE evaluations. Git-style write commands often have
-        # no explicit file arguments, so include the working directory itself.
-        if working_directory and classification == Classification.WRITE:
-            context = dict(context) if context else {}
-            context["project_path"] = working_directory
+        # Inject deterministic path-policy facts into WRITE evaluations when
+        # either the project directory or explicit target paths are known.
+        if classification == Classification.WRITE:
             policy_paths = _resolve_tool_paths_for_context(
-                tool, args_redacted, working_directory
+                tool, args_redacted, working_directory or ""
             )
-            context["path_policy"] = _build_path_policy_context(
-                resolved_paths=policy_paths,
-                working_directory=working_directory,
-                policy=session_policy,
-            )
+            if not working_directory and not all(
+                os.path.isabs(path) for path in policy_paths
+            ):
+                policy_paths = []
+            if working_directory or policy_paths:
+                context = dict(context) if context else {}
+                if working_directory:
+                    # Git-style write commands often have no explicit file
+                    # arguments, so include the working directory itself.
+                    context["project_path"] = working_directory
+                context["path_policy"] = _build_path_policy_context(
+                    resolved_paths=policy_paths,
+                    working_directory=working_directory or "",
+                    policy=session_policy,
+                )
 
         # Step 3-5: Fast paths for read-only, critical, and escalate
         if classification == Classification.READ:

@@ -63,6 +63,19 @@ _PatternEntry = (
     | tuple[re.Pattern[str], str, Callable[[re.Match[str]], bool]]
 )
 
+_CURL_QUOTED_BASIC_AUTH_PATTERN = re.compile(
+    r"(?P<prefix>(?<!\S)(?:--user(?:=|\s+)|-u(?:\s+)?))"
+    r"(?P<quote>['\"])"
+    r"(?P<username>[^:'\"]*):"
+    r"(?P<password>[^'\"]+)"
+    r"(?P=quote)"
+)
+_CURL_UNQUOTED_BASIC_AUTH_PATTERN = re.compile(
+    r"(?P<prefix>(?<!\S)(?:--user(?:=|\s+)|-u(?:\s+)?))"
+    r"(?P<username>[^:\s'\"]*):"
+    r"(?P<password>[^\s'\"]+)"
+)
+
 _VALUE_PATTERNS: list[_PatternEntry] = [
     # OpenAI API keys — validator rejects branch names (lowercase-only)
     (re.compile(r"sk-[a-zA-Z0-9_-]{20,}"), "api_key", _is_likely_api_key),
@@ -189,8 +202,23 @@ def _redact_string(text: str, key: str | None = None) -> str:
     if key and key.lower() in _SENSITIVE_KEYS:
         return "[REDACTED:credential]"
 
+    # Preserve the username because it is not secret, but redact curl Basic Auth
+    # passwords before generic value patterns inspect the command.
+    result = _CURL_QUOTED_BASIC_AUTH_PATTERN.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('quote')}"
+            f"{match.group('username')}:[REDACTED:password]{match.group('quote')}"
+        ),
+        text,
+    )
+    result = _CURL_UNQUOTED_BASIC_AUTH_PATTERN.sub(
+        lambda match: (
+            f"{match.group('prefix')}{match.group('username')}:[REDACTED:password]"
+        ),
+        result,
+    )
+
     # Apply pattern-based redaction
-    result = text
     for entry in _VALUE_PATTERNS:
         pattern = entry[0]
         label = entry[1]

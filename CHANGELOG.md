@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-09-06
+
+### Fixed
+
+- **Path policy context** -- Evaluate write operations against the working directory for the individual tool call and preserve absolute target-path policy facts without an executor directory.
+- **Curl credential redaction** -- Redact Basic Auth passwords passed through `curl --user` and `curl -u` before command data reaches evaluation and audit records.
+
+### Changed
+
+- **Release metadata** -- Bump the Intaris package and MCP proxy client identity to `0.9.2`.
+
 ## [0.9.1] - 2026-08-30
 
 ### Fixed
