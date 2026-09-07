@@ -15,6 +15,8 @@ class EvaluateRequest(BaseModel):
     session_id: str = Field(..., description="Session identifier")
     agent_id: str | None = Field(None, description="Agent identifier")
     tool: str = Field(..., description="Tool name (e.g., 'bash', 'edit')")
+    minimum_outcome: Literal["deny", "escalate", "approve"] | None = None
+    approval_call_id: str | None = None
     args: dict[str, Any] = Field(default_factory=dict, description="Tool arguments")
     context: dict[str, Any] | None = Field(
         None, description="Optional additional context"
@@ -52,6 +54,9 @@ class EvaluateResponse(BaseModel):
     """Response from tool call evaluation."""
 
     call_id: str = Field(..., description="Unique call identifier")
+    minimum_outcome: Literal["deny", "escalate", "approve"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     decision: Literal["approve", "deny", "escalate"] = Field(
         ..., description="Evaluation decision"
     )

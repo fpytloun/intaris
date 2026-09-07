@@ -43,6 +43,7 @@ from intaris.decision import (
     Decision,
     EvaluationResult,
     apply_decision_matrix,
+    clamp_outcome,
     make_fast_decision,
 )
 from intaris.llm import LLMClient, parse_json_response
@@ -281,6 +282,8 @@ class Evaluator:
         args: dict[str, Any],
         context: dict[str, Any] | None = None,
         tool_preferences: dict[str, str] | None = None,
+        minimum_outcome: str | None = None,
+        approval_call_id: str | None = None,
     ) -> dict[str, Any]:
         """Evaluate a tool call for safety and intention alignment.
 
@@ -313,6 +316,11 @@ class Evaluator:
         """
         start_time = time.monotonic()
         call_id = str(uuid.uuid4())
+        clamp_outcome("approve", minimum_outcome)
+        if minimum_outcome is not None:
+            context = dict(context or {})
+            context["minimum_outcome"] = minimum_outcome
+            context["approval_call_id"] = approval_call_id
 
         # Get session for intention and policy (verifies ownership)
         session = self._sessions.get(session_id, user_id=user_id)
@@ -365,6 +373,7 @@ class Evaluator:
             return {
                 "call_id": call_id,
                 "decision": "deny",
+                "minimum_outcome": minimum_outcome,
                 "reasoning": reasoning,
                 "risk": "low",
                 "path": "fast",
@@ -404,7 +413,7 @@ class Evaluator:
                     args_redacted=args_redacted,
                     classification="write",
                     evaluation_path="alignment",
-                    decision="escalate",
+                    decision=clamp_outcome("escalate", minimum_outcome),
                     risk="high",
                     reasoning=misalignment_reason,
                     latency_ms=latency_ms,
@@ -413,13 +422,16 @@ class Evaluator:
                 )
                 try:
                     self._sessions.increment_counter(
-                        session_id, "escalate", user_id=user_id
+                        session_id,
+                        clamp_outcome("escalate", minimum_outcome),
+                        user_id=user_id,
                     )
                 except ValueError:
                     pass
                 return {
                     "call_id": call_id,
-                    "decision": "escalate",
+                    "decision": clamp_outcome("escalate", minimum_outcome),
+                    "minimum_outcome": minimum_outcome,
                     "reasoning": misalignment_reason,
                     "risk": "high",
                     "path": "alignment",
@@ -533,6 +545,7 @@ class Evaluator:
                     return {
                         "call_id": call_id,
                         "decision": "deny",
+                        "minimum_outcome": minimum_outcome,
                         "reasoning": cascade_reasoning,
                         "risk": "low",
                         "path": "fast",
@@ -629,10 +642,14 @@ class Evaluator:
             # Check for prior approved override before auto-deny.
             # If the user explicitly approved the exact same command
             # (via denial override), bypass the critical auto-deny.
-            retry_decision = self._check_escalation_retry(
-                user_id=user_id,
-                tool=tool,
-                args_hash=args_hash,
+            retry_decision = (
+                self._check_escalation_retry(
+                    user_id=user_id,
+                    tool=tool,
+                    args_hash=args_hash,
+                )
+                if minimum_outcome is None
+                else None
             )
             if retry_decision is not None:
                 decision = retry_decision
@@ -644,10 +661,14 @@ class Evaluator:
         elif classification == Classification.ESCALATE:
             # Check escalation retry: reuse prior approval if same
             # tool+args was approved within the TTL window.
-            retry_decision = self._check_escalation_retry(
-                user_id=user_id,
-                tool=tool,
-                args_hash=args_hash,
+            retry_decision = (
+                self._check_escalation_retry(
+                    user_id=user_id,
+                    tool=tool,
+                    args_hash=args_hash,
+                )
+                if minimum_outcome is None
+                else None
             )
             if retry_decision is not None:
                 decision = retry_decision
@@ -660,10 +681,14 @@ class Evaluator:
             # Check for prior approved denial override before LLM.
             # If the user previously approved a denial of the same
             # command, skip the LLM call and approve directly.
-            retry_decision = self._check_escalation_retry(
-                user_id=user_id,
-                tool=tool,
-                args_hash=args_hash,
+            retry_decision = (
+                self._check_escalation_retry(
+                    user_id=user_id,
+                    tool=tool,
+                    args_hash=args_hash,
+                )
+                if minimum_outcome is None
+                else None
             )
             if retry_decision is not None:
                 decision = retry_decision
@@ -677,6 +702,37 @@ class Evaluator:
                     context=redact(context) if context else None,
                     parent_intention=parent_intention,
                 )
+
+        if minimum_outcome is not None:
+            approved = False
+            if approval_call_id:
+                try:
+                    record = self._audit.get_by_call_id(
+                        approval_call_id, user_id=user_id
+                    )
+                except ValueError:
+                    record = None
+                approved = bool(
+                    record
+                    and record.get("session_id") == session_id
+                    and record.get("tool") == tool
+                    and record.get("args_hash") == args_hash
+                    and record.get("decision") == "escalate"
+                    and record.get("user_decision") == "approve"
+                    and record.get("resolved_by") == "user"
+                )
+                if not approved:
+                    decision.decision = "deny"
+                    decision.reasoning = "Approval does not match this evaluation."
+            if (
+                approved
+                and minimum_outcome == "escalate"
+                and decision.decision != "deny"
+            ):
+                decision.decision = "approve"
+                decision.reasoning = f"User approved call {approval_call_id}."
+            else:
+                decision.decision = clamp_outcome(decision.decision, minimum_outcome)
 
         # Learn from LLM approvals: cache path prefixes for path-reclassified
         # calls so subsequent reads to the same directory are fast-pathed.
@@ -753,6 +809,7 @@ class Evaluator:
         return {
             "call_id": call_id,
             "decision": decision.decision,
+            "minimum_outcome": minimum_outcome,
             "reasoning": decision.reasoning,
             "risk": decision.risk,
             "path": decision.path,

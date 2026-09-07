@@ -33,6 +33,12 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+def clamp_outcome(actual: str, minimum: str | None) -> str:
+    """Return the stricter outcome without weakening an existing denial."""
+    order = {"deny": 0, "escalate": 1, "approve": 2}
+    return actual if minimum is None else min((actual, minimum), key=order.__getitem__)
+
+
 @dataclass
 class EvaluationResult:
     """Result from LLM safety evaluation."""

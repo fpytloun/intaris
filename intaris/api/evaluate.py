@@ -149,6 +149,8 @@ async def evaluate(
                 tool=request.tool,
                 args=request.args,
                 context=request.context,
+                minimum_outcome=request.minimum_outcome,
+                approval_call_id=request.approval_call_id,
             ),
         )
 
@@ -157,7 +159,11 @@ async def evaluate(
         judge_waited = False
 
         if result.get("decision") == "escalate":
-            if judge_reviewer is not None and judge_reviewer.is_enabled:
+            if (
+                judge_reviewer is not None
+                and judge_reviewer.is_enabled
+                and request.minimum_outcome not in {"deny", "escalate"}
+            ):
                 judge_waited = True
                 outcome = await judge_reviewer.review_for_evaluate(
                     call_id=result["call_id"],

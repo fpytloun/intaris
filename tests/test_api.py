@@ -104,6 +104,66 @@ def _auth_headers(token: str = "test-api-key") -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+@pytest.mark.parametrize("actual", ["deny", "escalate", "approve"])
+@pytest.mark.parametrize("minimum", [None, "deny", "escalate", "approve"])
+def test_minimum_outcome_matrix(actual, minimum):
+    from intaris.decision import clamp_outcome
+
+    order = ["deny", "escalate", "approve"]
+    expected = (
+        actual
+        if minimum is None
+        else order[min(order.index(actual), order.index(minimum))]
+    )
+    assert clamp_outcome(actual, minimum) == expected
+
+
+def test_minimum_outcome_human_retry(client_no_auth):
+    client = client_no_auth
+    headers = {"X-User-Id": "floor-user", "X-Agent-Id": "floor-agent"}
+    client.post(
+        "/api/v1/intention",
+        headers=headers,
+        json={
+            "session_id": "floor-session",
+            "intention": "Read files",
+        },
+    ).raise_for_status()
+    body = {"session_id": "floor-session", "tool": "read", "args": {"path": "/tmp/a"}}
+    legacy = client.post("/api/v1/evaluate", headers=headers, json=body).json()
+    assert legacy["decision"] == "approve"
+    assert "minimum_outcome" not in legacy
+    body["minimum_outcome"] = "escalate"
+    judge = SimpleNamespace(is_enabled=True, review_for_evaluate=AsyncMock())
+    client.app.state.judge_reviewer = judge
+    first = client.post("/api/v1/evaluate", headers=headers, json=body).json()
+    judge.review_for_evaluate.assert_not_called()
+    assert first["decision"] == "escalate"
+    assert first["minimum_outcome"] == "escalate"
+    client.post(
+        "/api/v1/decision",
+        headers=headers,
+        json={
+            "call_id": first["call_id"],
+            "decision": "approve",
+        },
+    ).raise_for_status()
+    assert (
+        client.post("/api/v1/evaluate", headers=headers, json=body).json()["decision"]
+        == "escalate"
+    )
+    body["approval_call_id"] = first["call_id"]
+    assert (
+        client.post("/api/v1/evaluate", headers=headers, json=body).json()["decision"]
+        == "approve"
+    )
+    body["args"] = {"path": "/tmp/b"}
+    assert (
+        client.post("/api/v1/evaluate", headers=headers, json=body).json()["decision"]
+        == "deny"
+    )
+
+
 def test_shutdown_flushes_buffered_session_events(env_no_auth):
     """Lifespan shutdown persists events that remain below flush thresholds."""
     from intaris.config import EventStoreConfig
