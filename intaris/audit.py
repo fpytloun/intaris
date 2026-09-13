@@ -38,6 +38,12 @@ class AuditStore:
     def set_search_service(cls, service: Any) -> None:
         cls._search_service = service
 
+    @classmethod
+    def clear_search_service(cls, service: Any) -> None:
+        """Clear the search hook only if the caller still owns it."""
+        if cls._search_service is service:
+            cls._search_service = None
+
     def __init__(self, db: Database):
         self._db = db
 

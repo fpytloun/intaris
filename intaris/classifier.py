@@ -196,8 +196,8 @@ _CRITICAL_PATTERNS: list[re.Pattern[str]] = [
     # Fork bomb
     re.compile(r":\(\)\s*\{\s*:\|:&\s*\}\s*;"),
     # Dangerous network operations
-    re.compile(r"\bcurl\b.*\|\s*(ba)?sh"),
-    re.compile(r"\bwget\b.*\|\s*(ba)?sh"),
+    re.compile(r"\bcurl\b.*\|\s*(ba)?sh\b"),
+    re.compile(r"\bwget\b.*\|\s*(ba)?sh\b"),
     # System shutdown/reboot
     re.compile(r"\b(shutdown|reboot|halt|poweroff|init\s+[06])\b"),
     # Kernel module manipulation

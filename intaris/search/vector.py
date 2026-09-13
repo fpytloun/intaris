@@ -768,12 +768,10 @@ def build_vector_backend(*, db: Any, config: Any) -> VectorBackend:
                 db=db, model=config.embedding_model, dim=config.embedding_dim
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "pgvector backend init failed (%s); vector tier disabled", exc
-            )
-            return DisabledVectorBackend()
+            logger.warning("pgvector backend init failed (%s)", exc)
+            raise RuntimeError("pgvector backend initialization failed") from exc
         if not backend.healthy():
-            return DisabledVectorBackend()
+            raise RuntimeError("pgvector backend is unavailable")
         return backend
 
     if config.vector_provider == "qdrant":
@@ -786,7 +784,8 @@ def build_vector_backend(*, db: Any, config: Any) -> VectorBackend:
             sparse_model=config.sparse_model,
         )
         if not backend.healthy():
-            return DisabledVectorBackend()
+            backend.close()
+            raise RuntimeError("qdrant backend is unavailable")
         return backend
 
     return DisabledVectorBackend()

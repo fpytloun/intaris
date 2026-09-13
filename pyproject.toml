@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "intaris"
-version = "0.10.0"
+version = "0.10.1"
 description = "Guardrails service for AI agents — safety evaluation, audit, and approval workflows"
 readme = "README.md"
 license = "LicenseRef-BSL-1.1"
@@ -52,6 +52,7 @@ postgresql = [
 ]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
     "pytest-timeout>=2.3.0",
     "ruff>=0.5.0",
 ]

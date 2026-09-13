@@ -63,6 +63,13 @@ def set_search_service(service: Any) -> None:
     _search_service = service
 
 
+def clear_search_service(service: Any) -> None:
+    """Clear the search hook only if the caller still owns it."""
+    global _search_service
+    if _search_service is service:
+        _search_service = None
+
+
 # ── Budget-aware windowing constants ──────────────────────────────────
 # Target max chars per window user prompt.  The partitioner splits data
 # into context-budget-aware windows; no content is ever silently dropped.

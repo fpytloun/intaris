@@ -87,6 +87,13 @@ class SearchService:
             logger.info("Search disabled (INTARIS_SEARCH_ENABLED=false)")
             return
 
+        try:
+            self._initialize_backends(db, config)
+        except BaseException:
+            self._vector.close()
+            raise
+
+    def _initialize_backends(self, db: Any, config: SearchConfig) -> None:
         # Schema bootstrap is synchronous and idempotent.
         self._schema.ensure(db)
 
@@ -106,6 +113,7 @@ class SearchService:
                     exc,
                 )
                 self._embeddings = None
+                self._vector.close()
                 self._vector = DisabledVectorBackend()
 
         # Persist resolved config and detect drift.

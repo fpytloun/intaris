@@ -41,6 +41,9 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("intaris")
 
+_SEARCH_INIT_RETRY_INITIAL_SECONDS = 1.0
+_SEARCH_INIT_RETRY_MAX_SECONDS = 30.0
+
 # ── Session Identity Context ──────────────────────────────────────────
 # Set by APIKeyMiddleware per-request, read by api/deps.py.
 
@@ -607,62 +610,75 @@ async def _stop_task(task: asyncio.Task[None] | None, *, timeout: float) -> None
 
 
 async def _initialize_search(app, config: SearchConfig) -> None:
-    """Initialize optional search after the HTTP server starts serving."""
-    search_service = None
-    try:
-        search_service = await asyncio.to_thread(
-            _build_search_service, _get_db(), config
-        )
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        app.state.search_service = None
-        app.state.search_initializing = False
-        api_app = getattr(app.state, "_api_app", None)
-        if api_app is not None:
-            api_app.state.search_service = None
-            api_app.state.search_initializing = False
-        logger.exception("Search initialization failed; continuing without search")
-        return
-
-    app.state.search_service = search_service
-    api_app = getattr(app.state, "_api_app", None)
-    if api_app is not None:
-        api_app.state.search_service = search_service
-
-    # Wire writers before the indexer starts. Writes during the remaining
-    # startup interval enqueue durable work for the indexer to process.
+    """Initialize optional search, retrying transient dependency failures."""
     from intaris import analyzer as _analyzer
     from intaris.audit import AuditStore as _AuditStore
 
-    _AuditStore.set_search_service(search_service)
-    _analyzer.set_search_service(search_service)
+    retry_delay = _SEARCH_INIT_RETRY_INITIAL_SECONDS
+    while True:
+        search_service = None
+        writers_wired = False
+        try:
+            construction = asyncio.create_task(
+                asyncio.to_thread(_build_search_service, _get_db(), config)
+            )
+            try:
+                search_service = await asyncio.shield(construction)
+            except asyncio.CancelledError:
+                # A running worker cannot be cancelled. Join it before cleanup
+                # so a late result never escapes shutdown ownership.
+                try:
+                    search_service = await construction
+                except Exception:
+                    pass
+                raise
+            app.state.search_service = search_service
+            api_app = getattr(app.state, "_api_app", None)
+            if api_app is not None:
+                api_app.state.search_service = search_service
 
-    try:
-        await search_service.start()
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        app.state.search_service = None
+            # Wire writers before the indexer starts. Writes during the remaining
+            # startup interval enqueue durable work for the indexer to process.
+            _AuditStore.set_search_service(search_service)
+            _analyzer.set_search_service(search_service)
+            writers_wired = True
+            await search_service.start()
+        except asyncio.CancelledError:
+            if writers_wired:
+                _AuditStore.clear_search_service(search_service)
+                _analyzer.clear_search_service(search_service)
+            if search_service is not None:
+                with contextlib.suppress(Exception):
+                    await search_service.stop()
+            raise
+        except Exception:
+            app.state.search_service = None
+            api_app = getattr(app.state, "_api_app", None)
+            if api_app is not None:
+                api_app.state.search_service = None
+            if writers_wired:
+                _AuditStore.clear_search_service(search_service)
+                _analyzer.clear_search_service(search_service)
+            if search_service is not None:
+                with contextlib.suppress(Exception):
+                    await search_service.stop()
+            logger.exception(
+                "Search initialization failed; retrying in %.1fs", retry_delay
+            )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, _SEARCH_INIT_RETRY_MAX_SECONDS)
+            continue
+
         app.state.search_initializing = False
+        api_app = getattr(app.state, "_api_app", None)
         if api_app is not None:
-            api_app.state.search_service = None
             api_app.state.search_initializing = False
-        _AuditStore.set_search_service(None)
-        _analyzer.set_search_service(None)
-        with contextlib.suppress(Exception):
-            await search_service.stop()
-        logger.exception("Search indexer failed to start; continuing without search")
+        logger.info(
+            "Search initialized (lexical=%s, vector=%s)",
+            search_service.lexical_backend,
+            search_service.vector_backend_name,
+        )
         return
-
-    app.state.search_initializing = False
-    if api_app is not None:
-        api_app.state.search_initializing = False
-    logger.info(
-        "Search initialized (lexical=%s, vector=%s)",
-        search_service.lexical_backend,
-        search_service.vector_backend_name,
-    )
 
 
 def _build_search_service(db, config: SearchConfig):
@@ -670,6 +686,15 @@ def _build_search_service(db, config: SearchConfig):
     from intaris.search.service import SearchService
 
     return SearchService(db=db, config=config)
+
+
+def _clear_search_hooks(search_service) -> None:
+    """Clear process-global writer hooks owned by a search service."""
+    from intaris import analyzer
+    from intaris.audit import AuditStore
+
+    AuditStore.clear_search_service(search_service)
+    analyzer.clear_search_service(search_service)
 
 
 # ── Application Factory ──────────────────────────────────────────────
@@ -1037,6 +1062,7 @@ async def lifespan(app):
                 await search_task
         search_service = app.state.search_service
         if search_service is not None:
+            _clear_search_hooks(search_service)
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.wait_for(search_service.stop(), timeout=3.0)
 

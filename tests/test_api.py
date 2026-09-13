@@ -13,7 +13,7 @@ import os
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -272,21 +272,30 @@ def test_search_initialization_preserves_configured_vector_tier(monkeypatch):
 
 
 def test_search_initialization_clears_hooks_when_indexer_start_fails(monkeypatch):
-    """A failed indexer must not leave writers bound to a stopped service."""
+    """A transient indexer failure must clean up before a successful retry."""
     import intaris.server as srv
     from intaris.config import SearchConfig
 
     registered_services = []
-    service = SimpleNamespace(
+    failed_service = SimpleNamespace(
         lexical_backend="sqlite",
         vector_backend_name="qdrant",
         start=AsyncMock(side_effect=RuntimeError("indexer unavailable")),
         stop=AsyncMock(),
     )
+    healthy_service = SimpleNamespace(
+        lexical_backend="postgresql",
+        vector_backend_name="qdrant",
+        start=AsyncMock(),
+        stop=AsyncMock(),
+    )
     app = SimpleNamespace(state=SimpleNamespace(search_initializing=True))
 
-    monkeypatch.setattr(srv, "_build_search_service", lambda db, config: service)
+    services = iter([failed_service, healthy_service])
+    monkeypatch.setattr(srv, "_build_search_service", lambda db, config: next(services))
     monkeypatch.setattr(srv, "_get_db", lambda: object())
+    sleep = AsyncMock()
+    monkeypatch.setattr(srv.asyncio, "sleep", sleep)
     from intaris import analyzer
     from intaris.audit import AuditStore
 
@@ -296,17 +305,99 @@ def test_search_initialization_clears_hooks_when_indexer_start_fails(monkeypatch
         lambda registered: registered_services.append(registered),
     )
     monkeypatch.setattr(
+        analyzer,
+        "clear_search_service",
+        lambda registered: registered_services.append(("clear", registered)),
+    )
+    monkeypatch.setattr(
         AuditStore,
         "set_search_service",
         lambda registered: registered_services.append(registered),
     )
+    monkeypatch.setattr(
+        AuditStore,
+        "clear_search_service",
+        lambda registered: registered_services.append(("clear", registered)),
+    )
 
     asyncio.run(srv._initialize_search(app, SearchConfig()))
 
-    service.stop.assert_awaited_once()
-    assert registered_services == [service, service, None, None]
-    assert app.state.search_service is None
+    failed_service.stop.assert_awaited_once()
+    healthy_service.start.assert_awaited_once()
+    healthy_service.stop.assert_not_awaited()
+    sleep.assert_awaited_once_with(srv._SEARCH_INIT_RETRY_INITIAL_SECONDS)
+    assert registered_services == [
+        failed_service,
+        failed_service,
+        ("clear", failed_service),
+        ("clear", failed_service),
+        healthy_service,
+        healthy_service,
+    ]
+    assert app.state.search_service is healthy_service
     assert app.state.search_initializing is False
+
+
+def test_search_initialization_retries_database_failure(monkeypatch):
+    """A transient database failure must not disable search until restart."""
+    import intaris.server as srv
+    from intaris.config import SearchConfig
+
+    service = SimpleNamespace(
+        lexical_backend="postgresql",
+        vector_backend_name="disabled",
+        start=AsyncMock(),
+    )
+    app = SimpleNamespace(state=SimpleNamespace(search_initializing=True))
+    get_db = Mock(side_effect=[RuntimeError("database unavailable"), object()])
+    sleep_states = []
+
+    async def record_sleep(delay):
+        sleep_states.append((delay, app.state.search_initializing))
+
+    monkeypatch.setattr(srv, "_get_db", get_db)
+    monkeypatch.setattr(srv, "_build_search_service", lambda db, config: service)
+    monkeypatch.setattr(srv.asyncio, "sleep", record_sleep)
+
+    asyncio.run(srv._initialize_search(app, SearchConfig()))
+
+    assert get_db.call_count == 2
+    assert sleep_states == [(srv._SEARCH_INIT_RETRY_INITIAL_SECONDS, True)]
+    service.start.assert_awaited_once()
+    assert app.state.search_service is service
+    assert app.state.search_initializing is False
+
+
+def test_search_cancellation_joins_construction(monkeypatch):
+    import threading
+
+    import intaris.server as srv
+    from intaris.config import SearchConfig
+
+    started = threading.Event()
+    release = threading.Event()
+    service = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+
+    def build(db, config):
+        started.set()
+        assert release.wait(5)
+        return service
+
+    monkeypatch.setattr(srv, "_get_db", lambda: object())
+    monkeypatch.setattr(srv, "_build_search_service", build)
+
+    async def run():
+        app = SimpleNamespace(state=SimpleNamespace(search_initializing=True))
+        task = asyncio.create_task(srv._initialize_search(app, SearchConfig()))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    service.start.assert_not_awaited()
+    service.stop.assert_awaited_once()
 
 
 class _FakeEvaluator:

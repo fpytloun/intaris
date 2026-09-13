@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 import pytest
 
@@ -37,12 +38,48 @@ from intaris.search.types import (
     fold_text,
     truncate_text,
 )
+from intaris.search.vector import build_vector_backend
 
 TEST_USER = "alice@example.com"
 OTHER_USER = "bob@example.com"
 
 
+def test_qdrant_backend_unavailability_is_retryable(monkeypatch, db):
+    """Configured Qdrant downtime must propagate to the startup retry loop."""
+    from intaris.search import vector
+
+    backend = type(
+        "UnavailableBackend",
+        (),
+        {"healthy": lambda self: False, "close": Mock()},
+    )()
+    monkeypatch.setattr(vector, "QdrantVectorBackend", lambda **kwargs: backend)
+    config = SearchConfig(
+        vector_provider="qdrant",
+        qdrant_url="http://qdrant.invalid:6333",
+        embedding_model="test-model",
+    )
+
+    with pytest.raises(RuntimeError, match="qdrant backend is unavailable"):
+        build_vector_backend(db=db, config=config)
+    backend.close.assert_called_once_with()
+
+
 # ── Fixtures ────────────────────────────────────────────────────────
+
+
+def test_partial_search_construction_closes_vector(monkeypatch, db):
+    from intaris.search import service
+
+    backend = Mock()
+    backend.healthy.return_value = False
+    monkeypatch.setattr(service, "build_vector_backend", lambda **kwargs: backend)
+    monkeypatch.setattr(
+        service, "load_state", Mock(side_effect=RuntimeError("database unavailable"))
+    )
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        SearchService(db=db, config=SearchConfig(enabled=True))
+    backend.close.assert_called_once()
 
 
 @pytest.fixture

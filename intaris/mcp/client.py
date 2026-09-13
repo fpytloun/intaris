@@ -484,7 +484,7 @@ class MCPConnectionManager:
                     read_timeout_seconds=timedelta(seconds=timeout_seconds),
                     client_info=Implementation(
                         name="intaris-proxy",
-                        version="0.10.0",
+                        version="0.10.1",
                     ),
                 )
             )
