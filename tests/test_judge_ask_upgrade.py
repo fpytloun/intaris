@@ -205,3 +205,48 @@ def test_upgraded_approval_still_yields_to_caps_and_human_checkpoints():
 def test_relaxed_contracts_call_own_cleanup_routine():
     assert "Distinguish harmless goal deviation" in judge_simulator.SYSTEM
     assert "policy applies outcomes" in judge_simulator.SYSTEM
+
+
+def test_ask_on_a_hash_conditioned_grant_is_never_upgraded():
+    """The routine upgrade cannot approve what only a verified hash could.
+
+    Same local low-risk shape that upgrades on `explicit_request`, but the
+    cited grant names a SHA-256 and no executor-verified digest is present.
+    The ask stays an ask; the hash-independent control upgrades.
+    """
+    digest = "e" * 64
+    script = f"/tmp/scratch/{digest}/tool.py"
+    facts = {
+        **WRITE,
+        "command": f"python3 {script}",
+    }
+    state = from_observations(facts)
+    grant = f"May run only tool.py published in the asset store, SHA256 {digest}."
+    question = judge_simulator.request(
+        {"tool": "bash", "args_redacted": {"command": facts["command"]}},
+        {"policy": {"profile": "balanced"}, "intention": "Run the published tool"},
+        state,
+        evaluate_policy([], state, "balanced"),
+        {
+            "originals": [
+                {
+                    "ref": "message:grant",
+                    "origin": "client_user_claim",
+                    "content": grant,
+                    "truncated": False,
+                }
+            ],
+            "items": [],
+        },
+    )
+    assert not question["consequential"] and not question["ask_upgrade_blocked"]
+    index = next(
+        r["index"] for r in question["citation_sources"] if r["ref"] == "message:grant"
+    )
+    assert index in question["hash_conditioned"]
+    answer, diagnostics = judged(question, basis="explicit_request", cites=[index])
+    assert answer.user_would == "ask"
+    assert diagnostics.get("upgrade_reason") is None
+    control, diagnostics = judged(question, basis="routine_within_task")
+    assert control.user_would == "approve"
+    assert diagnostics["upgrade_reason"] == "ask_with_approving_basis"

@@ -2,14 +2,21 @@
 
 When a shell command runs a file (``python3 /tmp/report.py``), the command
 alone does not show what will execute. If the agent created that file in the
-same session, the recorded write that executed successfully contains the
-exact text. This module finds that write and returns a bounded excerpt for
-the classifier and reviewer.
+same session, the recorded writes that executed successfully contain the
+exact text: the last full write, followed by every recorded partial edit of
+that path. This module replays them and returns a bounded excerpt for the
+classifier and reviewer.
 
 The excerpt is context, never permission. Execution outcomes are recorded by
 the integrating client (the same trust level as its user-message evidence);
 Intaris does not verify them, does not prove the file is unchanged on disk,
-and files without a recorded write in this session stay unknown.
+and files without a recorded write in this session stay unknown. A partial
+edit that cannot be replayed exactly leaves the file unknown rather than
+showing stale text.
+
+Tool names and argument keys follow the harnesses Intaris integrates with:
+lowercase ``write``/``edit``/``multiedit``/``apply_patch`` (OpenCode, Cognis)
+and PascalCase ``Write``/``Edit``/``MultiEdit`` (Claude Code).
 """
 
 from __future__ import annotations
@@ -30,7 +37,138 @@ _LOOKBACK = 200
 _INTERPRETERS = re.compile(
     r"^(?:python(?:\d+(?:\.\d+)?)?|bash|sh|zsh|dash|node|ruby|perl|php|deno|bun)$"
 )
-_WRITERS = ("write", "apply_patch", "edit", "multiedit")
+_WRITERS = frozenset({"write", "apply_patch", "edit", "multiedit"})
+
+
+def _writer(tool: str) -> str | None:
+    """Canonical lowercase writer name for a harness tool name, or None."""
+    name = tool.lower()
+    return name if name in _WRITERS else None
+
+
+def _target(args: dict) -> str | None:
+    """The file a write/edit call addresses across harness argument shapes."""
+    for key in ("file_path", "path", "filePath"):
+        value = args.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _replacements(tool: str, args: dict) -> list[tuple[str, str, bool]] | None:
+    """(old, new, replace_all) for each exact-text edit, or None if malformed."""
+    rows = [args] if tool == "edit" else args.get("edits")
+    if not isinstance(rows, list):
+        return None
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        old = row.get("old_string", row.get("oldString"))
+        new = row.get("new_string", row.get("newString"))
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None
+        out.append((old, new, bool(row.get("replace_all", row.get("replaceAll")))))
+    return out
+
+
+def _apply_replacements(text: str, edits: list[tuple[str, str, bool]]) -> str | None:
+    """Replay exact-text edits in order; None when any would not apply exactly."""
+    for old, new, replace_all in edits:
+        if not old:
+            return None
+        count = text.count(old)
+        if count == 0 or (count > 1 and not replace_all):
+            return None
+        text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    return text
+
+
+def _update_hunks(patch: str, path: str) -> list[tuple[list[str], list[str]]] | None:
+    """(old_lines, new_lines) per hunk of an ``*** Update File`` section.
+
+    Returns None when the section is absent or not in the simple ``@@`` form.
+    """
+    match = re.search(
+        rf"^\*\*\* Update File: {re.escape(path)}\n(.*?)(?=^\*\*\* |\Z)",
+        patch,
+        re.M | re.S,
+    )
+    if not match:
+        return None
+    hunks: list[tuple[list[str], list[str]]] = []
+    old: list[str] = []
+    new: list[str] = []
+    opened = False
+    for line in match.group(1).splitlines():
+        if line.startswith("@@"):
+            if opened and (old or new):
+                hunks.append((old, new))
+            old, new, opened = [], [], True
+        elif not opened:
+            return None
+        elif line.startswith("-"):
+            old.append(line[1:])
+        elif line.startswith("+"):
+            new.append(line[1:])
+        elif line.startswith(" ") or line == "":
+            old.append(line[1:])
+            new.append(line[1:])
+        else:
+            return None
+    if opened and (old or new):
+        hunks.append((old, new))
+    return hunks or None
+
+
+def _locate_lines(lines: list[str], old: list[str], start: int) -> int | None:
+    """Index of the unique whole-line block ``old`` in ``lines[start:]``.
+
+    Patch appliers accept context lines whose leading whitespace differs from
+    the file, so an exact whole-line match is tried first and a per-line
+    stripped comparison second. The match must be unique under whichever rule
+    applies, and lines are compared whole, never as substrings.
+    """
+    if not any(line.strip() for line in old):
+        return None
+    span = len(old)
+    candidates = range(start, len(lines) - span + 1)
+    exact = [i for i in candidates if lines[i : i + span] == old]
+    if len(exact) == 1:
+        return exact[0]
+    if exact:
+        return None
+    wanted = [line.strip() for line in old]
+    loose = [
+        i
+        for i in candidates
+        if [line.strip() for line in lines[i : i + span]] == wanted
+    ]
+    return loose[0] if len(loose) == 1 else None
+
+
+def _apply_hunks(text: str, hunks: list[tuple[list[str], list[str]]]) -> str | None:
+    """Replay patch hunks; None if any cannot be located uniquely.
+
+    Every hunk is resolved against the original lines with a forward-only
+    cursor, as a patch applier does, so a hunk can never match text that an
+    earlier hunk inserted. Replacements are applied afterwards, last first,
+    so earlier line indexes stay valid.
+    """
+    lines = text.split("\n")
+    resolved: list[tuple[int, int, list[str]]] = []
+    cursor = 0
+    for old, new in hunks:
+        if not old:
+            return None
+        index = _locate_lines(lines, old, cursor)
+        if index is None:
+            return None
+        resolved.append((index, index + len(old), new))
+        cursor = index + len(old)
+    for begin, end, new in reversed(resolved):
+        lines[begin:end] = new
+    return "\n".join(lines)
 
 
 def executed_paths(command: str, workdir: str | None = None) -> list[str]:
@@ -87,7 +225,7 @@ def _added_file(patch: str, path: str) -> str | None:
 
 def _touches(tool: str, args: dict, path: str) -> tuple[bool, str | None]:
     """(touched, full content when this call wrote the complete file)."""
-    target = args.get("file_path", args.get("path", args.get("filePath")))
+    target = _target(args)
     if tool == "write" and target == path and isinstance(args.get("content"), str):
         return True, args["content"]
     if tool in {"edit", "multiedit"} and target == path:
@@ -102,6 +240,20 @@ def _touches(tool: str, args: dict, path: str) -> tuple[bool, str | None]:
         ):
             return True, None
     return False, None
+
+
+def _replay(tool: str, args: dict, path: str, text: str) -> str | None:
+    """Apply one recorded partial edit of ``path`` to ``text``; None if inexact."""
+    if tool in {"edit", "multiedit"}:
+        edits = _replacements(tool, args)
+        return _apply_replacements(text, edits) if edits else None
+    if tool == "apply_patch":
+        patch = str(args.get("patchText", args.get("patch", "")))
+        if re.search(rf"^\*\*\* Delete File: {re.escape(path)}$", patch, re.M):
+            return None
+        hunks = _update_hunks(patch, path)
+        return _apply_hunks(text, hunks) if hunks else None
+    return None
 
 
 def executed_writes(event_store, user_id: str, session_id: str) -> list[dict]:
@@ -124,8 +276,9 @@ def executed_writes(event_store, user_id: str, session_id: str) -> list[dict]:
         if not isinstance(call_id, str):
             continue
         if event.get("type") == "tool_call":
-            if data.get("name") in _WRITERS:
-                calls[call_id] = data
+            name = data.get("name")
+            if isinstance(name, str) and _writer(name):
+                calls[call_id] = {**data, "name": _writer(name)}
         elif event.get("type") == "tool_result" and call_id in calls:
             outcome = data.get("execution_outcome") or {}
             if (
@@ -162,36 +315,51 @@ def session_script(event_store, user_id: str, session_id: str, tool: str, args: 
         return None
     writes = executed_writes(event_store, user_id, session_id)
     for path in paths:
-        modified_after = False
-        for row in reversed(writes):
-            touched, content = _touches(row["tool"], row["args"], path)
-            if not touched:
-                continue
-            if content is None:
-                # A partial edit after the last full write: the shown text may
-                # be outdated. Keep looking for the full write.
-                modified_after = True
-                continue
-            from intaris.input_budget import middle_excerpt
+        # The last full write of this path is the base; every later recorded
+        # partial edit of it is replayed in order. Any inexact edit leaves the
+        # file unknown rather than presenting stale text.
+        base = None
+        for index in range(len(writes) - 1, -1, -1):
+            touched, content = _touches(
+                writes[index]["tool"], writes[index]["args"], path
+            )
+            if touched and content is not None:
+                base = index
+                text: str | None = content
+                break
+        if base is None:
+            continue
+        later = [
+            row
+            for row in writes[base + 1 :]
+            if _touches(row["tool"], row["args"], path)[0]
+        ]
+        for row in later:
+            text = _replay(row["tool"], row["args"], path, text)
+            if text is None:
+                break
+        if text is None:
+            continue
+        from intaris.input_budget import middle_excerpt
 
-            text = str(redact(content))
-            return {
-                "authority": "none",
-                "interpretation": (
-                    "Client-recorded text of a file written earlier in this "
-                    "session that the command executes. Unverified context for "
-                    "what the command likely does, not permission: Intaris did "
-                    "not verify the execution record or that the file is "
-                    "unchanged on disk. Judge its effects; do not treat benign "
-                    "text as proof of safety."
-                ),
-                "provenance": "client_recorded_execution",
-                "path": path,
-                "source_call_id": row["call_id"],
-                "modified_after_write": modified_after,
-                "truncated": len(text) > MAX_SCRIPT_CHARS,
-                "content": middle_excerpt(text, MAX_SCRIPT_CHARS),
-            }
+        text = str(redact(text))
+        return {
+            "authority": "none",
+            "interpretation": (
+                "Client-recorded text of a file written earlier in this "
+                "session that the command executes, with later recorded edits "
+                "replayed. Unverified context for what the command likely "
+                "does, not permission: Intaris did not verify the execution "
+                "records or that the file is unchanged on disk. Judge its "
+                "effects; do not treat benign text as proof of safety."
+            ),
+            "provenance": "client_recorded_execution",
+            "path": path,
+            "source_call_id": writes[base]["call_id"],
+            "replayed_edits": len(later),
+            "truncated": len(text) > MAX_SCRIPT_CHARS,
+            "content": middle_excerpt(text, MAX_SCRIPT_CHARS),
+        }
     return None
 
 

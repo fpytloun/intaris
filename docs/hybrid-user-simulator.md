@@ -33,6 +33,17 @@ of a cap. Its resolution uses the same finalization and audit/CAS transform.
 An approve vote cannot clear a human obligation; operator cap behavior is
 separate from model authority. Receipt and evidence bindings remain required.
 
+Configured operator clauses retain their `allow`/`deny` effects and conditions.
+They are policy context, not original user speech; deny precedence and explicit
+restrictions inside allowances remain binding.
+
+An unverified restriction claim is a review-validation failure, not a user
+refusal or a verified violation. In `interaction_mode=none`, existing session
+resolution policy may deny this unresolved action without offering human review.
+The audit retains the failure diagnostics and original risk, including `unknown`.
+Interactive review remains pending; technical review failures remain unavailable
+assessments, not invented adverse judgments.
+
 ## Prompt and output
 
 Canonical system text: `intaris/judge_simulator.py:SYSTEM`.

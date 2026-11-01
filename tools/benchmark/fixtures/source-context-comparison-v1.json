@@ -8,7 +8,7 @@
     "jev"
   ],
   "base_revision": "92828d6517daff3f7665fa20eac21af65aabd1ee",
-  "baseline_manifest_sha256": "72d65324e19d0f37ab83e3f120cfca74b0d5535ae3c39c5afb34800949917795",
+  "baseline_manifest_sha256": "bf7af507b6ea391385c4f7ccf30a9749106a906ebcfd11b5fdc0719e5eb5d3f3",
   "budget": {
     "consecutive_upstream_failures": 3,
     "known_price_usd": 10.0,
@@ -19,7 +19,7 @@
   "compiler_expected_calls": 0,
   "contract_sha256": "9bbfbe5c77e639efe0df72076d2d5be40037507481fc17121808193b1ab53c5c",
   "focused_literal_sha256": "b731facabf670139bdff2e3de8a7425d4de8ae148e185d5336cff3fab5568281",
-  "git_manifest_sha256": "28339d47671ceb257595c2f416a8e1f8dd0d2af6b5f71e13027d471fb1f76114",
+  "git_manifest_sha256": "149aa6ea3c18ffbc69254b2fd14de28ddc302944ec1a5de89c89f1c2a6626e3d",
   "human_auto_approval": false,
   "jev": {
     "minimum_margin": 0.1,
@@ -1749,7 +1749,7 @@
     "source_availability_coverage_and_artifact_hash"
   ],
   "seed": 2026100609,
-  "sha256": "4018703183bc75d663be635719d44d8887cfc7bf39c435f1d34e5a096a003b85",
+  "sha256": "b3712156ef25c08ddb5ee945c31d78fa9c91e601f96e37a68e3b0366b78a729d",
   "trials": 3,
   "version": 1
 }

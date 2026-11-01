@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import heapq
 import json
 import os
 import shutil
@@ -22,6 +23,7 @@ from typing import Any, Callable, Iterator
 
 from intaris.config import EventStoreConfig
 from intaris.events.backend import _file_digest, event_matches_filters
+from intaris.events.codec import decode, encode, write_chunk
 
 
 class SpoolUnavailable(RuntimeError):
@@ -157,7 +159,7 @@ class EventSpool:
             sync_directory(path)
 
     def _write(self, path: Path, record: dict) -> None:
-        payload = json.dumps(record, separators=(",", ":")).encode()
+        payload = encode(record)
         body = hashlib.sha256(payload).hexdigest().encode() + b"\n" + payload
         temporary = path.with_suffix(".tmp")
         with self._lock:
@@ -183,7 +185,7 @@ class EventSpool:
             digest, payload = path.read_bytes().split(b"\n", 1)
             if hashlib.sha256(payload).hexdigest().encode() != digest:
                 raise ValueError("Checksum mismatch")
-            return json.loads(payload)
+            return decode(payload)
         except (OSError, ValueError) as exc:
             self._local_error = f"Corrupt or unreadable event spool file: {path.name}"
             raise RuntimeError(self._local_error) from exc
@@ -262,10 +264,26 @@ class EventSpool:
 
     def metrics(self) -> dict:
         with self._lock:
+            oldest = min(
+                (
+                    datetime.fromisoformat(record["ts"]).timestamp()
+                    for record in self._index.values()
+                ),
+                default=None,
+            )
             return {
                 "enabled": True,
                 "pending_batches": len(self._index),
                 "pending_events": sum(r["count"] for r in self._index.values()),
+                "pending_sessions": len(
+                    {(r["user_id"], r["session_id"]) for r in self._index.values()}
+                ),
+                "pending_payload_bytes": sum(
+                    r["export_bytes"] for r in self._index.values()
+                ),
+                "oldest_pending_age_seconds": (
+                    max(0.0, time.time() - oldest) if oldest is not None else 0.0
+                ),
                 "disk_bytes": self._bytes,
                 "write_admission": not (
                     self._backend_error or self._local_error or self._closed
@@ -326,20 +344,19 @@ class EventSpool:
             }
             record["export_bytes"] = sum(
                 len(
-                    json.dumps(
+                    encode(
                         {
                             **event,
                             "seq": 2**63 - 1,
                             "ts": record["ts"],
                             "source": source,
-                        },
-                        separators=(",", ":"),
-                    ).encode()
+                        }
+                    )
                 )
                 + 1
                 for event in events
             )
-            size = len(json.dumps(record).encode())
+            size = len(encode(record))
             # Leave space for assignment replacement and sealed upload copies.
             required = 2 * size + record["export_bytes"] + 65536
             reserved_exports = sum(r["export_bytes"] for r in self._index.values())
@@ -479,13 +496,21 @@ class EventSpool:
                 try:
                     with temporary.open("wb") as stream:
                         os.chmod(temporary, 0o600)
-                        for batch_id in manifest["batch_ids"]:
-                            for event in self.enriched(self.load(batch_id)):
-                                stream.write(
-                                    (
-                                        json.dumps(event, separators=(",", ":")) + "\n"
-                                    ).encode()
-                                )
+                        # Destination is frozen before sealing; legacy manifests
+                        # remain uncompressed even if the configured default changed.
+                        write_chunk(
+                            stream,
+                            (
+                                event
+                                for batch_id in manifest["batch_ids"]
+                                for event in self.enriched(self.load(batch_id))
+                            ),
+                            compression=(
+                                "zstd"
+                                if manifest["destination"].endswith(".zst")
+                                else "none"
+                            ),
+                        )
                         stream.flush()
                         self._sync_file(stream.fileno())
                     old_size = chunk_path.stat().st_size if chunk_path.exists() else 0
@@ -635,9 +660,43 @@ class SpoolReadBackend:
     def read_stream(
         self, user_id: str, session_id: str, after_seq: int = 0
     ) -> Iterator[dict]:
-        while page := self.read(user_id, session_id, after_seq, 128):
-            yield from page
-            after_seq = page[-1]["seq"]
+        key = (user_id, session_id)
+        # Snapshot pending payloads before releasing the lifecycle lock: export
+        # may retire them while a slow stream is consumed. Never hold the lock
+        # across a yield, or an HTTP consumer can indefinitely block appends.
+        with self.spool.session_lock(key):
+            pending = list(self.spool.events(key, after_seq))
+            high_water = max(
+                self._archive_call("last_seq", *key),
+                pending[-1]["seq"] if pending else after_seq,
+            )
+
+        def archive_events() -> Iterator[dict]:
+            try:
+                for event in self.archive.read_stream(*key, after_seq):
+                    if event["seq"] > high_water:
+                        break
+                    yield event
+            except Exception as exc:
+                identity = hashlib.sha256(
+                    repr(("read_stream", key, after_seq)).encode()
+                ).hexdigest()
+                self.spool.backend_failed(
+                    exc,
+                    read_identity=identity,
+                    retry_read=lambda: deque(
+                        self.archive.read_stream(*key, after_seq), maxlen=0
+                    ),
+                )
+                raise
+
+        previous_seq = after_seq
+        for event in heapq.merge(
+            iter(pending), archive_events(), key=lambda event: event["seq"]
+        ):
+            if event["seq"] > previous_seq:
+                yield event
+                previous_seq = event["seq"]
 
     def available_seq_ranges(
         self, user_id: str, session_id: str, *, force_refresh: bool = False

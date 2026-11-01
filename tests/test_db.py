@@ -589,6 +589,71 @@ class TestAuditStore:
         assert record["user_note"] == "Not approved"
         assert record["resolved_at"] is not None
 
+    @pytest.mark.parametrize(
+        ("decision", "resolved_by", "obligations", "evaluation_path", "expected"),
+        [
+            ("approve", "user", [{"id": "alignment.compatibility"}], "fast", True),
+            ("deny", "user", [{"id": "alignment.compatibility"}], "fast", False),
+            ("approve", "judge", [{"id": "alignment.compatibility"}], "fast", False),
+            ("approve", "user", [], "alignment", True),
+        ],
+    )
+    def test_alignment_override_follows_human_approval(
+        self,
+        audit_store,
+        session_store,
+        decision,
+        resolved_by,
+        obligations,
+        evaluation_path,
+        expected,
+    ):
+        self._create_session(session_store, "sess_alignment_resolution")
+        session = session_store.get("sess_alignment_resolution", user_id=TEST_USER)
+        metadata = {
+            "evaluation_policy_version": "hybrid_v1",
+            "policy_revision": session["policy_revision"],
+            "state_revision": session["state_revision"],
+            "action_digest": "alignment-action-digest",
+            "outstanding_obligations": obligations,
+        }
+        audit_store.insert(
+            call_id=f"call_alignment_{decision}_{resolved_by}_{evaluation_path}",
+            user_id=TEST_USER,
+            session_id="sess_alignment_resolution",
+            agent_id=None,
+            tool="read",
+            args_redacted={},
+            classification="read",
+            evaluation_path=evaluation_path,
+            decision="escalate",
+            risk="low",
+            reasoning="Alignment review",
+            latency_ms=1,
+            evaluation_metadata=metadata,
+        )
+
+        audit_store.resolve_escalation(
+            call_id=f"call_alignment_{decision}_{resolved_by}_{evaluation_path}",
+            user_decision=decision,
+            user_id=TEST_USER,
+            resolved_by=resolved_by,
+            hybrid_metadata=metadata if resolved_by == "judge" else None,
+        )
+
+        session = session_store.get("sess_alignment_resolution", user_id=TEST_USER)
+        assert bool(session["alignment_overridden"]) is expected
+        if expected:
+            assert session["alignment_state"] == "ready"
+            record = audit_store.get_by_call_id(
+                f"call_alignment_{decision}_{resolved_by}_{evaluation_path}",
+                user_id=TEST_USER,
+            )
+            assert (
+                record["evaluation_metadata"]["state_revision"]
+                == session["state_revision"]
+            )
+
     def test_resolve_non_escalated(self, audit_store, session_store):
         self._create_session(session_store, "sess_ne")
         audit_store.insert(

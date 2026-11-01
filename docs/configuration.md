@@ -286,6 +286,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 |---|---|---|
 | `EVENT_STORE_ENABLED` | `true` | Master switch for session recording |
 | `EVENT_STORE_BACKEND` | `filesystem` | Storage backend: `filesystem` or `s3` |
+| `EVENT_STORE_COMPRESSION` | `zstd` | New archive chunks: checksummed Zstandard level 1 (`.ndjson.zst`), or `none` for plain NDJSON |
 | `EVENT_STORE_PATH` | `~/.intaris/events` | Filesystem backend storage path |
 | `EVENT_STORE_SPOOL_ENABLED` | `true` | Stage local pending batches before acknowledging; one writer/replica only |
 | `EVENT_STORE_SPOOL_FSYNC` | `true` | Sync spool files/directories; disable only when host-crash durability is not required |
@@ -317,6 +318,18 @@ while retaining flushed writes, checksums, and atomic replacement. This retains
 process/container-restart protection while the host kernel and volume survive,
 but acknowledged data can be lost or inconsistently persisted after a node/kernel
 crash, reboot, or power loss. It does not change database or archive durability.
+
+Compression applies at archival, not to the pending batch files or the HTTP
+protocol. Readers automatically accept mixed compressed and legacy chunks.
+Unfinished exports keep their frozen format and exact bytes across configuration
+changes. `EVENT_STORE_FLUSH_BYTES` still targets approximate **uncompressed**
+bytes; compression does not enlarge the event-count or time thresholds.
+
+Upgrade all readers before enabling compressed writers. For a staged rollout,
+set `EVENT_STORE_COMPRESSION=none` until all readers support the new format.
+Setting it back to `none` does not convert existing compressed objects; older
+versions cannot read them. Do not downgrade readers while compressed chunks
+remain in the archive.
 
 Use a dedicated disk-backed volume, not the immutable cache directory or tmpfs.
 See [Local event spool](event-spool.md) for crash guarantees, deployment mounts,

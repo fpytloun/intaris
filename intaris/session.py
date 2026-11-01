@@ -38,6 +38,8 @@ class SessionStore:
         agent_id: str | None = None,
         title: str | None = None,
         expected_policy_revision: int | None = None,
+        analytics_enabled: bool = True,
+        guardrails_enabled: bool = True,
     ) -> dict[str, Any]:
         """Create a new session.
 
@@ -96,8 +98,8 @@ class SessionStore:
                         (session_id, user_id, intention, details, policy,
                          last_activity_at, parent_session_id, agent_id,
                            title, created_at, updated_at, alignment_state, original_assignment,
-                           policy_source, parent_policy_hash)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           policy_source, parent_policy_hash, analytics_enabled, guardrails_enabled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session_id,
@@ -113,12 +115,15 @@ class SessionStore:
                         now,
                         "pending"
                         if parent_session_id
+                        and guardrails_enabled
                         and (policy or {}).get("evaluation_policy_version")
                         == "hybrid_v1"
                         else "ready",
                         intention,
                         json.dumps(local_policy),
                         authorization_identity(parent) if parent else None,
+                        analytics_enabled,
+                        guardrails_enabled,
                     ),
                 )
             except Exception as e:
@@ -270,6 +275,8 @@ class SessionStore:
         intention_source: str | None = None,
         title: str | None = None,
         expected_policy_revision: int | None = None,
+        analytics_enabled: bool | None = None,
+        guardrails_enabled: bool | None = None,
     ) -> dict[str, Any]:
         """Update session intention, title, and/or details.
 
@@ -316,6 +323,8 @@ class SessionStore:
             and policy is None
             and intention_source is None
             and title is None
+            and analytics_enabled is None
+            and guardrails_enabled is None
         ):
             return self.get(session_id, user_id=user_id)
 
@@ -363,6 +372,8 @@ class SessionStore:
                     ("details", details),
                     ("intention_source", intention_source),
                     ("title", title),
+                    ("analytics_enabled", analytics_enabled),
+                    ("guardrails_enabled", guardrails_enabled),
                 )
             )
         ):
@@ -394,6 +405,42 @@ class SessionStore:
         if title is not None:
             sets.append("title = ?")
             params.append(title)
+        for field, value in (
+            ("analytics_enabled", analytics_enabled),
+            ("guardrails_enabled", guardrails_enabled),
+        ):
+            if value is not None:
+                revision = field.replace("_enabled", "_revision")
+                sets.append(
+                    f"{revision} = {revision} + CASE WHEN {field} = ? THEN 0 ELSE 1 END"
+                )
+                params.append(value)
+                sets.append(f"{field} = ?")
+                params.append(value)
+        if guardrails_enabled is not None:
+            if not any(
+                value is not None
+                for value in (intention, policy, details, intention_source)
+            ):
+                sets.append(
+                    "state_revision = state_revision + CASE WHEN guardrails_enabled = ? THEN 0 ELSE 1 END"
+                )
+                params.append(guardrails_enabled)
+            sets.append(
+                "alignment_state = CASE WHEN guardrails_enabled = ? THEN alignment_state ELSE ? END"
+            )
+            params.extend(
+                [
+                    guardrails_enabled,
+                    "pending"
+                    if guardrails_enabled and current.get("parent_session_id")
+                    else "ready",
+                ]
+            )
+            sets.append(
+                "alignment_reason = CASE WHEN guardrails_enabled = ? THEN alignment_reason ELSE NULL END"
+            )
+            params.append(guardrails_enabled)
 
         params.extend([session_id, user_id])
         revision_clause = ""
@@ -417,6 +464,32 @@ class SessionStore:
                         409,
                     )
                 raise ValueError(f"Session {session_id} not found")
+            # Revoke claims in the same transaction as opt-out. An already
+            # dispatched call may finish, but its writes must fail their fence.
+            for enabled, task_type in (
+                (analytics_enabled, "summary"),
+                (guardrails_enabled, "intention_update"),
+            ):
+                if enabled is False:
+                    cur.execute(
+                        "UPDATE analysis_tasks SET status = 'cancelled', claim_token = NULL, "
+                        "completed_at = ?, result = ? WHERE user_id = ? AND session_id = ? "
+                        "AND task_type = ? AND status IN ('pending', 'running')",
+                        (
+                            now,
+                            json.dumps(
+                                {
+                                    "status": "skipped",
+                                    "reason": "analytics_disabled"
+                                    if task_type == "summary"
+                                    else "guardrails_disabled",
+                                }
+                            ),
+                            user_id,
+                            session_id,
+                            task_type,
+                        ),
+                    )
 
             if (
                 policy is not None
@@ -444,7 +517,9 @@ class SessionStore:
     ) -> bool:
         if state not in {"ready", "pending", "misaligned", "error"}:
             raise ValueError("Invalid alignment state")
-        condition = "" if expected_state_revision is None else " AND state_revision = ?"
+        condition = " AND guardrails_enabled = TRUE"
+        if expected_state_revision is not None:
+            condition += " AND state_revision = ?"
         params = [state, reason, session_id, user_id]
         if expected_state_revision is not None:
             params.append(expected_state_revision)
@@ -744,10 +819,12 @@ class SessionStore:
         require_no_user_message: bool = False,
         intention_profile: dict[str, Any] | None = None,
         expected_state_revision: int | None = None,
+        initialize_title: bool = False,
+        expected_guardrails_revision: int | None = None,
     ) -> bool:
         """Persist a generated intention only while its durable guard holds."""
         now = datetime.now(timezone.utc).isoformat()
-        conditions = ["session_id = ?", "user_id = ?"]
+        conditions = ["session_id = ?", "user_id = ?", "guardrails_enabled = TRUE"]
         params: list[Any] = [
             intention,
             intention_source,
@@ -758,6 +835,9 @@ class SessionStore:
             else None,
         ]
         condition_params: list[Any] = [session_id, user_id]
+        if expected_guardrails_revision is not None:
+            conditions.append("guardrails_revision = ?")
+            condition_params.append(expected_guardrails_revision)
         if guard_user_message_seq:
             if expected_user_message_seq is None:
                 conditions.append("latest_user_message_seq IS NULL")
@@ -771,12 +851,17 @@ class SessionStore:
             conditions.append("state_revision = ?")
             condition_params.append(expected_state_revision)
         params.extend(condition_params)
+        title_assignment = (
+            "CASE WHEN title IS NULL OR title = '' THEN COALESCE(?, title) ELSE title END"
+            if initialize_title
+            else "COALESCE(?, title)"
+        )
         with self._db.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 UPDATE sessions
                 SET intention = ?, intention_source = ?, state_revision = state_revision + 1,
-                    title = COALESCE(?, title), updated_at = ?, intention_profile = ?
+                    title = {title_assignment}, updated_at = ?, intention_profile = ?
                 WHERE """
                 + " AND ".join(conditions),
                 params,
@@ -928,7 +1013,9 @@ class SessionStore:
             user_id: Tenant identifier (must match session owner).
         """
         now = datetime.now(timezone.utc).isoformat()
-        with self._db.cursor() as cur:
+        from intaris.session_modes import analytics_write
+
+        with analytics_write(self._db) as cur:
             cur.execute(
                 """
                 UPDATE sessions
@@ -949,7 +1036,9 @@ class SessionStore:
         """
 
         now = datetime.now(timezone.utc).isoformat()
-        with self._db.cursor() as cur:
+        from intaris.session_modes import analytics_write
+
+        with analytics_write(self._db) as cur:
             cur.execute(
                 """
                 UPDATE sessions
@@ -1391,6 +1480,8 @@ class SessionStore:
 def _row_to_dict(row: Any) -> dict[str, Any]:
     """Convert a sqlite3.Row to a plain dict, parsing JSON fields."""
     d = dict(row)
+    for field in ("analytics_enabled", "guardrails_enabled"):
+        d[field] = bool(d.get(field, True))
     for json_field in ("details", "policy"):
         if d.get(json_field):
             try:

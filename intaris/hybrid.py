@@ -752,12 +752,12 @@ def evaluate_policy(
             return result("deny")
         if opinion_blocks("restriction_conflict"):
             need("model.denial", [], kind="independent_review", protected=True)
-    if (
-        profile in {"balanced", "bounded_autonomy"}
-        and values.get("static_read")
+    static_read_proven = (
+        values.get("static_read")
         and mutation == "read_only"
         and state.known("effects")
         and set(state.value("effects", [])) <= {"read"}
+        and not state.value("external_or_irreversible", False)
         and not state.value("secret_argument")
         and state.assessment.get("relationship") != "conflicts_with_intent"
         and not (
@@ -767,7 +767,15 @@ def evaluate_policy(
         )
         and state.assessment.get("target_scope") != "conflicts"
         and state.assessment.get("risk") not in {"high", "critical"}
-    ):
+    )
+    if static_read_proven and [item.id for item in obligations] == [
+        "alignment.compatibility"
+    ]:
+        # A read cannot act outside the parent's scope by effect, so the
+        # compatibility question is moot for it in every profile. Any other
+        # outstanding obligation keeps its own route below.
+        return result("approve", "read_only_static", "deterministic")
+    if static_read_proven and profile in {"balanced", "bounded_autonomy"}:
         if not obligations:
             return result("approve", "read_only_static", "deterministic")
         if all(item.requirement == "independent_review" for item in obligations):

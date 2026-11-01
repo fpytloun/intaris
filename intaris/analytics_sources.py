@@ -28,6 +28,9 @@ class SourceProgress:
     @classmethod
     def load(cls, db: Any, user_id: str, session_id: str) -> SourceProgress:
         progress = cls()
+        from intaris.session_modes import analytics_scope
+
+        scope = analytics_scope(db, user_id)
         cursor = None
         while True:
             params: list[Any] = [user_id, session_id]
@@ -46,6 +49,8 @@ class SourceProgress:
                 )
                 rows = cur.fetchall()
             for row in rows:
+                if not scope.usable_summary({**dict(row), "session_id": session_id}):
+                    continue
                 evidence = metadata(row["evidence_metadata"])
                 if not evidence:
                     progress.legacy_cutoff = max(

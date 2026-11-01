@@ -526,6 +526,9 @@ class LLMClient:
                 from intaris.inference_attribution import attribution_headers
 
                 headers = attribution_headers() if self._managed_inference else {}
+                from intaris.session_modes import check_dispatch
+
+                check_dispatch()
                 response = call(
                     **params, **({"extra_headers": headers} if headers else {})
                 )

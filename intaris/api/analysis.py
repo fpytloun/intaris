@@ -494,7 +494,15 @@ async def trigger_summary(
         session_store = SessionStore(db)
 
         # Verify session exists and belongs to user
-        session_store.get(session_id, user_id=ctx.user_id)
+        session = session_store.get(session_id, user_id=ctx.user_id)
+        if not session["analytics_enabled"]:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "analytics_disabled",
+                    "message": "Analytics is disabled for this session.",
+                },
+            )
 
         # Get background worker from app state
         worker = getattr(http_request.app.state, "background_worker", None)
@@ -516,6 +524,19 @@ async def trigger_summary(
             payload={"trigger": "manual"},
             priority=1,
         )
+        if (
+            task_id is None
+            and not session_store.get(session_id, user_id=ctx.user_id)[
+                "analytics_enabled"
+            ]
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "analytics_disabled",
+                    "message": "Analytics is disabled for this session.",
+                },
+            )
 
         return SummaryTriggerResponse(ok=True, task_id=task_id)
     except HTTPException:
@@ -552,7 +573,7 @@ async def get_session_summaries(
         session_store = SessionStore(db)
 
         # Verify session exists and belongs to user
-        session_store.get(session_id, user_id=ctx.user_id)
+        session = session_store.get(session_id, user_id=ctx.user_id)
 
         with db.cursor() as cur:
             # Intaris-generated summaries (compacted first, then by time)
@@ -594,6 +615,7 @@ async def get_session_summaries(
         agent_summaries = [AgentSummaryRecord(**dict(row)) for row in agent_rows]
 
         return SessionSummariesResponse(
+            analytics_enabled=session["analytics_enabled"],
             intaris_summaries=intaris_summaries,
             agent_summaries=agent_summaries,
         )
@@ -632,8 +654,20 @@ async def trigger_analysis(
         from intaris.server import _get_db
 
         task_queue = worker._task_queue
+        db = _get_db()
+        with db.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT COALESCE(agent_id, '') AS agent_id "
+                "FROM sessions WHERE user_id = ? AND analytics_enabled = TRUE",
+                (ctx.user_id,),
+            )
+            eligible_agents = {row["agent_id"] for row in cur.fetchall()}
 
         if agent_id:
+            if agent_id not in eligible_agents:
+                return AnalysisTriggerResponse(
+                    enqueued=0, reason="no_eligible_sessions"
+                )
             # Single agent — check for duplicate, enqueue one task
             if task_queue.cancel_duplicate("analysis", ctx.user_id, agent_id=agent_id):
                 return AnalysisTriggerResponse(ok=True, task_id=None, enqueued=0)
@@ -656,7 +690,7 @@ async def trigger_analysis(
         with db.cursor() as cur:
             cur.execute(
                 "SELECT DISTINCT COALESCE(agent_id, '') as agent_id "
-                "FROM sessions WHERE user_id = ?",
+                "FROM sessions WHERE user_id = ? AND analytics_enabled = TRUE",
                 (ctx.user_id,),
             )
             agents = [
@@ -687,7 +721,12 @@ async def trigger_analysis(
             len(agents),
             enqueued,
         )
-        return AnalysisTriggerResponse(ok=True, task_id=None, enqueued=enqueued)
+        return AnalysisTriggerResponse(
+            ok=True,
+            task_id=None,
+            enqueued=enqueued,
+            reason="no_eligible_sessions" if not agents else None,
+        )
     except Exception:
         logger.exception("Error in /analysis/trigger")
         raise HTTPException(
@@ -743,7 +782,7 @@ async def backfill_summaries(
         where = " AND ".join(conditions)
         with db.cursor() as cur:
             cur.execute(
-                f"SELECT user_id, session_id, summary_count "
+                f"SELECT user_id, session_id, summary_count, analytics_enabled "
                 f"FROM sessions WHERE {where} LIMIT ?",
                 (*params, _BACKFILL_SESSION_LIMIT),
             )
@@ -752,25 +791,32 @@ async def backfill_summaries(
         task_queue = worker._task_queue
         enqueued = 0
         skipped = 0
+        skipped_disabled = 0
 
         for row in rows:
             uid = row["user_id"] if isinstance(row, dict) else row[0]
             sid = row["session_id"] if isinstance(row, dict) else row[1]
             sc = row["summary_count"] if isinstance(row, dict) else row[2]
+            if not row["analytics_enabled"]:
+                skipped_disabled += 1
+                continue
 
             if not force and (sc or 0) > 0:
                 skipped += 1
                 continue
 
             if not task_queue.cancel_duplicate("summary", uid, sid):
-                task_queue.enqueue(
+                task_id = task_queue.enqueue(
                     "summary",
                     uid,
                     session_id=sid,
                     payload={"trigger": "manual"},
                     priority=1,
                 )
-                enqueued += 1
+                if task_id is not None:
+                    enqueued += 1
+                else:
+                    skipped_disabled += 1
 
         logger.info(
             "Summary backfill: user=%s agent=%s lookback=%dd force=%s "
@@ -783,7 +829,9 @@ async def backfill_summaries(
             skipped,
         )
 
-        return BackfillSummariesResponse(enqueued=enqueued, skipped=skipped)
+        return BackfillSummariesResponse(
+            enqueued=enqueued, skipped=skipped, skipped_disabled=skipped_disabled
+        )
     except Exception:
         logger.exception("Error in /summaries/backfill")
         raise HTTPException(

@@ -1218,6 +1218,81 @@ _SECRET_ARGUMENT_PATTERNS = (
 )
 
 
+# Git global options that consume the next token, used to locate grep patterns.
+_GIT_GLOBAL_VALUE_OPTIONS = {
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+    "--super-prefix",
+}
+_GIT_GREP_VALUE_OPTIONS = {
+    "-f",
+    "-A",
+    "-B",
+    "-C",
+    "-m",
+    "--after-context",
+    "--before-context",
+    "--context",
+    "--max-count",
+    "--max-depth",
+    "--threads",
+}
+
+
+def _git_grep_pattern_indexes(arguments: list[str]) -> set[int]:
+    """Indexes of `git grep` search patterns among the arguments after `git`.
+
+    A search pattern is text to look for, not a file whose contents are
+    printed, so a word like `token` in it is not a disclosure signal. Only
+    `-e`/`--regexp` values, or the first positional when no `-e` is given,
+    are patterns; tree-ish, pathspecs and `-f` pattern files stay checked.
+    """
+    clean = [argument.strip("'\"") for argument in arguments]
+    index = 0
+    while index < len(clean) and clean[index].startswith("-"):
+        index += 2 if clean[index] in _GIT_GLOBAL_VALUE_OPTIONS else 1
+    if index >= len(clean) or clean[index] != "grep":
+        return set()
+    patterns: set[int] = set()
+    explicit = False
+    index += 1
+    while index < len(clean):
+        argument = clean[index]
+        if argument == "--":
+            break
+        if argument in {"-e", "--regexp"}:
+            if index + 1 < len(clean):
+                patterns.add(index + 1)
+            explicit = True
+            index += 2
+            continue
+        if argument.startswith("--regexp=") or (
+            argument.startswith("-e") and len(argument) > 2
+        ):
+            patterns.add(index)
+            explicit = True
+            index += 1
+            continue
+        if argument in _GIT_GREP_VALUE_OPTIONS:
+            if argument == "-f":
+                explicit = True
+            index += 2
+            continue
+        if argument.startswith("-f") and len(argument) > 2:
+            explicit = True
+        if argument.startswith("-"):
+            index += 1
+            continue
+        if not explicit:
+            patterns.add(index)
+        break
+    return patterns
+
+
 def secret_argument_disclosure(command: str) -> bool:
     """Recognize explicit secret-bearing output arguments without executing shell."""
     try:
@@ -1233,11 +1308,18 @@ def secret_argument_disclosure(command: str) -> bool:
             tokens[index - 1] and all(c in ";&|(\n" for c in tokens[index - 1])
         ):
             continue
-        if os.path.basename(token.strip("'\"")) not in _DISCLOSURE_COMMANDS:
+        name = os.path.basename(token.strip("'\""))
+        if name not in _DISCLOSURE_COMMANDS:
             continue
+        segment = []
         for argument in tokens[index + 1 :]:
             if argument and all(char in ";&|()<>\n" for char in argument):
                 break
+            segment.append(argument)
+        skipped = _git_grep_pattern_indexes(segment) if name == "git" else set()
+        for position, argument in enumerate(segment):
+            if position in skipped:
+                continue
             if any(
                 re.search(
                     ("" if pattern.startswith(".") else r"(?<![a-z0-9])")
@@ -1261,29 +1343,6 @@ def observe_hybrid(
 ) -> dict[str, Any]:
     """Separate actual static observations from configured permission shortcuts."""
     paths = resolve_tool_paths(tool, args, working_directory or "")
-    if tool == "bash":
-        for segment in _read_segments(_extract_bash_command(args)):
-            if segment[0] != "git":
-                continue
-            positional = False
-            for operand in segment[2:]:
-                if operand == "--" and not positional:
-                    positional = True
-                    continue
-                if operand.startswith("-") and not positional:
-                    continue
-                # After --, colons are literal filename characters. Before --,
-                # preserve the literal candidate as well as a Git revision:path
-                # candidate so ambiguity cannot remove a configured path deny.
-                targets = [operand]
-                if not positional and ":" in operand:
-                    revision, target = operand.split(":", 1)
-                    if re.fullmatch(r"[A-Za-z0-9_./@^~-]+", revision) and target:
-                        targets.append(target)
-                paths.extend(
-                    os.path.normpath(os.path.join(working_directory or "", target))
-                    for target in targets
-                )
     factual = classify(tool, args, working_directory=working_directory)
     pref = _get_tool_preference(tool, tool_preferences)
     facts = {
@@ -1381,10 +1440,47 @@ def resolve_tool_paths(
                 if tokens and tokens[0] in _BASH_FILE_OPERAND_COMMANDS:
                     raw_paths.extend(_file_operands_for_command(tokens))
 
-    if not raw_paths:
-        return []
-
-    return [resolve_path(p, working_directory) for p in raw_paths]
+    paths = [resolve_path(p, working_directory) for p in raw_paths]
+    if tool == "bash":
+        for segment in _read_segments(_extract_bash_command(args)):
+            if _system_command_name(segment[0]) != "git":
+                continue
+            directory = working_directory
+            index = 1
+            while index < len(segment):
+                if segment[index] == "--no-pager":
+                    index += 1
+                elif segment[index] == "-C" and index + 1 < len(segment):
+                    # Git applies repeated -C paths relative to the previous one.
+                    if segment[index + 1]:
+                        directory = resolve_path(segment[index + 1], directory)
+                        paths.append(directory)
+                    index += 2
+                else:
+                    break
+            # Only the routine-read grammar supplies Git operand semantics.
+            # Write commands can carry arbitrary text (for example commit -m).
+            if not verified_read_only_bash({"command": shlex.join(segment)}):
+                continue
+            positional = False
+            patterns = _git_grep_pattern_indexes(segment[1:])
+            for position in range(index + 1, len(segment)):
+                operand = segment[position]
+                if operand == "--" and not positional:
+                    positional = True
+                    continue
+                if not positional and (
+                    operand.startswith("-") or position - 1 in patterns
+                ):
+                    continue
+                # Retain both literal paths and revision:path candidates.
+                targets = [operand]
+                if not positional and ":" in operand:
+                    revision, target = operand.split(":", 1)
+                    if re.fullmatch(r"[A-Za-z0-9_./@^~-]+", revision) and target:
+                        targets.append(target)
+                paths.extend(resolve_path(target, directory) for target in targets)
+    return paths
 
 
 def _get_tool_preference(tool: str, preferences: dict[str, str] | None) -> str | None:
@@ -1651,6 +1747,47 @@ def _read_segments(command: str, *, legacy: bool = False) -> list[list[str]]:
         return []
 
 
+def _system_command_name(command: str) -> str:
+    """Normalize bare names and supported system binary paths consistently."""
+    for prefix in ("/usr/local/bin/", "/usr/bin/", "/bin/"):
+        if command.startswith(prefix) and "/" not in command[len(prefix) :]:
+            return command[len(prefix) :]
+    return command
+
+
+def _git_read_arguments(arguments: list[str]) -> list[str]:
+    """Remove only non-executable global options before a Git subcommand."""
+    while arguments:
+        if arguments[0] == "--no-pager":
+            arguments = arguments[1:]
+        elif arguments[0] == "-C" and len(arguments) >= 2:
+            arguments = arguments[2:]
+        else:
+            break
+    return arguments
+
+
+def _git_grep_opens_pager(arguments: list[str]) -> bool:
+    """Recognize grep's executable pager option, including short flag bundles."""
+    for argument in arguments:
+        if argument == "--":
+            break
+        key = argument.split("=", 1)[0]
+        if (
+            key.startswith("--")
+            and len(key) > 2
+            and "--open-files-in-pager".startswith(key)
+        ):
+            return True
+        if (
+            argument.startswith("-")
+            and not argument.startswith("--")
+            and "O" in argument
+        ):
+            return True
+    return False
+
+
 def verified_read_only_bash(args: dict[str, Any]) -> bool:
     """Pragmatic routine-read witness under docs/git-static-trust.md."""
     segments = _read_segments(_extract_bash_command(args))
@@ -1658,10 +1795,9 @@ def verified_read_only_bash(args: dict[str, Any]) -> bool:
         return False
     for tokens in segments:
         cmd, *arguments = tokens
-        # System binary directories name the same commands as bare names.
-        for prefix in ("/usr/local/bin/", "/usr/bin/", "/bin/"):
-            if cmd.startswith(prefix) and "/" not in cmd[len(prefix) :]:
-                cmd = cmd[len(prefix) :]
+        cmd = _system_command_name(cmd)
+        if cmd == "git":
+            arguments = _git_read_arguments(arguments)
         if cmd == "git" and arguments[:1] == ["branch"]:
             # Listing only; any name argument would create a branch.
             if not set(arguments[1:]) <= {
@@ -1677,6 +1813,9 @@ def verified_read_only_bash(args: dict[str, Any]) -> bool:
             }:
                 return False
         elif cmd == "git":
+            # `-C <dir>` only changes directory and `--no-pager` only drops
+            # paging; neither changes what a read subcommand does. `-c` is
+            # not skipped: settings such as core.fsmonitor execute commands.
             if not arguments or arguments[0] not in {
                 "status",
                 "rev-parse",
@@ -1692,7 +1831,12 @@ def verified_read_only_bash(args: dict[str, Any]) -> bool:
                 "remote",
                 "merge-base",
                 "cat-file",
+                "grep",
+                "blame",
             }:
+                return False
+            # `git grep -O <cmd>` runs a pager command on the matches.
+            if arguments[0] == "grep" and _git_grep_opens_pager(arguments[1:]):
                 return False
             # See docs/git-static-trust.md: existing config is trusted, command
             # line config/executable overrides and transports are not.
@@ -2007,11 +2151,16 @@ def _is_single_command_read_only(command: str) -> bool:
 
     # Git: check subcommand
     if base_cmd == "git" and len(tokens) > 1:
-        subcommand = tokens[1]
+        arguments = _git_read_arguments(tokens[1:])
+        if not arguments:
+            return False
+        subcommand = arguments[0]
+        if subcommand == "grep":
+            return not _git_grep_opens_pager(arguments[1:])
         if subcommand in _READ_ONLY_GIT_SUBCOMMANDS:
             return True
         if subcommand in _GIT_SUBCOMMANDS_WITH_CHECKS:
-            return _is_git_subcommand_read_only(subcommand, tokens[2:])
+            return _is_git_subcommand_read_only(subcommand, arguments[1:])
         return False
 
     # sed with -i flag is a write operation

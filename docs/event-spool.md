@@ -34,8 +34,11 @@ events from process/container crashes without writing event payloads to PostgreS
    is unnecessary. PostgreSQL holds only metadata, never the staged payload.
    Embedded stores without a SessionStore persist the assignment locally instead.
    Recovery of database-backed batches always requires the original SessionStore.
-4. Seal a contiguous group of batches into a final NDJSON file. Persist exact
-   membership, destination, range and checksum before upload.
+4. Seal a contiguous group of batches into a final archive file. New chunks use
+   checksummed Zstandard level 1 by default (`.ndjson.zst`); `none` retains plain
+   NDJSON. Persist exact membership, destination, range and checksum before upload.
+   The frozen destination chooses compression even after a configuration change,
+   and a sealed file is never re-encoded on retry.
 5. Upload with an immutable destination. Retry lost responses using identical
    bytes/key, not a newly grouped batch. Retire only the confirmed source files.
 
@@ -53,8 +56,11 @@ Archived receipts remain valid after a drained spool is disabled. An unfinished
 deletion fences both append and export until deletion recovery completes.
 
 Pending reads merge local files with the archive under the session lifecycle
-lock. Forward, reverse, tail, exact-sequence, streamed reads and availability
-checks use this same pending view. Only bounded export batches are materialized;
+lock. Streams snapshot pending payloads and the high-water under that lock, then
+release it before yielding to slow consumers. They traverse each archive chunk
+once and deduplicate overlap with the snapshot. Forward, reverse, tail,
+exact-sequence, streamed reads and availability checks use this same pending view.
+Only bounded export batches are materialized;
 upload uses the sealed file body rather than reading a large chunk into memory.
 Individual incoming batches and existing archive chunk reads still have their
 ordinary memory cost. Larger flush targets should therefore be benchmarked.
@@ -71,10 +77,28 @@ ordinary memory cost. Larger flush targets should therefore be benchmarked.
 | `EVENT_STORE_FLUSH_SIZE` | 100 events |
 | `EVENT_STORE_FLUSH_BYTES` | 4 MiB, approximate including staging metadata |
 | `EVENT_STORE_FLUSH_INTERVAL` | 30 seconds maximum age, checked periodically |
+| `EVENT_STORE_COMPRESSION` | `zstd`; `none` disables archive compression |
 
 Thresholds are evaluated at input batch boundaries: one large request can exceed
 a threshold. Increasing them consolidates S3 writes; it does not delay the local
 durability barrier. Age is persisted and is not reset by restart.
+
+Readers accept legacy `.ndjson` and new `.ndjson.zst` chunks together, regardless
+of the current write setting. The cache stores compressed object bytes. Pending
+batch files remain uncompressed for local recovery; JSON payload encoding and
+decoding use `msgspec`, with compatibility fallbacks for legacy nonstandard values.
+Hash-derived request identities retain their established encoding.
+
+Audit projection resumes from its committed contiguous checkpoint, including
+non-tool events, rather than rescanning the session from sequence zero after
+every export. Projection retries cannot skip a failed transaction. Filtered
+forward reads and audit backfill consume one stream rather than re-decoding
+the same chunk for each page.
+
+Upgrade every reader before allowing compressed writes. For a mixed-version
+rollout, keep `EVENT_STORE_COMPRESSION=none` until readers are upgraded. Older
+versions cannot read compressed history; switching writers back to `none` is
+not an archive conversion or a downgrade procedure.
 
 ### Optional unsynced mode
 
@@ -125,6 +149,74 @@ The immutable S3 read cache remains separate and disposable. No cache TTL, LRU,
 cleanup or cache-write failure may delete or invalidate pending spool data. Large
 file uploads warm that cache lazily on subsequent reads instead of copying the
 whole chunk into memory during upload.
+
+## Storage observability
+
+Storage metrics are available in the existing diagnostics snapshot and through
+the dedicated `/metrics` listener. Scraping takes in-memory snapshots: it does
+not scan archive objects, read spool payloads, or query the database. Metric names
+and dimensions are fixed; no tenant/session IDs, filenames, event types, content
+or tool arguments become labels. Counters and histograms are process-local and
+reset on restart.
+
+Prometheus names below use the `intaris_event_store_` prefix:
+
+| Suffix | Meaning |
+|---|---|
+| `append_requests_total`, `append_failures_total` | Finished public append calls, including retries, failures and empty batches; not unique stored events |
+| `append_latency_milliseconds` | Append histogram, including durability work, lock waits and any inline flush; separate from HTTP latency |
+| `pending_payload_bytes` | Estimated uncompressed pending payload size, including event envelopes; not disk consumption |
+| `oldest_pending_age_seconds` | Age of the oldest locally pending batch; a conservative archive-lag signal, not S3 consistency latency |
+| `spool_disk_bytes` | Spool disk accounting, including metadata and sealed copies |
+| `backend_chunks_events`, `backend_chunks_stored_bytes` | Per-confirmed-chunk histograms, even when one flush exports several chunks; stored bytes reflect compression |
+| `reads_OPERATION_requests_total`, `reads_OPERATION_failures_total` | Finalized read calls for `forward`, `exact`, `before`, `tail` or `stream`; nested calls count only at their outer boundary |
+| `reads_OPERATION_returned_events_total`, `reads_OPERATION_decoded_events_total` | Events returned versus archive records decoded, including filtering/skipping and partial work before a failure |
+| `reads_OPERATION_chunk_reads_total`, `reads_OPERATION_chunk_bytes_total` | Archive chunks and stored bytes presented to the decoder, including cache hits; not network-transfer counters |
+| `reads_OPERATION_decode_amplification` | Per-read decoded/returned event ratio; zero-return reads are excluded from this histogram |
+| `reads_OPERATION_zero_result_requests_total` | Successful, fully consumed reads that returned nothing |
+| `reads_OPERATION_latency_milliseconds` | Storage-call latency; streams accumulate active iterator work, excluding downstream waiting time |
+| `reads_stream_abandoned_total` | Started streams explicitly closed before exhaustion; never-started or still-open iterators are not finalized measurements |
+
+Pending spool age uses the persisted batch timestamp and therefore survives a
+process restart; clock skew is clamped at zero. In optional non-durable buffering
+mode, backlog gauges describe queued in-memory batches, not a detached flush
+currently in flight. Failed flushes retain the original queued age.
+
+Confirmed chunk histograms include retries that verify an existing immutable
+object; they are not a unique-object inventory. Existing flush histograms retain
+their historical per-flush semantics. Decode amplification counts JSON records,
+not compressed-frame validation passes; pending-only reads can decode no archive
+records. Read metrics include internal consumers using the public read methods,
+but not unrelated direct backend calls. A stream is measured on exhaustion,
+failure or close, and its context is not retained while its consumer is paused.
+
+Existing `backend_event_cache_*` metrics report payload-cache hits/misses,
+residency, evictions and latency. `backend_chunk_cache_*` describes the separate
+chunk-directory cache. Existing S3 operation/request/transfer metrics remain
+separate, so cached reads must not be interpreted as network bytes.
+
+Example PromQL for append p95 (milliseconds):
+
+```promql
+histogram_quantile(0.95,
+  sum by (le) (rate(intaris_event_store_append_latency_milliseconds_bucket[5m])))
+```
+
+Payload-cache hit fraction (undefined while there are no cache lookups):
+
+```promql
+sum(rate(intaris_event_store_backend_event_cache_hits_total[5m]))
+/
+(
+  sum(rate(intaris_event_store_backend_event_cache_hits_total[5m]))
+  + sum(rate(intaris_event_store_backend_event_cache_misses_total[5m]))
+)
+```
+
+For tuning, correlate oldest pending age and pending bytes with append p95/p99,
+chunk size distributions, S3 PUT/LIST rates and per-operation decode amplification.
+No PostgreSQL payload buffer or change to the ingestion durability protocol is
+required for these measurements.
 
 ## Kubernetes deployment
 

@@ -737,7 +737,7 @@ class TestEventStore:
         assert len(events) == 2
         assert observed_limits == [2]
 
-    def test_filtered_read_pages_until_limit_is_satisfied(self, tmp_path):
+    def test_filtered_read_streams_until_limit_is_satisfied(self, tmp_path):
         config = EventStoreConfig(
             backend="filesystem",
             filesystem_path=str(tmp_path / "events"),
@@ -754,14 +754,15 @@ class TestEventStore:
         ]
         store.append("alice", "sess1", events)
         store.flush_all()
-        observed_limits = []
-        original_read = store._backend.read
+        observed_sequences = []
+        original_stream = store._backend.read_stream
 
-        def recording_read(user_id, session_id, after_seq=0, limit=0):
-            observed_limits.append(limit)
-            return original_read(user_id, session_id, after_seq, limit)
+        def recording_stream(user_id, session_id, after_seq=0):
+            for event in original_stream(user_id, session_id, after_seq):
+                observed_sequences.append(event["seq"])
+                yield event
 
-        store._backend.read = recording_read
+        store._backend.read_stream = recording_stream
         result = store.read(
             "alice",
             "sess1",
@@ -770,7 +771,7 @@ class TestEventStore:
         )
 
         assert [event["data"]["index"] for event in result] == [150]
-        assert observed_limits == [100, 100]
+        assert observed_sequences == list(range(1, 201))
 
     def test_filtered_read_prefers_earlier_persisted_match_over_buffer(self, tmp_path):
         config = EventStoreConfig(
@@ -807,7 +808,7 @@ class TestEventStore:
 
         assert [event["data"]["index"] for event in result] == [150]
 
-    def test_sparse_filtered_read_processes_each_page_once(self, tmp_path):
+    def test_sparse_filtered_read_processes_each_event_once(self, tmp_path):
         config = EventStoreConfig(
             backend="filesystem",
             filesystem_path=str(tmp_path / "events"),
@@ -821,14 +822,15 @@ class TestEventStore:
             [{"type": "message", "data": {"index": index}} for index in range(1, 251)],
         )
         store.flush_all()
-        observed_after_seq = []
-        original_read = store._backend.read
+        observed_sequences = []
+        original_stream = store._backend.read_stream
 
-        def recording_read(user_id, session_id, after_seq=0, limit=0):
-            observed_after_seq.append(after_seq)
-            return original_read(user_id, session_id, after_seq, limit)
+        def recording_stream(user_id, session_id, after_seq=0):
+            for event in original_stream(user_id, session_id, after_seq):
+                observed_sequences.append(event["seq"])
+                yield event
 
-        store._backend.read = recording_read
+        store._backend.read_stream = recording_stream
         result = store.read(
             "alice",
             "sess1",
@@ -837,7 +839,7 @@ class TestEventStore:
         )
 
         assert result == []
-        assert observed_after_seq == [0, 100, 200]
+        assert observed_sequences == list(range(1, 251))
 
     def test_read_with_type_filter(self, store):
         store.append(
@@ -1718,6 +1720,7 @@ class TestEventStoreConfig:
         assert config.backend == "filesystem"
         assert config.flush_size == 100
         assert config.flush_bytes == 4 * 1024 * 1024
+        assert config.compression == "zstd"
         assert config.flush_interval == 30
         assert config.s3_chunk_cache_ttl == 300.0
         assert config.event_cache_backend == "filesystem"
@@ -1784,7 +1787,11 @@ class TestS3EventBackendCache:
 
     @staticmethod
     def backend(client, event_cache=None):
+        from intaris.events.observability import ChunkMetrics
+
         backend = S3EventBackend.__new__(S3EventBackend)
+        backend._compression = "none"
+        backend._chunk_metrics = ChunkMetrics()
         backend._client = client
         backend._client_error_type = TestS3EventBackendCache.FakeClientError
         backend._endpoint_identity = "https://s3.test"

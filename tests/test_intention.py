@@ -2569,8 +2569,9 @@ class TestParseTitleIntention:
         raw = '{"title": "Test", "intention": "Hi"}'
         title, intention = _parse_title_intention(raw, current_title="Old")
         # intention < 5 chars returns empty string (causes generate_intention
-        # to return None and skip the update) instead of storing raw JSON
-        assert title == "Old"
+        # to return None and skip the intention update) instead of storing raw JSON.
+        # A syntactically valid display label is parsed independently.
+        assert title == "Test"
         assert intention == ""
 
     def test_title_truncated_to_120(self):

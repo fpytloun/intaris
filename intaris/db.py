@@ -408,6 +408,16 @@ class Database:
 
     def _migrate_sqlite(self, conn: sqlite3.Connection) -> None:
         """Run schema migrations for SQLite backend."""
+        for column in (
+            "analytics_enabled",
+            "guardrails_enabled",
+            "analytics_revision",
+            "guardrails_revision",
+        ):
+            if not self._sqlite_column_exists(conn, "sessions", column):
+                conn.execute(
+                    f"ALTER TABLE sessions ADD COLUMN {column} INTEGER NOT NULL DEFAULT 1"
+                )
         from intaris.workflow_scope import SCHEMA
 
         conn.execute(SCHEMA)
@@ -1018,6 +1028,10 @@ class Database:
         try:
             # All columns that may need adding (idempotent with IF NOT EXISTS)
             migrations = [
+                ("sessions", "analytics_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("sessions", "guardrails_enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("sessions", "analytics_revision", "INTEGER NOT NULL DEFAULT 1"),
+                ("sessions", "guardrails_revision", "INTEGER NOT NULL DEFAULT 1"),
                 ("sessions", "policy_revision", "INTEGER NOT NULL DEFAULT 1"),
                 ("sessions", "state_revision", "INTEGER NOT NULL DEFAULT 1"),
                 ("audit_log", "evaluation_metadata", "TEXT"),
@@ -1320,6 +1334,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     intention TEXT NOT NULL,
+    analytics_enabled INTEGER NOT NULL DEFAULT 1,
+    guardrails_enabled INTEGER NOT NULL DEFAULT 1,
+    analytics_revision INTEGER NOT NULL DEFAULT 1,
+    guardrails_revision INTEGER NOT NULL DEFAULT 1,
     details TEXT,
     policy TEXT,
     total_calls INTEGER DEFAULT 0,
@@ -1622,6 +1640,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
     intention TEXT NOT NULL,
+    analytics_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    guardrails_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    analytics_revision INTEGER NOT NULL DEFAULT 1,
+    guardrails_revision INTEGER NOT NULL DEFAULT 1,
     details TEXT,
     policy TEXT,
     total_calls INTEGER DEFAULT 0,

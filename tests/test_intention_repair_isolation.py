@@ -50,8 +50,10 @@ def test_repair_keeps_original_user_payload_and_failed_summary(
         assert capture(stores)[1]["status"] == "ready"
     else:
         assert result is None
-        for field in ("title", "intention", "intention_source"):
+        for field in ("intention", "intention_source"):
             assert after[field] == before[field]
+        # Display metadata can initialize independently; it never becomes a task.
+        assert after["title"] == json.loads(bad)["title"]
         assert after["intention_profile"] is None
     assert "Regenerate JSON" not in after["intention"]
 

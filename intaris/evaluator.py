@@ -563,6 +563,8 @@ class Evaluator:
             return True
         policy = session.get("policy") or {}
         snapshot = policy.get("active_policy") or {}
+        if not session.get("guardrails_enabled", True):
+            return False
         return not (
             policy.get("evaluation_policy_version") == "hybrid_v1"
             and (snapshot.get("profile") or policy.get("profile")) == "bounded_autonomy"
@@ -691,6 +693,7 @@ class Evaluator:
         )
         if (
             not operator_bound
+            and session.get("guardrails_enabled", True)
             and active.get("evaluation_policy_version") == "hybrid_v1"
             and session.get("status") == "active"
             and session.get("alignment_state") in {"pending", "error"}
@@ -879,6 +882,7 @@ class Evaluator:
         hybrid_misalignment: dict[str, Any] | None = None
         if (
             not forced_legacy
+            and session.get("guardrails_enabled", True)
             and not operator_bound
             and (self._alignment_barrier is not None or durable_misaligned)
         ):

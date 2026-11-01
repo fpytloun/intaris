@@ -175,7 +175,7 @@
       ]
     }
   ],
-  "baseline_manifest_sha256": "72d65324e19d0f37ab83e3f120cfca74b0d5535ae3c39c5afb34800949917795",
+  "baseline_manifest_sha256": "bf7af507b6ea391385c4f7ccf30a9749106a906ebcfd11b5fdc0719e5eb5d3f3",
   "cohort": "final_git_authorization_diagnostic_v1",
   "compilation": [],
   "diagnostic_only": true,
@@ -202,7 +202,7 @@
   "overall_no_go_unchanged": true,
   "profile_matrix": [],
   "seed": 745456,
-  "sha256": "28339d47671ceb257595c2f416a8e1f8dd0d2af6b5f71e13027d471fb1f76114",
+  "sha256": "149aa6ea3c18ffbc69254b2fd14de28ddc302944ec1a5de89c89f1c2a6626e3d",
   "source_sha256": {
     "hybrid-policy-contract.md": "42d5122d0928afd232d19628092173284d1e2f36c0205e3c3ca13846e01063d0",
     "hybrid-policy-stage-matrix.json": "181574ac6476933ca51b3c49d4e503b7540519f0a18b15349e27d7f95e20e796",

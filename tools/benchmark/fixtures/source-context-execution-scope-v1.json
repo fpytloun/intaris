@@ -8,8 +8,8 @@
   "no_retry_stage_envelope": 4746,
   "original_attempt_cap": 4000,
   "primary_evaluations": 1800,
-  "primary_manifest_sha256": "4018703183bc75d663be635719d44d8887cfc7bf39c435f1d34e5a096a003b85",
+  "primary_manifest_sha256": "b3712156ef25c08ddb5ee945c31d78fa9c91e601f96e37a68e3b0366b78a729d",
   "reason": "Owner authorized48 checkpoints x3 trials x2 arms before inference",
-  "sha256": "c9f27b5326e3a28d0dc7c832c1efa1ee473eb4c75b52fc038f9c389c587aeeea",
+  "sha256": "95d6af80d7bd49729e051da23dd0f67b6d1d9090213348d0e356d7b8d32df6fe",
   "version": 1
 }

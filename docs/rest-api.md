@@ -73,6 +73,18 @@ Judge-enabled escalation semantics:
 
 ## Sessions
 
+Sessions accept independent top-level `analytics_enabled` and
+`guardrails_enabled` booleans, both defaulting to `true`. Creation responses,
+session reads and listings acknowledge their persisted values.
+`PATCH /api/v1/session/{id}` changes either flag; omitted or `null` fields
+leave the stored value unchanged. Creation rejects explicit `null` and
+non-boolean values.
+
+See [Session participation](session-participation.md) for disabled behavior,
+in-flight fencing, and the distinction from mandatory explicit evaluation.
+WorkflowStep v1 declarations remain unchanged: they require an existing
+session and do not change participation flags or their declaration digest.
+
 ### POST /intention
 
 Create a new session or update an existing session's intention.
@@ -83,6 +95,8 @@ Create a new session or update an existing session's intention.
 {
   "session_id": "oc-ses_abc123",
   "intention": "Implement user authentication feature",
+  "analytics_enabled": true,
+  "guardrails_enabled": true,
   "details": {
     "source": "opencode",
     "working_directory": "/home/user/project",

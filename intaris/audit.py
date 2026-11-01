@@ -791,6 +791,24 @@ class AuditStore:
         now = datetime.now(timezone.utc).isoformat()
         existing = self.get_by_call_id(call_id, user_id=user_id)
         existing_meta = existing.get("evaluation_metadata") or {}
+        policy_result = existing_meta.get("policy_result") or {}
+        outstanding = policy_result.get("outstanding_obligations") or existing_meta.get(
+            "outstanding_obligations", []
+        )
+        has_alignment_obligation = any(
+            item.get("id") == "alignment.compatibility" for item in outstanding
+        )
+        alignment_override = (
+            user_decision == "approve"
+            and resolved_by == "user"
+            and (
+                (
+                    existing_meta.get("evaluation_policy_version") == "hybrid_v1"
+                    and has_alignment_obligation
+                )
+                or existing.get("evaluation_path") == "alignment"
+            )
+        )
         from intaris import read_only
         from intaris.policy_activation import HybridError
 
@@ -859,6 +877,7 @@ class AuditStore:
                 )
             )
             and existing.get("evaluation_path") != "alignment"
+            and not alignment_override
             and existing_meta.get("evaluation_policy_version") == "hybrid_v1"
             and bool(existing.get("action_digest"))
         )
@@ -1011,12 +1030,7 @@ class AuditStore:
                     )
                 # Shouldn't reach here, but raise generic error
                 raise ValueError(f"Failed to resolve call {call_id}")
-            if (
-                existing_meta.get("evaluation_policy_version") == "hybrid_v1"
-                and existing.get("evaluation_path") == "alignment"
-                and user_decision == "approve"
-                and resolved_by == "user"
-            ):
+            if alignment_override:
                 cur.execute(
                     "UPDATE sessions SET alignment_state = 'ready', alignment_overridden = ?, "
                     "updated_at = ? WHERE user_id = ? AND session_id = ?",

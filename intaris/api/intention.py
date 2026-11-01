@@ -96,6 +96,8 @@ async def declare_intention(
             parent_session_id=request.parent_session_id,
             agent_id=ctx.agent_id,
             expected_policy_revision=request.expected_policy_revision,
+            analytics_enabled=request.analytics_enabled,
+            guardrails_enabled=request.guardrails_enabled,
         )
 
         # Publish session_created event
@@ -111,6 +113,8 @@ async def declare_intention(
                     "status": "active",
                     "parent_session_id": request.parent_session_id,
                     "details": request.details,
+                    "analytics_enabled": session["analytics_enabled"],
+                    "guardrails_enabled": session["guardrails_enabled"],
                 }
             )
 
@@ -145,7 +149,7 @@ async def declare_intention(
         # Trigger async alignment check for child sessions.
         # The check runs in the background; the first /evaluate call
         # waits for it via the alignment barrier.
-        if request.parent_session_id:
+        if request.parent_session_id and session["guardrails_enabled"]:
             alignment_barrier = getattr(
                 http_request.app.state, "alignment_barrier", None
             )
@@ -153,15 +157,19 @@ async def declare_intention(
                 await alignment_barrier.trigger(ctx.user_id, request.session_id)
 
         policy = session.get("policy") or {}
+        modes = {
+            key: session[key] for key in ("analytics_enabled", "guardrails_enabled")
+        }
         if policy.get("evaluation_policy_version") == "hybrid_v1":
             return IntentionResponse(
                 ok=True,
+                **modes,
                 policy_revision=session["policy_revision"],
                 state_revision=session["state_revision"],
                 policy_hash=policy["policy_hash"],
                 active_policy=policy["active_policy"],
             )
-        return IntentionResponse(ok=True)
+        return IntentionResponse(ok=True, **modes)
     except HybridError as e:
         from intaris.api.errors import hybrid_http_error
 
@@ -322,7 +330,21 @@ async def update_session(
             details=request.details,
             policy=request.policy,
             expected_policy_revision=request.expected_policy_revision,
+            analytics_enabled=request.analytics_enabled,
+            guardrails_enabled=request.guardrails_enabled,
         )
+
+        if request.guardrails_enabled is False:
+            barrier = getattr(http_request.app.state, "intention_barrier", None)
+            if barrier is not None:
+                barrier.invalidate(ctx.user_id, session_id)
+            alignment = getattr(http_request.app.state, "alignment_barrier", None)
+            if alignment is not None:
+                alignment.cancel(ctx.user_id, session_id)
+        elif request.guardrails_enabled is True and session.get("parent_session_id"):
+            alignment = getattr(http_request.app.state, "alignment_barrier", None)
+            if alignment is not None and session.get("alignment_state") == "pending":
+                await alignment.trigger(ctx.user_id, session_id)
 
         # Publish session_updated event
         event_bus = getattr(http_request.app.state, "event_bus", None)
@@ -335,6 +357,8 @@ async def update_session(
                     "intention": session.get("intention"),
                     "details": session.get("details"),
                     "policy": session.get("policy"),
+                    "analytics_enabled": session["analytics_enabled"],
+                    "guardrails_enabled": session["guardrails_enabled"],
                 }
             )
 

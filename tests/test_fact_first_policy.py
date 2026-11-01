@@ -647,6 +647,79 @@ def test_alignment_exemption_never_covers_unsafe_reads(override):
     assert "alignment.compatibility" in obligation_ids(result)
 
 
+@pytest.mark.parametrize("profile", ["balanced", "strict"])
+def test_static_read_alignment_only_obligation_is_approved(profile):
+    alignment = {
+        "state": "incompatible",
+        "grounded": True,
+        "overridden": False,
+    }
+    result = evaluate_policy(
+        [],
+        evidence(parent_alignment=alignment, **SAFE_READ),
+        profile,
+        assessed=True,
+    )
+    assert result.outcome == "approve"
+    assert result.permission_basis == "read_only_static"
+
+
+def test_static_read_with_an_additional_review_obligation_still_escalates():
+    alignment = {
+        "state": "incompatible",
+        "grounded": True,
+        "overridden": False,
+    }
+    state = evidence(
+        parent_alignment=alignment,
+        sources={"user:1": user_source(STOP)},
+        assessment={
+            "contextual_restrictions": "conflicts",
+            "restriction_reference": "user:1",
+            "restriction_quote": STOP,
+        },
+        **SAFE_READ,
+    )
+    result = evaluate_policy([], state, "balanced", assessed=True)
+    assert result.outcome == "escalate"
+    assert set(obligation_ids(result)) == {
+        "alignment.compatibility",
+        "model.denial",
+    }
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"secret_argument": True},
+        {"external_or_irreversible": True},
+        {"assessment": {"relationship": "conflicts_with_intent"}},
+        {"mutation": "mutating", "effects": ["write"]},
+    ],
+)
+def test_static_read_alignment_change_does_not_cover_conflicting_actions(override):
+    alignment = {
+        "state": "incompatible",
+        "grounded": True,
+        "overridden": False,
+    }
+    action = {
+        **SAFE_READ,
+        **{key: value for key, value in override.items() if key != "assessment"},
+    }
+    result = evaluate_policy(
+        [],
+        evidence(
+            parent_alignment=alignment,
+            assessment=override.get("assessment"),
+            **action,
+        ),
+        "balanced",
+        assessed=True,
+    )
+    assert result.outcome != "approve" or result.permission_basis != "read_only_static"
+
+
 def test_judge_approval_discharges_alignment_review_and_refusal_denies():
     incompatible = {
         "state": "incompatible",

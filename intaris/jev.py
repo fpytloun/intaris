@@ -714,6 +714,9 @@ class JevClient:
                 raise httpx.TimeoutException("Model call deadline exhausted")
             response = transport_error = retry_after = None
             try:
+                from intaris.session_modes import check_dispatch
+
+                check_dispatch()
                 response = self._client.post(
                     self._request_path,
                     **kwargs,

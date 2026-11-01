@@ -1919,8 +1919,8 @@ class JudgeReviewer:
                 "assessment_failed",
                 "unverified_restriction",
             }:
-                # An unavailable assessment is not an adverse model judgment.
-                # Keep the pending action unresolved even in unattended mode.
+                # Invalid review evidence never grants permission or establishes
+                # a user refusal. Unattended policy can still block the action.
                 revised = {
                     **metadata,
                     "stages": [
@@ -1932,6 +1932,43 @@ class JudgeReviewer:
                         },
                     ],
                 }
+                if (
+                    diagnostics.get("response_origin") == "unverified_restriction"
+                    and (session.get("policy") or {}).get("interaction_mode") == "none"
+                    and not resolution_policy.allow_human_escalation
+                ):
+                    final = finalize_result(
+                        prior_result.model_copy(update={"outcome": "escalate"}),
+                        maximum=record.get("maximum_outcome"),
+                        minimum=record.get("minimum_outcome"),
+                        judge_allowed=resolution_policy.allowed_decisions,
+                        judge_uncertain=resolution_policy.on_uncertain,
+                        mutation=state.value("mutation", "unclear"),
+                    )
+                    if final.decision == "deny":
+                        revised["final_policy_result"] = final.model_dump()
+                        revised.pop("admission", None)
+                        await resolve_with_side_effects(
+                            call_id=call_id,
+                            user_id=user_id,
+                            user_decision="deny",
+                            user_note="Blocked by unattended session policy after review validation failed",
+                            resolved_by="judge",
+                            audit_store=self._audit,
+                            judge_reasoning=judge_simulator.user_explanation(
+                                answer,
+                                artifact,
+                                "deny",
+                                record,
+                                review_failure="unverified_restriction",
+                            ),
+                            judge_risk=record.get("risk"),
+                            notification_dispatcher=self._notification_dispatcher,
+                            event_bus=self._event_bus,
+                            metrics=self._metrics,
+                            hybrid_metadata=revised,
+                        )
+                        return
                 await asyncio.to_thread(
                     self._audit.set_hybrid_review,
                     call_id,

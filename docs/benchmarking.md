@@ -357,6 +357,13 @@ The manifest distinguishes:
    preserves requests and rejects any compiler attempt before upstream delivery.
    Rejected attempts still invalidate the lane and are persisted separately.
    Main still must supply an approved clean runtime revision before any live run.
+   That digest identifies the historical baseline, not the reconstructed public
+   source-context fixture. The latter now has self-consistent identity
+   `bf7af507b6ea391385c4f7ccf30a9749106a906ebcfd11b5fdc0719e5eb5d3f3`.
+   Its dependent source-context snapshots and offline execution-scope digest were
+   refreshed after public-content reconstruction. Their model-execution flag
+   remains false. Historical measurements, approvals and provenance do not
+   transfer to reconstructed inputs; no live replay was run for this refresh.
 3. **Ready structured-policy contrasts**:21 pairs across three profiles.
    Each pair shares one action, intention, details and context; variants contain
    only base versus declared typed policy. Mixed targets, wrong checkout,

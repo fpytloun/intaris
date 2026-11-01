@@ -159,6 +159,19 @@ class EventAuditStore:
                     checkpoint = actual[-1]
         return checkpoint
 
+    def projection_checkpoint(self, *, user_id: str, session_id: str) -> int:
+        """Return the durable contiguous checkpoint, including non-audit events."""
+        with self._db.cursor() as cur:
+            cur.execute(
+                """
+                SELECT last_seq FROM audit_event_projection_state
+                WHERE user_id = ? AND session_id = ?
+                """,
+                (user_id, session_id),
+            )
+            state = cur.fetchone()
+            return int(state["last_seq"]) if state is not None else 0
+
     def projection_sessions(self) -> list[dict[str, Any]]:
         """Return all sessions and their durable projection checkpoints."""
         with self._db.cursor() as cur:

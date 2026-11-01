@@ -26,8 +26,10 @@ Command-line or environment overrides are untrusted. Static proof excludes:
   shell wrappers (`env`, `sh -c`, etc.) cannot evade this.
 - Output options (`--output`, abbreviations and `-o`), redirects, substitutions,
   backticks, unsupported shell syntax and executable filters.
-- Global repository relocation (`--git-dir`, `--work-tree`, `-C`): these are
-  conservatively not proved, including inside-target forms. `git rev-parse
+- Global repository relocation (`--git-dir`, `--work-tree`): these are
+  conservatively not proved, including inside-target forms. `-C <dir>` and
+  `--no-pager` preserve a read subcommand's mutation classification; target
+  and deny-path checks still apply. `git rev-parse
   --git-dir` is an observation, not global relocation.
 - Mutating subcommands and options. `git config` is observational only with
   `--get` or `--list`; unknown config options are not proved.
@@ -46,3 +48,8 @@ Brace alternatives remain assessed because they can spell explicit credential
 filenames absent from the literal disclosure check (`HEAD:.{env,env.local}`).
 Trusted config does not imply permission to disclose credentials or bypass
 explicit denies, applicable restrictions, floors or human checkpoints.
+
+`git grep` and `git blame` are observational. Grep patterns (positional or
+`-e`/`--regexp`) are search text, not secret-bearing file operands; pattern
+files (`-f`) and paths still feed disclosure checks. Grep's `-O` /
+`--open-files-in-pager` can execute a command and are not static reads.

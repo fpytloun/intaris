@@ -103,6 +103,41 @@ def test_json_preserves_action_and_original_constraints_without_grant_inference(
 
 
 @pytest.mark.parametrize("projection", ["json", "lines"])
+def test_executed_script_reaches_the_classifier(projection):
+    """The reconstructed script is L1 input; without it a run is unlabelable."""
+    artifact, state, result = specimen("inbox-inspection-only")
+    script = {
+        "authority": "none",
+        "provenance": "client_recorded_execution",
+        "path": "/workspace/tools/report.py",
+        "content": "import os\nos.remove('/workspace/build/out.txt')\n",
+        "replayed_edits": 1,
+        "truncated": False,
+    }
+    existing = state.observations.get("runtime_context")
+    runtime = dict((existing.value if existing else None) or {})
+    runtime["executed_script"] = script
+    observation = (
+        existing.model_copy(update={"value": runtime})
+        if existing
+        else Observation(
+            value=runtime, source="static_observation", coverage="complete"
+        )
+    )
+    state = state.model_copy(
+        update={"observations": {**state.observations, "runtime_context": observation}}
+    )
+    view = l1_projection.classifier_view(artifact, state)
+    assert view["executed_script"] == script
+    q = policy_assessment.request(
+        state, result, "", task_context=artifact, projection=projection
+    )
+    body = q["prompt"]
+    assert "os.remove('/workspace/build/out.txt')" in body
+    assert "reconstructed text" in body or "executed_script" in body
+
+
+@pytest.mark.parametrize("projection", ["json", "lines"])
 @pytest.mark.parametrize("status", ["superseded", "current"])
 def test_superseded_task_keeps_context_without_restoring_goal(projection, status):
     artifact, state, result = specimen("inbox-inspection-only")

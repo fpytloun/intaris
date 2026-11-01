@@ -14,7 +14,7 @@ Chunk filenames encode the sequence range for efficient filtering.
 from __future__ import annotations
 
 import hashlib
-import json
+import io
 import logging
 import os
 import re
@@ -29,6 +29,9 @@ from urllib.parse import quote
 
 from intaris.config import EventStoreConfig
 from intaris.events.cache import create_event_chunk_cache
+from intaris.events.codec import encode, write_chunk
+from intaris.events.observability import ChunkMetrics
+from intaris.events.observability import iter_observed_events as iter_events
 from intaris.metrics import Histogram
 
 logger = logging.getLogger(__name__)
@@ -71,9 +74,10 @@ def _legacy_path_component(value: str) -> str | None:
     return None
 
 
-def _chunk_filename(start_seq: int, end_seq: int) -> str:
+def _chunk_filename(start_seq: int, end_seq: int, compression: str = "none") -> str:
     """Generate a chunk filename from a sequence range."""
-    return f"seq_{start_seq:06d}_{end_seq:06d}.ndjson"
+    suffix = ".zst" if compression == "zstd" else ""
+    return f"seq_{start_seq:06d}_{end_seq:06d}.ndjson{suffix}"
 
 
 def _parse_chunk_filename(filename: str) -> tuple[int, int] | None:
@@ -81,7 +85,7 @@ def _parse_chunk_filename(filename: str) -> tuple[int, int] | None:
 
     Returns (start_seq, end_seq) or None if the filename doesn't match.
     """
-    m = _CHUNK_FILENAME.match(filename)
+    m = _CHUNK_FILENAME.match(filename.removesuffix(".zst"))
     if m:
         return int(m.group(1)), int(m.group(2))
     return None
@@ -89,20 +93,12 @@ def _parse_chunk_filename(filename: str) -> tuple[int, int] | None:
 
 def _events_to_ndjson(events: list[dict]) -> bytes:
     """Serialize events to ndjson bytes."""
-    lines = []
-    for event in events:
-        lines.append(json.dumps(event, separators=(",", ":"), sort_keys=False))
-    return ("\n".join(lines) + "\n").encode("utf-8")
+    return b"\n".join(encode(event) for event in events) + b"\n"
 
 
 def _ndjson_to_events(data: bytes) -> list[dict]:
     """Deserialize ndjson bytes to events."""
-    events = []
-    for line in data.decode("utf-8").splitlines():
-        line = line.strip()
-        if line:
-            events.append(json.loads(line))
-    return events
+    return list(iter_events(data))
 
 
 def _file_digest(path: Path) -> str:
@@ -273,6 +269,8 @@ class FilesystemEventBackend:
     """
 
     def __init__(self, config: EventStoreConfig) -> None:
+        self._compression = config.compression
+        self._chunk_metrics = ChunkMetrics()
         self._base_path = Path(config.filesystem_path)
         self._base_path.mkdir(parents=True, exist_ok=True)
 
@@ -308,6 +306,7 @@ class FilesystemEventBackend:
         temporary = directory / f".upload-{uuid.uuid4().hex}"
         try:
             with path.open("rb") as source, temporary.open("xb") as output:
+                size = os.fstat(source.fileno()).st_size
                 os.chmod(temporary, 0o600)
                 shutil.copyfileobj(source, output, length=1024 * 1024)
                 output.flush()
@@ -326,13 +325,18 @@ class FilesystemEventBackend:
                     os.close(descriptor)
         finally:
             temporary.unlink(missing_ok=True)
+        self._chunk_metrics.observe(end - start + 1, size)
+
+    def metrics(self) -> dict[str, Any]:
+        """Return process-local confirmed archive chunk distributions."""
+        return {"chunks": self._chunk_metrics.snapshot()}
 
     def chunk_destination(
         self, user_id: str, session_id: str, start: int, end: int
     ) -> str:
         return str(
             self._session_dir_for_write(user_id, session_id)
-            / _chunk_filename(start, end)
+            / _chunk_filename(start, end, self._compression)
         )
 
     def _resolve_under_base(self, *parts: str) -> Path:
@@ -405,10 +409,13 @@ class FilesystemEventBackend:
 
         start_seq = events[0]["seq"]
         end_seq = events[-1]["seq"]
-        filename = _chunk_filename(start_seq, end_seq)
+        filename = _chunk_filename(start_seq, end_seq, self._compression)
         chunk_path = session_dir / filename
 
-        chunk_path.write_bytes(_events_to_ndjson(events))
+        with chunk_path.open("wb") as output:
+            write_chunk(output, events, compression=self._compression)
+            size = output.tell()
+        self._chunk_metrics.observe(len(events), size)
 
     def read(
         self,
@@ -427,7 +434,7 @@ class FilesystemEventBackend:
             # Skip chunks entirely before after_seq
             if end_seq <= after_seq:
                 continue
-            events = _ndjson_to_events(chunk_path.read_bytes())
+            events = iter_events(chunk_path.read_bytes())
             for event in events:
                 if event.get("seq", 0) > after_seq:
                     result.append(event)
@@ -453,7 +460,7 @@ class FilesystemEventBackend:
         for start_seq, end_seq, chunk_path in chunks:
             if not any(start_seq <= seq <= end_seq for seq in seqs):
                 continue
-            events = _ndjson_to_events(chunk_path.read_bytes())
+            events = iter_events(chunk_path.read_bytes())
             for event in events:
                 if event.get("seq") in seqs:
                     result.append(event)
@@ -558,8 +565,7 @@ class FilesystemEventBackend:
         for start_seq, end_seq, chunk_path in chunks:
             if end_seq <= after_seq:
                 continue
-            events = _ndjson_to_events(chunk_path.read_bytes())
-            for event in events:
+            for event in iter_events(chunk_path.read_bytes()):
                 if event.get("seq", 0) > after_seq:
                     yield event
 
@@ -610,6 +616,7 @@ class S3EventBackend:
     """
 
     def __init__(self, config: EventStoreConfig) -> None:
+        self._compression = config.compression
         import boto3
         from botocore.config import Config as BotoConfig
         from botocore.exceptions import ClientError
@@ -625,6 +632,7 @@ class S3EventBackend:
 
         self._client = boto3.client("s3", **kwargs)
         self._client_error_type = ClientError
+        self._chunk_metrics = ChunkMetrics()
         self._endpoint_identity = config.s3_endpoint
         self._bucket = config.s3_bucket
         self._chunk_cache_ttl = max(0.0, config.s3_chunk_cache_ttl)
@@ -807,12 +815,14 @@ class S3EventBackend:
     def append(self, user_id: str, session_id: str, events: list[dict]) -> None:
         if not events:
             return
+        output = io.BytesIO()
+        write_chunk(output, events, compression=self._compression)
         self._append_payload(
             user_id,
             session_id,
             events[0]["seq"],
             events[-1]["seq"],
-            _events_to_ndjson(events),
+            output.getvalue(),
         )
 
     def probe(self) -> None:
@@ -836,7 +846,9 @@ class S3EventBackend:
     def chunk_destination(
         self, user_id: str, session_id: str, start: int, end: int
     ) -> str:
-        return self._write_prefix(user_id, session_id) + _chunk_filename(start, end)
+        return self._write_prefix(user_id, session_id) + _chunk_filename(
+            start, end, self._compression
+        )
 
     def _append_payload(
         self,
@@ -860,7 +872,11 @@ class S3EventBackend:
                 Bucket=self._bucket,
                 Key=key,
                 Body=body,
-                ContentType="application/x-ndjson",
+                ContentType=(
+                    "application/zstd"
+                    if key.endswith(".zst")
+                    else "application/x-ndjson"
+                ),
                 IfNoneMatch="*",
             )
             object_version = str(response.get("ETag") or "").strip('"')
@@ -928,6 +944,7 @@ class S3EventBackend:
                 snapshot = tuple(chunks)
                 self._chunk_cache[cache_key] = (cached[0], snapshot)
                 self._chunk_cache_chunks += len(snapshot) - len(cached[1])
+        self._chunk_metrics.observe(end_seq - start_seq + 1, size)
 
     def read(
         self,
@@ -943,7 +960,7 @@ class S3EventBackend:
             if end_seq <= after_seq:
                 continue
             data = self._get_object(key)
-            events = _ndjson_to_events(data)
+            events = iter_events(data)
             for event in events:
                 if event.get("seq", 0) > after_seq:
                     result.append(event)
@@ -1000,7 +1017,7 @@ class S3EventBackend:
             if not any(start_seq <= seq <= end_seq for seq in seqs):
                 continue
             data = self._get_object(key)
-            events = _ndjson_to_events(data)
+            events = iter_events(data)
             for event in events:
                 if event.get("seq") in seqs:
                     result.append(event)
@@ -1099,8 +1116,7 @@ class S3EventBackend:
             if end_seq <= after_seq:
                 continue
             data = self._get_object(key)
-            events = _ndjson_to_events(data)
-            for event in events:
+            for event in iter_events(data):
                 if event.get("seq", 0) > after_seq:
                     yield event
 
@@ -1214,4 +1230,5 @@ class S3EventBackend:
             for operation, histogram in self._operation_latency.items()
         }
         result["event_cache"] = self._event_cache.metrics()
+        result["chunks"] = self._chunk_metrics.snapshot()
         return result

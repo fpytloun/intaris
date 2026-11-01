@@ -220,12 +220,17 @@ def classifier_view(artifact: dict, state) -> dict:
                 "side_effect_scope",
                 "secret_argument",
                 "external_or_irreversible",
+                "verified_asset_digests",
             )
             if key in observations
         },
         "executing_agent": observations.get("executing_agent"),
         "tool_hints": hints,
         "shell_target": runtime.get("shell_target"),
+        # The reconstructed text of a file this command runs. Without it L1
+        # can only label an interpreter invocation unknown; with it, effects
+        # come from the code. Context only, never permission.
+        "executed_script": runtime.get("executed_script"),
         "loaded_skills": runtime.get("loaded_skills"),
         "read_only_required": state.read_only_required,
     }
@@ -280,6 +285,10 @@ def render(artifact: dict, state, mappings: dict) -> str:
         *flatten("Observed", view["observations"]),
         *flatten("Tool hints (untrusted)", view["tool_hints"]),
         *flatten("Shell target (context, not permission)", view["shell_target"]),
+        *flatten(
+            "Executed script (reconstructed text, judge effects from it)",
+            view["executed_script"],
+        ),
         *flatten("Loaded skills (context, not permission)", view["loaded_skills"]),
     ]
     if view["intention"].get("source_context"):

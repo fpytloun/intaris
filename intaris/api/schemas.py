@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Literal  # noqa: TC003
 
-from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    StrictBool,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_core import PydanticCustomError
 
 from intaris.workflow_scope import WorkflowStep
@@ -173,6 +180,8 @@ class IntentionRequest(BaseModel):
         None, max_length=500, description="Declared session purpose"
     )
     workflow_step: WorkflowStep | None = None
+    analytics_enabled: StrictBool = True
+    guardrails_enabled: StrictBool = True
 
     @model_validator(mode="after")
     def validate_declaration(self):
@@ -232,6 +241,10 @@ class IntentionResponse(BaseModel):
     """Response from intention declaration."""
 
     ok: bool = True
+    analytics_enabled: bool | None = Field(default=None, exclude_if=lambda v: v is None)
+    guardrails_enabled: bool | None = Field(
+        default=None, exclude_if=lambda v: v is None
+    )
     declaration_digest: str | None = Field(default=None, exclude_if=lambda v: v is None)
     admission_revision: int | None = Field(default=None, exclude_if=lambda v: v is None)
     policy_revision: int | None = Field(default=None, exclude_if=lambda v: v is None)
@@ -246,6 +259,8 @@ class SessionResponse(BaseModel):
     """Session details response."""
 
     session_id: str
+    analytics_enabled: bool = True
+    guardrails_enabled: bool = True
     user_id: str
     agent_id: str | None = None
     title: str | None = None
@@ -441,6 +456,8 @@ class SessionUpdateRequest(BaseModel):
     """Request to update session fields (intention, details, policy)."""
 
     intention: str | None = Field(None, max_length=500, description="Updated intention")
+    analytics_enabled: StrictBool | None = None
+    guardrails_enabled: StrictBool | None = None
     expected_policy_revision: int | None = Field(default=None, ge=1)
     details: dict[str, Any] | None = Field(None, description="Updated session details")
     policy: dict[str, Any] | SessionPolicy | None = Field(
@@ -579,6 +596,7 @@ class BackfillSummariesResponse(BaseModel):
 
     enqueued: int = Field(description="Number of summary tasks enqueued")
     skipped: int = Field(description="Number of sessions skipped (duplicate pending)")
+    skipped_disabled: int = 0
 
 
 class TaskStatusResponse(BaseModel):
@@ -625,6 +643,7 @@ class SessionSummariesResponse(BaseModel):
     """Combined summaries for a session."""
 
     intaris_summaries: list[SessionSummaryRecord]
+    analytics_enabled: bool = True
     agent_summaries: list[AgentSummaryRecord]
 
 
@@ -634,6 +653,7 @@ class AnalysisTriggerResponse(BaseModel):
     ok: bool = True
     task_id: str | None = Field(None, description="Enqueued task ID")
     enqueued: int = Field(0, description="Number of analysis tasks enqueued")
+    reason: str | None = None
 
 
 class AnalysisRecord(BaseModel):

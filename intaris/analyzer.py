@@ -60,6 +60,12 @@ from intaris.analytics_evidence import (
 from intaris.analytics_sources import SourceProgress, source_revision
 from intaris.db import Database
 from intaris.inference_attribution import llm_attribution
+from intaris.session_modes import (
+    AnalyticsScope,
+    analytics_scope,
+    analytics_task,
+    analytics_write,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +376,7 @@ def drain_safety_valve_hits() -> int:
     return count
 
 
+@analytics_task
 def generate_summary(
     db: Database,
     llm: Any | None,
@@ -1013,6 +1020,7 @@ def generate_summary(
     }
 
 
+@analytics_task
 def run_analysis(
     db: Database,
     llm: Any | None,
@@ -1277,7 +1285,7 @@ def run_analysis(
             if "priority" not in rec:
                 rec["priority"] = "medium"
 
-    with db.cursor() as cur:
+    with analytics_write(db) as cur:
         cur.execute(
             """
             INSERT INTO behavioral_analyses
@@ -1468,16 +1476,17 @@ def _get_window_start(
     with db.cursor() as cur:
         cur.execute(
             """
-            SELECT window_end FROM session_summaries
+            SELECT * FROM session_summaries
             WHERE user_id = ? AND session_id = ?
               AND summary_type = 'window'
             ORDER BY window_end DESC
-            LIMIT 1
             """,
             (user_id, session_id),
         )
-        row = cur.fetchone()
+        rows = cur.fetchall()
 
+    scope = analytics_scope(db, user_id)
+    row = next((row for row in rows if scope.usable_summary(dict(row))), None)
     if row:
         return row["window_end"]
     return session.get("created_at", datetime.now(timezone.utc).isoformat())
@@ -1496,16 +1505,17 @@ def _get_prior_summary(
     with db.cursor() as cur:
         cur.execute(
             """
-            SELECT summary FROM session_summaries
+            SELECT * FROM session_summaries
             WHERE user_id = ? AND session_id = ?
               AND summary_type = 'window'
             ORDER BY window_end DESC
-            LIMIT 1
             """,
             (user_id, session_id),
         )
-        row = cur.fetchone()
+        rows = cur.fetchall()
 
+    scope = analytics_scope(db, user_id)
+    row = next((row for row in rows if scope.usable_summary(dict(row))), None)
     if row:
         text = row["summary"] or ""
         return _apply_safety_valve(text, _MAX_SUMMARY_CHARS, label="prior_summary")
@@ -1570,7 +1580,12 @@ def _store_summary(
         logger.debug("Mapping unknown trigger %r to 'manual'", trigger)
         trigger = "manual"
 
-    with db.cursor() as cur:
+    scope = analytics_scope(db, user_id)
+    result["evidence_metadata"] = {
+        **metadata(result.get("evidence_metadata")),
+        "analytics_excluded_sessions": sorted(scope.exclusions(session_id)),
+    }
+    with analytics_write(db) as cur:
         if summary_type == "compacted":
             cur.execute(
                 "DELETE FROM session_summaries WHERE user_id = ? AND session_id = ? "
@@ -1620,6 +1635,7 @@ def _store_summary(
     # Fan out to the search indexer (vector tier). Lexical search
     # reads canonical session_summaries directly via tsvector — no
     # write needed for that.
+    scope.check()
     if _search_service is not None and summary_text:
         try:
             _search_service.enqueue_summary(
@@ -1660,7 +1676,7 @@ def _get_child_sessions(
                    created_at, last_activity_at, agent_id,
                    intention_source, summary_count, last_summary_attempt_at
             FROM sessions
-            WHERE user_id = ? AND parent_session_id = ?
+            WHERE user_id = ? AND parent_session_id = ? AND analytics_enabled = TRUE
             ORDER BY last_activity_at DESC
             LIMIT ?
             """,
@@ -1670,7 +1686,7 @@ def _get_child_sessions(
 
     with db.cursor() as cur:
         cur.execute(
-            "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND parent_session_id = ?",
+            "SELECT COUNT(*) FROM sessions WHERE user_id = ? AND parent_session_id = ? AND analytics_enabled = TRUE",
             (user_id, parent_session_id),
         )
         total_children = cur.fetchone()[0]
@@ -1704,6 +1720,8 @@ def _collect_child_data(
     db: Database,
     user_id: str,
     children: list[dict[str, Any]],
+    *,
+    scope: AnalyticsScope | None = None,
 ) -> list[dict[str, Any]]:
     """Collect summary data for child sessions.
 
@@ -1715,9 +1733,15 @@ def _collect_child_data(
     Returns a list of child data dicts for prompt building.
     """
     child_data: list[dict[str, Any]] = []
+    if not children:
+        return child_data
+    scope = scope or analytics_scope(db, user_id)
 
     for child in children:
         child_sid = child["session_id"]
+        if not scope.enabled(child_sid):
+            continue
+        scope.include(child_sid)
         entry: dict[str, Any] = {
             "session_id": child_sid,
             "agent_id": child.get("agent_id"),
@@ -1738,7 +1762,9 @@ def _collect_child_data(
                 "ORDER BY created_at, id",
                 (user_id, child_sid),
             )
-            selected = select_summaries([dict(r) for r in cur.fetchall()])
+            selected = select_summaries(
+                [dict(r) for r in cur.fetchall() if scope.usable_summary(dict(r))]
+            )
         entry["summary_ids"] = [r["id"] for r in selected]
         entry["coverage_gap"] = bool(child.get("summary_stale")) or not selected
         entry["summary_source"] = "compaction_and_uncovered_windows"
@@ -1843,6 +1869,10 @@ def _verified_event_prefix(db, user_id, session_id, read_prefix, current_entries
             (user_id, session_id),
         )
         for row in cur.fetchall():
+            if not analytics_scope(db, user_id).usable_summary(
+                {**dict(row), "session_id": session_id}
+            ):
+                continue
             evidence = metadata(row["evidence_metadata"])
             if evidence.get("version") == VERSION and not evidence.get(
                 "prompt_truncated"
@@ -2989,6 +3019,12 @@ def _generate_compaction(
             (user_id, session_id),
         )
         window_rows = [dict(row) for row in cur.fetchall()]
+    scope = analytics_scope(db, user_id)
+    window_rows = [
+        row
+        for row in window_rows
+        if scope.usable_summary({**row, "session_id": session_id})
+    ]
 
     if len(window_rows) <= 1:
         return None  # No compaction needed
@@ -3321,7 +3357,7 @@ def _get_session_summaries_for_analysis(
                        s.created_at, s.last_activity_at, s.agent_id,
                        s.intention_source, s.parent_session_id, s.last_event_seq
                 FROM sessions s
-                WHERE s.user_id = ? AND COALESCE(s.agent_id, '') = ?
+                WHERE s.user_id = ? AND COALESCE(s.agent_id, '') = ? AND s.analytics_enabled = TRUE
                   AND s.last_activity_at >= ?
                 ORDER BY s.last_activity_at DESC
                 LIMIT ?
@@ -3336,7 +3372,7 @@ def _get_session_summaries_for_analysis(
                        s.created_at, s.last_activity_at, s.agent_id,
                        s.intention_source, s.parent_session_id, s.last_event_seq
                 FROM sessions s
-                WHERE s.user_id = ?
+                WHERE s.user_id = ? AND s.analytics_enabled = TRUE
                   AND s.last_activity_at >= ?
                 ORDER BY s.last_activity_at DESC
                 LIMIT ?
@@ -3371,7 +3407,10 @@ def _get_session_summaries_for_analysis(
             """,
             [user_id] + session_ids,
         )
-        summary_rows = [dict(row) for row in cur.fetchall()]
+        scope = analytics_scope(db, user_id)
+        summary_rows = [
+            dict(row) for row in cur.fetchall() if scope.usable_summary(dict(row))
+        ]
 
     # Group summaries by session, preferring compacted
     raw_by_session: dict[str, list[dict[str, Any]]] = {}
@@ -3431,6 +3470,7 @@ def _get_session_summaries_for_analysis(
                 if uncovered or (sess.get("last_event_seq") or 0) > observed_event_seq:
                     coverage["stale_session_ids"].append(sid)
         if sid in summaries_by_session:
+            scope.include(sid)
             result[sid] = {
                 "session": sess,
                 "summaries": summaries_by_session[sid],
@@ -3684,7 +3724,7 @@ def _update_profile(
     # concurrent analysis tasks for the same (user_id, agent_id)
     # could both attempt INSERT and hit a duplicate key violation.
     alerts_json = json.dumps(active_alerts) if active_alerts else None
-    with db.cursor() as cur:
+    with analytics_write(db) as cur:
         cur.execute(
             """
             INSERT INTO behavioral_profiles

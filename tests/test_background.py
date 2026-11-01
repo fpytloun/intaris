@@ -969,6 +969,158 @@ class TestSessionActivity:
 class TestStartupCatchup:
     """Test startup catch-up behavior for skipped summaries."""
 
+    def test_catchup_does_not_block_event_loop(self, db, monkeypatch):
+        import asyncio
+        import threading
+
+        from intaris.background import BackgroundWorker
+
+        worker = BackgroundWorker(db, AnalysisConfig(enabled=False))
+        entered = threading.Event()
+        release = threading.Event()
+
+        def reset():
+            entered.set()
+            assert release.wait(2), "Catch-up blocked the event loop"
+            return 0
+
+        monkeypatch.setattr(worker._task_queue, "reset_stale_running", reset)
+
+        async def run():
+            catchup = asyncio.create_task(worker._startup_catchup())
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                assert not catchup.done()
+            finally:
+                release.set()
+                await catchup
+
+        asyncio.run(run())
+
+    def test_shutdown_retains_blocked_maintenance_until_database_is_safe(
+        self, db, monkeypatch
+    ):
+        import asyncio
+        import threading
+        import time
+        from unittest.mock import AsyncMock, MagicMock
+
+        from intaris.background import BackgroundWorker
+
+        worker = BackgroundWorker(db, AnalysisConfig(enabled=False))
+        entered = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+        close = MagicMock(side_effect=closed.set)
+        monkeypatch.setattr(db, "close", close)
+        monkeypatch.setattr(db, "_backend", "postgresql")
+        monkeypatch.setattr(worker._queue_wakeup, "stop", AsyncMock())
+
+        def blocked_query():
+            entered.set()
+            assert release.wait(10)
+
+        async def run():
+            scan = asyncio.create_task(worker._run_maintenance(blocked_query))
+            worker._tasks.append(scan)
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                started = time.monotonic()
+                await worker.stop()
+                assert time.monotonic() - started < 4.8
+                worker._queue_wakeup.stop.assert_awaited_once()
+                assert scan.cancelled()
+                assert worker._maintenance_stop.is_set()
+                assert len(worker._maintenance_tasks) == 1
+                with pytest.raises(RuntimeError, match="still stopping"):
+                    await worker.start()
+                worker.close_database()
+                close.assert_not_called()
+            finally:
+                release.set()
+                await asyncio.gather(*worker._maintenance_tasks)
+            assert closed.is_set()
+            close.assert_called_once()
+            with pytest.raises(RuntimeError, match="database is closing"):
+                await worker.start()
+
+        asyncio.run(run())
+
+    def test_sqlite_closes_connections_on_their_own_threads(self, db, monkeypatch):
+        import asyncio
+        import sqlite3
+        import threading
+
+        from intaris.background import BackgroundWorker
+
+        worker = BackgroundWorker(db, AnalysisConfig(enabled=False))
+        main_connection = db._get_sqlite_connection()
+        entered = threading.Event()
+        release = threading.Event()
+        closed_threads = []
+        close = db.close
+
+        def record_close():
+            close()
+            assert db._local.conn is None
+            closed_threads.append(threading.get_ident())
+
+        monkeypatch.setattr(db, "close", record_close)
+
+        def query():
+            connection = db._get_sqlite_connection()
+            entered.set()
+            assert release.wait(2)
+            return connection.execute("SELECT 1").fetchone()[0]
+
+        async def run():
+            scan = asyncio.create_task(worker._run_maintenance(query))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                worker.close_database()
+                with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+                    main_connection.execute("SELECT 1")
+            finally:
+                release.set()
+                assert await scan == 1
+            assert len(set(closed_threads)) == 2
+            assert threading.get_ident() in closed_threads
+
+        asyncio.run(run())
+
+    def test_shutdown_stops_catchup_before_followup_queries(self, db, monkeypatch):
+        import asyncio
+        import threading
+        from unittest.mock import MagicMock
+
+        from intaris.background import BackgroundWorker
+
+        worker = BackgroundWorker(db, AnalysisConfig(enabled=True))
+        entered = threading.Event()
+
+        def recover(*, stop):
+            entered.set()
+            assert stop.wait(2)
+            return 0
+
+        stats = MagicMock()
+        monkeypatch.setattr(worker, "_enqueue_changed_parents", recover)
+        monkeypatch.setattr(worker._task_queue, "get_queue_stats", stats)
+
+        async def run():
+            catchup = asyncio.create_task(worker._startup_catchup())
+            worker._tasks.append(catchup)
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                await worker.stop()
+            finally:
+                worker._maintenance_stop.set()
+                await asyncio.gather(*worker._maintenance_tasks)
+            stats.assert_not_called()
+            assert not worker._maintenance_tasks
+
+        asyncio.run(run())
+
     def test_skipped_no_data_session_is_not_reenqueued_without_new_activity(
         self, db, session_store
     ):

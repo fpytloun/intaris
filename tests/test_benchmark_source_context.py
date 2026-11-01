@@ -17,6 +17,7 @@ from tools.benchmark.source_context import (
     focused_packet,
     freeze,
     schedule,
+    verify,
 )
 
 
@@ -28,6 +29,29 @@ def manifest(tmp_path):
         FIXTURE.with_name("source-context-original47-v1.json").read_text()
     )
     return freeze(baseline, git, contract)
+
+
+def test_reconstructed_public_snapshots_verify_and_reject_content_drift(tmp_path):
+    frozen = json.loads(
+        FIXTURE.with_name("source-context-comparison-v1.json").read_text()
+    )
+    verify(frozen)
+    current = manifest(tmp_path)
+    assert current["baseline_manifest_sha256"] == frozen["baseline_manifest_sha256"]
+    assert current["git_manifest_sha256"] == frozen["git_manifest_sha256"]
+    assert current["lanes"] == frozen["lanes"]
+    assert current["live_ready"] is False
+    changed = copy.deepcopy(frozen)
+    changed["lanes"]["original47"][0]["intention"] += " Changed scope."
+    with pytest.raises(ValueError, match="Frozen source-context manifest changed"):
+        verify(changed)
+    baseline = json.loads(
+        FIXTURE.with_name("source-context-original47-v1.json").read_text()
+    )
+    git = json.loads(FIXTURE.with_name("source-context-git-v1.json").read_text())
+    baseline["scenarios"][0]["intention"] += " Changed scope."
+    with pytest.raises(ValueError, match="Original47 identity mismatch"):
+        freeze(baseline, git, tmp_path / "contract.md")
 
 
 def test_literal24_fixed_labels_and_pair_semantics():

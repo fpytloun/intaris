@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Any, Iterator, Literal
 
@@ -30,6 +31,7 @@ from intaris.events.backend import (
     _validate_path_component,
     event_matches_filters,
 )
+from intaris.events.observability import ReadMetrics, observe_read, observe_stream
 from intaris.events.spool import (
     EventSpool,
     SpoolReadBackend,
@@ -145,6 +147,10 @@ class EventStore:
         self._buffer_bytes: dict[tuple[str, str], int] = {}
         self._buffer_started_at: dict[tuple[str, str], float] = {}
         self._metrics_lock = threading.Lock()
+        self._read_metrics = ReadMetrics()
+        self._append_requests = 0
+        self._append_failures = 0
+        self._append_latency = Histogram()
         self._flushes_total = 0
         self._flush_failures_total = 0
         self._flushed_events_total = 0
@@ -197,10 +203,28 @@ class EventStore:
                 "flush_batch_events": self._flush_batch_events.snapshot(),
                 "flush_batch_bytes": self._flush_batch_bytes.snapshot(),
                 "reconciliation": dict(self._reconciliation),
+                "append_requests_total": self._append_requests,
+                "append_failures_total": self._append_failures,
+                "append_latency_milliseconds": self._append_latency.snapshot(),
             }
-        result["buffered_sessions"] = self.buffered_session_count
-        result["buffered_events"] = self.buffered_event_count
-        result["spool"] = self._spool.metrics() if self._spool else {"enabled": False}
+        result["reads"] = self._read_metrics.snapshot()
+        if self._spool:
+            spool = self._spool.metrics()
+            result["buffered_sessions"] = spool["pending_sessions"]
+            result["buffered_events"] = spool["pending_events"]
+            result["pending_payload_bytes"] = spool["pending_payload_bytes"]
+            result["oldest_pending_age_seconds"] = spool["oldest_pending_age_seconds"]
+            result["spool"] = spool
+        else:
+            with self._lock:
+                result["buffered_sessions"] = len(self._buffers)
+                result["buffered_events"] = sum(map(len, self._buffers.values()))
+                result["pending_payload_bytes"] = sum(self._buffer_bytes.values())
+                oldest = min(self._buffer_started_at.values(), default=None)
+                result["oldest_pending_age_seconds"] = (
+                    max(0.0, time.monotonic() - oldest) if oldest is not None else 0.0
+                )
+            result["spool"] = {"enabled": False}
         backend_metrics = getattr(self._backend, "metrics", None)
         if callable(backend_metrics):
             result["backend"] = backend_metrics()
@@ -449,6 +473,34 @@ class EventStore:
         *,
         idempotency_key: str | None = None,
     ) -> list[int]:
+        """Append a batch and measure latency through the durability boundary.
+
+        Includes failed, retried and empty calls, plus any inline flush work.
+        """
+        started = time.monotonic()
+        failed = False
+        try:
+            return self._append(
+                user_id, session_id, events, source, idempotency_key=idempotency_key
+            )
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            with self._metrics_lock:
+                self._append_requests += 1
+                self._append_failures += failed
+                self._append_latency.observe((time.monotonic() - started) * 1000)
+
+    def _append(
+        self,
+        user_id: str,
+        session_id: str,
+        events: list[dict[str, Any]],
+        source: str = "intaris",
+        *,
+        idempotency_key: str | None = None,
+    ) -> list[int]:
         """Append events to a session's event log.
 
         Assigns sequence numbers and server timestamps, publishes to
@@ -577,6 +629,7 @@ class EventStore:
         data = event.get("data")
         return isinstance(data, dict) and data.get("role") == "user"
 
+    @observe_read("forward")
     def read(
         self,
         user_id: str,
@@ -665,8 +718,17 @@ class EventStore:
             after_ts=after_ts,
             before_ts=before_ts,
         )
+        persisted_stream = (
+            self._backend.read_stream(user_id, session_id, after_seq)
+            if has_filters
+            else None
+        )
         while True:
-            page = self._backend.read(user_id, session_id, cursor, limit=batch_limit)
+            page = (
+                list(islice(persisted_stream, batch_limit))
+                if persisted_stream is not None
+                else self._backend.read(user_id, session_id, cursor, limit=batch_limit)
+            )
             page_matches = self._filter_and_deduplicate_events(
                 page,
                 event_types=event_types,
@@ -761,6 +823,7 @@ class EventStore:
             filtered.append(event)
         return filtered
 
+    @observe_read("exact")
     def read_seqs(
         self,
         user_id: str,
@@ -834,6 +897,7 @@ class EventStore:
 
         return events
 
+    @observe_read("before")
     def read_before(
         self,
         user_id: str,
@@ -952,6 +1016,7 @@ class EventStore:
 
         return filtered_buffer[-limit:]
 
+    @observe_read("tail")
     def read_tail(
         self,
         user_id: str,
@@ -1109,6 +1174,7 @@ class EventStore:
 
         return deduped[-limit:]
 
+    @observe_stream
     def read_stream(
         self,
         user_id: str,
@@ -1480,26 +1546,25 @@ class EventStore:
         batch_size: int = 1000,
     ) -> int:
         indexed = 0
-        while True:
-            events = self._backend.read(
-                user_id,
-                session_id,
-                after_seq=after_seq,
-                limit=batch_size,
-            )
-            if not events:
-                break
+
+        def index_batch(events: list[dict]) -> int:
             self._audit_store.index_events(
                 user_id=user_id,
                 session_id=session_id,
                 events=events,
             )
-            indexed += sum(
+            return sum(
                 event.get("type") in {"tool_call", "tool_result"} for event in events
             )
-            after_seq = int(events[-1]["seq"])
-            if len(events) < batch_size:
-                break
+
+        events: list[dict] = []
+        for event in self._backend.read_stream(user_id, session_id, after_seq):
+            events.append(event)
+            if len(events) >= batch_size:
+                indexed += index_batch(events)
+                events = []
+        if events:
+            indexed += index_batch(events)
         return indexed
 
     def _reconcile_pending_audit(
@@ -1516,6 +1581,11 @@ class EventStore:
             }
         for (user_id, session_id), after_seq in pending.items():
             try:
+                # Resume from committed projection state, not the start of each
+                # exported session. A failed batch never advances this checkpoint.
+                after_seq = self._audit_store.projection_checkpoint(
+                    user_id=user_id, session_id=session_id
+                )
                 self._reconcile_audit_session(
                     user_id=user_id,
                     session_id=session_id,
@@ -1588,7 +1658,7 @@ class EventStore:
         with self._lock:
             buf = self._buffers.pop(key, [])
             self._buffer_bytes.pop(key, None)
-            self._buffer_started_at.pop(key, None)
+            buffer_started_at = self._buffer_started_at.pop(key, None)
         if not buf:
             return
         user_id, session_id = key
@@ -1659,4 +1729,11 @@ class EventStore:
             with self._lock:
                 self._buffers[key] = combined
                 self._buffer_bytes[key] = len(_events_to_ndjson(combined))
-                self._buffer_started_at.setdefault(key, time.monotonic())
+                if combined:
+                    previous = self._buffer_started_at.get(key, time.monotonic())
+                    self._buffer_started_at[key] = min(
+                        previous,
+                        buffer_started_at
+                        if buffer_started_at is not None
+                        else previous,
+                    )

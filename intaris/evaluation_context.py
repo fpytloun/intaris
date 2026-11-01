@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from intaris.redactor import redact
 
@@ -180,7 +181,68 @@ def normalize(
                 projection["reason"] = "invalid_target"
             projection["authority"] = "context_only"
             context["shell_target"] = bounded(redact(projection))
+    scripts = context.get("executed_scripts")
+    if scripts is not None:
+        context["executed_scripts"] = _executed_scripts_projection(
+            scripts, evaluated_tool, args, user_id, session_id
+        )
     return context
+
+
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _executed_scripts_projection(scripts, evaluated_tool, args, user_id, session_id):
+    """Bind controller-resolved script digests to this exact action.
+
+    Only a bash action whose command names each digested path, under the same
+    user and session, keeps the verified digests. Anything else becomes an
+    unknown-coverage record so a digest can never be transplanted between
+    actions. The result is context from a trusted controller, never from the
+    model; policy decides what it is worth.
+    """
+    unknown = {"coverage": "unknown", "reason": "identity_mismatch"}
+    if (
+        evaluated_tool != "bash"
+        or not isinstance(scripts, dict)
+        or scripts.get("user_id") != user_id
+        or scripts.get("session_id") != session_id
+        or scripts.get("source") != "executor_file_digest"
+    ):
+        return unknown
+    command = (args if isinstance(args, dict) else {}).get("command")
+    if not isinstance(command, str):
+        return unknown
+    # Bind each record to a script Intaris itself identifies in this command
+    # (exact path equality, not substring), so `/a/b.py` cannot bind to a
+    # command that runs `/a/b.py.bak` or `/x/a/b.py`.
+    from intaris.session_scripts import executed_paths
+
+    executed = set(executed_paths(command, (args or {}).get("workdir")))
+    # Records with the path as a value: the controller's context projection
+    # bounds dict keys, and managed asset paths exceed that bound.
+    verified = scripts.get("verified")
+    kept = []
+    if isinstance(verified, list):
+        for row in verified:
+            if not isinstance(row, dict):
+                continue
+            path, sha = row.get("path"), row.get("sha256")
+            if (
+                isinstance(path, str)
+                and path in executed
+                and isinstance(sha, str)
+                and _SHA256.fullmatch(sha)
+            ):
+                kept.append({"path": path, "sha256": sha})
+    projection = {
+        k: scripts[k]
+        for k in ("coverage", "source", "executor_id", "reason", "unverified")
+        if k in scripts
+    }
+    projection["verified"] = kept
+    projection["authority"] = "context_only"
+    return bounded(redact(projection), count=12)
 
 
 def runtime_view(context):
@@ -193,6 +255,7 @@ def runtime_view(context):
             "recent_outcomes",
             "shell_target",
             "executed_script",
+            "executed_scripts",
         )
         if k in (context or {})
     }

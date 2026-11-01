@@ -20,9 +20,10 @@ from typing import Protocol
 
 from tools.benchmark.matched import MODEL_SETTINGS, digest, write_json
 
-BASELINE_HASH = "72d65324e19d0f37ab83e3f120cfca74b0d5535ae3c39c5afb34800949917795"
+# Current public fixture identities, not the pre-reconstruction model evidence.
+BASELINE_HASH = "bf7af507b6ea391385c4f7ccf30a9749106a906ebcfd11b5fdc0719e5eb5d3f3"
 BASE_REVISION = "92828d6517daff3f7665fa20eac21af65aabd1ee"
-GIT_HASH = "28339d47671ceb257595c2f416a8e1f8dd0d2af6b5f71e13027d471fb1f76114"
+GIT_HASH = "149aa6ea3c18ffbc69254b2fd14de28ddc302944ec1a5de89c89f1c2a6626e3d"
 FIXTURE = Path(__file__).parent / "fixtures/source-context-focused-v1.json"
 
 

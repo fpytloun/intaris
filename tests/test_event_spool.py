@@ -21,12 +21,13 @@ from intaris.session import SessionStore
 EVENT = {"type": "user_message", "data": {"content": "Inspect the repository"}}
 
 
-@pytest.fixture
-def config(tmp_path):
+@pytest.fixture(params=["none", "zstd"])
+def config(tmp_path, request):
     return EventStoreConfig(
         backend="filesystem",
         filesystem_path=str(tmp_path / "archive"),
         spool_path=str(tmp_path / "spool"),
+        compression=request.param,
         flush_size=100,
     )
 
@@ -65,7 +66,7 @@ def test_default_enabled_pending_reads_and_batched_archive(store, config):
         assert store.append(
             "tenant", "recording", [EVENT], idempotency_key=f"batch-{i}"
         ) == [i + 1]
-    assert not list(Path(config.filesystem_path).rglob("*.ndjson"))
+    assert not list(Path(config.filesystem_path).rglob("*.ndjson*"))
     assert store._buffers == {}
     assert store.last_seq("tenant", "recording") == 5
     assert store.availability("tenant", "recording").history_gap is None
@@ -76,7 +77,11 @@ def test_default_enabled_pending_reads_and_batched_archive(store, config):
         range(1, 6)
     )
     store.flush_all()
-    assert len(list(Path(config.filesystem_path).rglob("*.ndjson"))) == 1
+    chunks = list(Path(config.filesystem_path).rglob("*.ndjson*"))
+    assert len(chunks) == 1
+    assert chunks[0].name.endswith(
+        ".ndjson.zst" if config.compression == "zstd" else ".ndjson"
+    )
     assert store.buffered_event_count == 0
     assert store.metrics()["spool"]["disk_bytes"] >= 0
     assert store.append("tenant", "recording", [EVENT], idempotency_key="batch-0") == [
@@ -108,7 +113,8 @@ def test_failed_archive_stops_new_writes_and_recovery_preserves_original_chunk(
     store.flush_all()
     assert store.buffered_event_count == 0
     assert (
-        next(Path(config.filesystem_path).rglob("*.ndjson")).read_bytes() == uploaded[0]
+        next(Path(config.filesystem_path).rglob("*.ndjson*")).read_bytes()
+        == uploaded[0]
     )
     assert store.append("tenant", "recording", [EVENT], idempotency_key="second") == [2]
 
@@ -374,9 +380,9 @@ def test_count_and_age_batching_are_preserved(config):
     store = EventStore(config)
     try:
         store.append("tenant", "recording", [EVENT])
-        assert not list(Path(config.filesystem_path).rglob("*.ndjson"))
+        assert not list(Path(config.filesystem_path).rglob("*.ndjson*"))
         store.append("tenant", "recording", [EVENT])
-        assert len(list(Path(config.filesystem_path).rglob("*.ndjson"))) == 1
+        assert len(list(Path(config.filesystem_path).rglob("*.ndjson*"))) == 1
         store.append("tenant", "recording", [EVENT])
         record = store._spool.records(("tenant", "recording"))[0]
         # Exercise persisted age, not the legacy in-memory timer.

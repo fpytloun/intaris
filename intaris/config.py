@@ -403,9 +403,9 @@ class EventStoreConfig:
     that capture the full session timeline for live tailing, playback,
     reconstruction, and behavioral analysis.
 
-    Storage uses chunked ndjson files — one chunk per flush. Both
+    Storage uses chunked NDJSON, compressed by default — one chunk per flush. Both
     filesystem and S3 backends use the same chunked layout:
-      {user_id}/{session_id}/seq_{start:06d}_{end:06d}.ndjson
+      {user_id}/{session_id}/seq_{start:06d}_{end:06d}.ndjson[.zst]
     """
 
     # Master switch for the event store.
@@ -443,6 +443,11 @@ class EventStoreConfig:
     # Write buffer: max events per chunk before flushing.
     flush_size: int = field(
         default_factory=lambda: _env_int("EVENT_STORE_FLUSH_SIZE", 100)
+    )
+
+    # Compression for new archive chunks; readers always support both formats.
+    compression: str = field(
+        default_factory=lambda: _env("EVENT_STORE_COMPRESSION", "zstd")
     )
 
     # Write buffer: approximate maximum serialized bytes per chunk.
@@ -955,6 +960,8 @@ class Config:
 
         # Event store backend validation.
         if self.event_store.enabled:
+            if self.event_store.compression not in ("none", "zstd"):
+                raise ValueError("EVENT_STORE_COMPRESSION must be 'none' or 'zstd'.")
             if self.event_store.backend not in ("filesystem", "s3"):
                 raise ValueError(
                     f"EVENT_STORE_BACKEND={self.event_store.backend} is not "

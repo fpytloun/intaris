@@ -15,10 +15,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from intaris.config import AnalysisConfig
 from intaris.db import Database
@@ -138,7 +139,7 @@ class TaskQueue:
         payload: dict[str, Any] | None = None,
         priority: int = 0,
         next_attempt_at: str | None = None,
-    ) -> str:
+    ) -> str | None:
         """Insert a new task into the queue.
 
         Args:
@@ -164,6 +165,27 @@ class TaskQueue:
         )
 
         with self._db.cursor(notify_analysis=True) as cur:
+            if session_id and task_type in {"summary", "intention_update"}:
+                field = "analytics" if task_type == "summary" else "guardrails"
+                # Acquire the session lock before task insertion, matching PATCH.
+                cur.execute(
+                    f"UPDATE sessions SET {field}_revision = {field}_revision "
+                    "WHERE user_id = ? AND session_id = ?",
+                    (user_id, session_id),
+                )
+                cur.execute(
+                    f"SELECT {field}_enabled, {field}_revision FROM sessions "
+                    "WHERE user_id = ? AND session_id = ?",
+                    (user_id, session_id),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    if not row[f"{field}_enabled"]:
+                        return None
+                    payload = {
+                        **(payload or {}),
+                        f"{field}_revision": row[f"{field}_revision"],
+                    }
             cur.execute(
                 """
                 INSERT INTO analysis_tasks
@@ -208,6 +230,22 @@ class TaskQueue:
         payload = json.dumps({"trigger": "bootstrap"})
         with self._db.cursor(notify_analysis=True) as cur:
             cur.execute(
+                "UPDATE sessions SET guardrails_revision = guardrails_revision WHERE user_id = ? AND session_id = ?",
+                (user_id, session_id),
+            )
+            cur.execute(
+                "SELECT guardrails_revision FROM sessions WHERE user_id = ? AND session_id = ?",
+                (user_id, session_id),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                payload = json.dumps(
+                    {
+                        "trigger": "bootstrap",
+                        "guardrails_revision": row["guardrails_revision"],
+                    }
+                )
+            cur.execute(
                 """
                 INSERT INTO analysis_tasks
                     (id, task_type, user_id, session_id, agent_id, status,
@@ -219,6 +257,7 @@ class TaskQueue:
                 FROM sessions AS s
                 WHERE s.user_id = ? AND s.session_id = ?
                   AND s.user_message_observed = FALSE
+                  AND s.guardrails_enabled = TRUE
                   AND s.intention_source = 'initial'
                   AND NOT EXISTS (
                       SELECT 1 FROM analysis_tasks AS t
@@ -354,6 +393,26 @@ class TaskQueue:
         """
         now = datetime.now(timezone.utc).isoformat()
         with self._db.cursor(notify_analysis=True) as cur:
+            from intaris.session_modes import ParticipationRevoked
+
+            scope = getattr(result, "scope", None)
+            if scope is not None:
+                try:
+                    scope.validate(cur, lock=True)
+                except ParticipationRevoked:
+                    cur.execute(
+                        "UPDATE analysis_tasks SET status = 'cancelled', completed_at = ?, "
+                        "claim_token = NULL, result = ? WHERE id = ? AND status = 'running' AND claim_token = ?",
+                        (
+                            now,
+                            json.dumps(
+                                {"status": "skipped", "reason": "participation_revoked"}
+                            ),
+                            task_id,
+                            claim_token,
+                        ),
+                    )
+                    return False
             cur.execute(
                 """
                 UPDATE analysis_tasks
@@ -718,6 +777,11 @@ class BackgroundWorker:
         self._session_store = SessionStore(db)
         self._tasks: list[asyncio.Task] = []
         self._queue_stats_task: asyncio.Task | None = None
+        self._maintenance_tasks: set[asyncio.Task] = set()
+        self._maintenance_stop = threading.Event()
+        self._maintenance_lock = threading.Lock()
+        self._maintenance_active = 0
+        self._database_closing = False
         self._queue_wakeup = db.analysis_wakeup()
         self._queue_recovered_seen = 0
         self._running = False
@@ -782,6 +846,12 @@ class BackgroundWorker:
         """
         if self._running:
             return
+        if self._database_closing:
+            raise RuntimeError("Background worker database is closing")
+        if any(not task.done() for task in self._maintenance_tasks):
+            raise RuntimeError("Previous background maintenance is still stopping")
+        self._maintenance_tasks.clear()
+        self._maintenance_stop.clear()
         self._running = True
         self._catchup_event = asyncio.Event()
         loop_count = 0
@@ -884,25 +954,40 @@ class BackgroundWorker:
     async def stop(self) -> None:
         """Cancel all background loops.
 
-        Called during server lifespan shutdown. Uses a 5-second timeout
-        to prevent hanging on unresponsive tasks.
+        Finish bounded waits within the lifespan's five-second outer timeout.
         """
         self._running = False
+        self._maintenance_stop.set()
+        deadline = time.monotonic() + 4.0
         for task in self._tasks:
             task.cancel()
         if self._tasks:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*self._tasks, return_exceptions=True),
-                    timeout=5.0,
+                    timeout=max(0, deadline - time.monotonic()),
                 )
             except asyncio.TimeoutError:
-                logger.warning("Background tasks did not stop within 5s timeout")
+                logger.warning("Background tasks exceeded the shutdown wait budget")
         self._tasks.clear()
+        if self._maintenance_tasks:
+            done, pending = await asyncio.wait(
+                self._maintenance_tasks, timeout=max(0, deadline - time.monotonic())
+            )
+            for task in done:
+                try:
+                    task.result()
+                except Exception:
+                    logger.exception("Background maintenance failed during shutdown")
+            self._maintenance_tasks.difference_update(done)
+            if pending:
+                logger.warning("Background maintenance is still stopping")
         await self._queue_wakeup.stop()
         if self._queue_stats_task is not None:
             # Bounded shutdown wait; keep ownership if the DB is still busy.
-            await asyncio.wait({self._queue_stats_task}, timeout=5.0)
+            await asyncio.wait(
+                {self._queue_stats_task}, timeout=max(0, deadline - time.monotonic())
+            )
             if self._queue_stats_task.done():
                 try:
                     self._queue_stats_task.result()
@@ -928,6 +1013,15 @@ class BackgroundWorker:
             logger.info("Closed %d cached analysis LLM client(s)", closed)
 
         logger.info("Background worker stopped")
+
+    def close_database(self) -> None:
+        """Defer connection closure if a maintenance query is still in flight."""
+        with self._maintenance_lock:
+            self._database_closing = True
+            if self._maintenance_active and self._db.backend == "postgresql":
+                logger.warning("Database close deferred until maintenance stops")
+            else:
+                self._db.close()
 
     async def _resilient_loop(
         self,
@@ -1004,8 +1098,6 @@ class BackgroundWorker:
             try:
                 if task_type == "summary":
                     result = await self._execute_summary_task(task)
-                    if result.get("status") != "waiting_for_children":
-                        self.metrics.summaries_generated_total += 1
                     skip_reason = result.get("reason", "")
                     if (
                         result.get("status") == "skipped"
@@ -1027,8 +1119,6 @@ class BackgroundWorker:
                                 "Failed to record skipped summary attempt",
                                 exc_info=True,
                             )
-                    if result.get("compacted"):
-                        self.metrics.compaction_total += 1
                     children_count = len(result.get("child_sessions", []))
                     if children_count > self.metrics.summary_max_children_per_task:
                         self.metrics.summary_max_children_per_task = children_count
@@ -1047,13 +1137,6 @@ class BackgroundWorker:
                         self.metrics.summary_event_store_fallback_total += 1
                 elif task_type == "analysis":
                     result = await self._execute_analysis_task(task)
-                    self.metrics.analyses_completed_total += 1
-                    # Notify on elevated+ L3 analysis results (score >= 7)
-                    if (
-                        self._notification_dispatcher
-                        and (result.get("risk_level") or 0) >= 7
-                    ):
-                        await self._notify_analysis_alert(task, result)
                 elif task_type == "intention_update":
                     result = await self._execute_intention_update_task(task)
                 else:
@@ -1084,6 +1167,28 @@ class BackgroundWorker:
                 ):
                     logger.warning("Discarding completion of revoked claim %s", task_id)
                     continue
+                from intaris.session_modes import ParticipationRevoked
+
+                scope = getattr(result, "scope", None)
+                try:
+                    if scope is not None:
+                        scope.check(check_claim=False)
+                except ParticipationRevoked:
+                    continue
+                if task_type == "summary":
+                    if result.get("summary_id"):
+                        self.metrics.summaries_generated_total += 1
+                    if result.get("compacted"):
+                        self.metrics.compaction_total += 1
+                    if self._notification_dispatcher and scope is not None:
+                        await self._notify_pending_summaries(task, scope=scope)
+                elif task_type == "analysis" and result.get("analysis_id"):
+                    self.metrics.analyses_completed_total += 1
+                    if (
+                        self._notification_dispatcher
+                        and (result.get("risk_level") or 0) >= 7
+                    ):
+                        await self._notify_analysis_alert(task, result)
                 runtime_s = time.monotonic() - start_monotonic
                 logger.info(
                     "Completed %s task %s in %.2fs (status=%s, session=%s, windows=%s, event_enriched=%s)",
@@ -1098,6 +1203,11 @@ class BackgroundWorker:
 
                 # Publish task completion event for real-time UI updates
                 if self._event_bus is not None:
+                    try:
+                        if scope is not None:
+                            scope.check(check_claim=False)
+                    except ParticipationRevoked:
+                        continue
                     self._event_bus.publish(
                         {
                             "type": "task_completed",
@@ -1106,6 +1216,8 @@ class BackgroundWorker:
                             "user_id": task.get("user_id", ""),
                             "session_id": task.get("session_id"),
                             "agent_id": task.get("agent_id", ""),
+                            "status": result.get("status", "completed"),
+                            "reason": result.get("reason"),
                         }
                     )
             except Exception as e:
@@ -1198,11 +1310,33 @@ class BackgroundWorker:
             result = await asyncio.to_thread(
                 generate_summary, self._db, llm, task, self._event_store
             )
-        finally:
-            # A later partition or compaction failure must not hide a persisted
-            # earlier alert. The existing summary owns its delivery progress.
+        except Exception:
+            # Persisted windows own their alert delivery, independently of a
+            # later partition's failure. Current source eligibility still gates
+            # delivery; failed/revoked tasks never gain success side effects.
             if self._notification_dispatcher:
-                await self._notify_pending_summaries(task)
+                try:
+                    await self._notify_pending_summaries(task)
+                except Exception:
+                    logger.exception("Failed to deliver persisted summary alerts")
+            raise
+        if result.get("status") == "skipped":
+            return result
+        scope = getattr(result, "scope", None)
+        if scope is not None:
+            from intaris.session_modes import ParticipationRevoked
+
+            try:
+                scope.check()
+            except ParticipationRevoked:
+                return {"status": "skipped", "reason": "participation_revoked"}
+        session = self._session_store.get(task["session_id"], user_id=task["user_id"])
+        if not session["analytics_enabled"] or (
+            (task.get("payload") or {}).get("analytics_revision") is not None
+            and (task.get("payload") or {})["analytics_revision"]
+            != session["analytics_revision"]
+        ):
+            return {"status": "skipped", "reason": "analytics_disabled"}
         # Reuse the existing durable queue: child summaries invalidate their
         # parent's dependency snapshot even without new local parent activity.
         if result.get("summary_id"):
@@ -1239,14 +1373,14 @@ class BackgroundWorker:
                 if not self._task_queue.cancel_duplicate(
                     "summary", child_user_id, child_session_id
                 ):
-                    self._task_queue.enqueue(
+                    child_task = self._task_queue.enqueue(
                         "summary",
                         child_user_id,
                         session_id=child_session_id,
                         payload={"trigger": "close"},
                         priority=3,  # Higher than parent's priority
                     )
-                    enqueued += 1
+                    enqueued += int(child_task is not None)
 
             self.metrics.summary_child_triggers_total += enqueued
 
@@ -1284,11 +1418,14 @@ class BackgroundWorker:
             self.metrics.summary_parent_recheck_count += 1
 
             # Return a result that marks this iteration as done
-            return {
-                "status": "waiting_for_children",
-                "children_enqueued": enqueued,
-                "parent_check_count": parent_check_count + 1,
-            }
+            result.update(
+                {
+                    "status": "waiting_for_children",
+                    "children_enqueued": enqueued,
+                    "parent_check_count": parent_check_count + 1,
+                }
+            )
+            return result
 
         return result
 
@@ -1312,7 +1449,7 @@ class BackgroundWorker:
 
         return result
 
-    def _enqueue_changed_parents(self) -> int:
+    def _enqueue_changed_parents(self, *, stop: threading.Event | None = None) -> int:
         """Recover a child update racing an already-running parent summary."""
         from intaris.analytics_evidence import metadata
         from intaris.analyzer import (
@@ -1320,6 +1457,7 @@ class BackgroundWorker:
             _collect_child_data,
             _get_child_sessions,
         )
+        from intaris.session_modes import analytics_scope
 
         cutoff = (
             datetime.now(timezone.utc) - timedelta(days=self._config.lookback_days)
@@ -1329,16 +1467,26 @@ class BackgroundWorker:
                 "SELECT DISTINCT p.user_id, p.session_id FROM sessions p "
                 "JOIN sessions c ON c.user_id = p.user_id AND c.parent_session_id = p.session_id "
                 "JOIN session_summaries ss ON ss.user_id = c.user_id AND ss.session_id = c.session_id "
-                "WHERE ss.created_at >= ?",
+                "WHERE ss.created_at >= ? AND p.analytics_enabled = TRUE AND c.analytics_enabled = TRUE "
+                "ORDER BY p.user_id, p.session_id",
                 (cutoff,),
             )
             parents = list(cur.fetchall())
         enqueued = 0
-        for parent in parents:
+        scope = None
+        logger.info("Parent summary recovery: scanning %d parents", len(parents))
+        started = last_progress = time.monotonic()
+        for index, parent in enumerate(parents, 1):
+            if stop is not None and stop.is_set():
+                return enqueued
+            user_id = parent["user_id"]
+            if scope is None or scope.user_id != user_id:
+                scope = analytics_scope(self._db, user_id)
             children = _collect_child_data(
                 self._db,
-                parent["user_id"],
-                _get_child_sessions(self._db, parent["user_id"], parent["session_id"]),
+                user_id,
+                _get_child_sessions(self._db, user_id, parent["session_id"]),
+                scope=scope,
             )
             children, _, _ = _budget_child_sessions(children)
             dependencies = {c["session_id"]: c.get("summary_ids", []) for c in children}
@@ -1349,6 +1497,17 @@ class BackgroundWorker:
                     (parent["user_id"], parent["session_id"]),
                 )
                 previous = cur.fetchone()
+            now = time.monotonic()
+            if index == len(parents) or now - last_progress >= 10:
+                logger.info(
+                    "Parent summary recovery: scanned %d/%d parents in %.1fs",
+                    index,
+                    len(parents),
+                    now - started,
+                )
+                last_progress = now
+            if stop is not None and stop.is_set():
+                return enqueued
             if dependencies == metadata(
                 previous["evidence_metadata"] if previous else None
             ).get("children", {}):
@@ -1356,20 +1515,29 @@ class BackgroundWorker:
             if not self._task_queue.cancel_duplicate(
                 "summary", parent["user_id"], parent["session_id"]
             ):
-                self._task_queue.enqueue(
+                parent_task = self._task_queue.enqueue(
                     "summary",
                     parent["user_id"],
                     session_id=parent["session_id"],
                     payload={"trigger": "manual"},
                     priority=2,
                 )
-                enqueued += 1
+                enqueued += int(parent_task is not None)
         return enqueued
 
-    async def _notify_pending_summaries(self, task: dict[str, Any]) -> None:
+    async def _notify_pending_summaries(
+        self, task: dict[str, Any], *, scope: Any = None
+    ) -> None:
         import json
 
         from intaris.analytics_evidence import metadata
+        from intaris.session_modes import ParticipationRevoked, analytics_scope
+
+        scope = scope or analytics_scope(self._db, task["user_id"])
+        try:
+            scope.include(task["session_id"])
+        except ParticipationRevoked:
+            return
 
         with self._db.cursor() as cur:
             cur.execute(
@@ -1380,6 +1548,12 @@ class BackgroundWorker:
             )
             rows = [dict(r) for r in cur.fetchall()]
         for row in rows:
+            try:
+                scope.check(check_claim=False)
+            except ParticipationRevoked:
+                return
+            if not scope.usable_summary({**row, "session_id": task["session_id"]}):
+                continue
             evidence = metadata(row["evidence_metadata"])
             if not evidence or evidence.get("notification_sent"):
                 continue
@@ -1428,6 +1602,9 @@ class BackgroundWorker:
         try:
             user_id = task.get("user_id", "")
             session_id = task.get("session_id", "")
+            session = SessionStore(self._db).get(session_id, user_id=user_id)
+            if not session["analytics_enabled"]:
+                return False
             # Parse risk_indicators if stored as JSON string
             indicators = result.get("risk_indicators", [])
             if isinstance(indicators, str):
@@ -1609,6 +1786,12 @@ class BackgroundWorker:
                     "status": "skipped",
                     "reason": "User message already observed",
                 }
+        session = self._session_store.get(session_id, user_id=user_id)
+        if not session["guardrails_enabled"] or (
+            payload.get("guardrails_revision") is not None
+            and payload["guardrails_revision"] != session["guardrails_revision"]
+        ):
+            return {"status": "skipped", "reason": "guardrails_disabled"}
 
         # Run in thread executor to avoid blocking the event loop.
         # generate_intention() makes synchronous LLM calls (up to 30s).
@@ -1622,6 +1805,7 @@ class BackgroundWorker:
             event_bus=self._event_bus,
             intention_source=source,
             generation=load_config().source_context_generation,
+            expected_guardrails_revision=payload.get("guardrails_revision"),
         )
 
         if intention is not None:
@@ -1795,7 +1979,9 @@ class BackgroundWorker:
                 continue
 
             # Find (user_id, agent_id) pairs with new summaries since
-            self._enqueue_changed_parents()
+            await self._run_maintenance(
+                self._enqueue_changed_parents, stop=self._maintenance_stop
+            )
             # their last analysis. Agent-scoped: each agent gets its own
             # analysis and behavioral profile.
             with self._db.cursor() as cur:
@@ -1809,7 +1995,8 @@ class BackgroundWorker:
                     LEFT JOIN behavioral_profiles bp
                         ON ss.user_id = bp.user_id
                         AND COALESCE(s.agent_id, '') = bp.agent_id
-                    WHERE ss.created_at > COALESCE(bp.updated_at, '1970-01-01')
+                     WHERE ss.created_at > COALESCE(bp.updated_at, '1970-01-01')
+                       AND s.analytics_enabled = TRUE
                     """
                 )
                 pairs = [(row[0], row[1]) for row in cur.fetchall()]
@@ -1851,7 +2038,8 @@ class BackgroundWorker:
                         SELECT COUNT(*) FROM sessions
                         WHERE status IN ('idle', 'completed',
                                          'terminated', 'suspended')
-                          AND summary_count = 0
+                           AND summary_count = 0
+                           AND analytics_enabled = TRUE
                           AND last_activity_at > created_at
                           AND (
                                 last_summary_attempt_at IS NULL
@@ -1867,12 +2055,50 @@ class BackgroundWorker:
                 pass  # Best-effort metric
 
     async def _startup_catchup(self) -> None:
+        """Run synchronous recovery off the API event loop."""
+        await self._run_maintenance(self._run_startup_catchup)
+
+    async def _run_maintenance(
+        self, function: Callable[..., Any], **kwargs: Any
+    ) -> Any:
+        """Retain ownership of synchronous scans across async cancellation."""
+        task = asyncio.create_task(
+            asyncio.to_thread(self._execute_maintenance, function, kwargs)
+        )
+        self._maintenance_tasks.add(task)
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                self._maintenance_tasks.discard(task)
+
+    def _execute_maintenance(
+        self, function: Callable[..., Any], kwargs: dict[str, Any]
+    ) -> Any:
+        with self._maintenance_lock:
+            if self._database_closing:
+                return None
+            self._maintenance_active += 1
+        try:
+            return function(**kwargs)
+        finally:
+            with self._maintenance_lock:
+                self._maintenance_active -= 1
+                if self._db.backend == "sqlite" or (
+                    self._database_closing and not self._maintenance_active
+                ):
+                    self._db.close()
+
+    def _run_startup_catchup(self) -> None:
         """Recover from server crashes on startup.
 
         1. Reset stale running tasks back to pending.
         2. Enqueue summaries for idle/completed sessions that never got one.
         3. Check profile staleness.
         """
+        logger.info("Startup catch-up: starting recovery")
+        if self._maintenance_stop.is_set():
+            return
         # Reset tasks stuck in running state
         reset_count = self._task_queue.reset_stale_running()
         self.metrics.stale_task_resets_total += reset_count
@@ -1886,7 +2112,9 @@ class BackgroundWorker:
         # re-enqueuing ancient sessions on every restart.
         if self.analyzer_ready:
             try:
-                enqueued = self._enqueue_changed_parents()
+                enqueued = self._enqueue_changed_parents(stop=self._maintenance_stop)
+                if self._maintenance_stop.is_set():
+                    return
                 cutoff = (
                     datetime.now(timezone.utc)
                     - timedelta(days=self._config.lookback_days)
@@ -1899,7 +2127,8 @@ class BackgroundWorker:
                         SELECT user_id, session_id FROM sessions
                         WHERE status IN ('idle', 'completed',
                                          'terminated', 'suspended')
-                          AND summary_count = 0
+                           AND summary_count = 0
+                           AND analytics_enabled = TRUE
                           AND last_activity_at > created_at
                           AND (
                                 last_summary_attempt_at IS NULL
@@ -1913,17 +2142,19 @@ class BackgroundWorker:
                     no_summary = cur.fetchall()
 
                 for row in no_summary:
+                    if self._maintenance_stop.is_set():
+                        return
                     uid = row["user_id"] if isinstance(row, dict) else row[0]
                     sid = row["session_id"] if isinstance(row, dict) else row[1]
                     if not self._task_queue.cancel_duplicate("summary", uid, sid):
-                        self._task_queue.enqueue(
+                        summary_task = self._task_queue.enqueue(
                             "summary",
                             uid,
                             session_id=sid,
                             payload={"trigger": "inactivity"},
                             priority=1,
                         )
-                        enqueued += 1
+                        enqueued += int(summary_task is not None)
 
                 # 2. Completed/terminated sessions with multiple window
                 #    summaries but no compacted summary (compaction gap —
@@ -1936,7 +2167,8 @@ class BackgroundWorker:
                         """
                         SELECT s.user_id, s.session_id FROM sessions s
                         WHERE s.status IN ('completed', 'terminated')
-                          AND s.summary_count > 1
+                           AND s.summary_count > 1
+                           AND s.analytics_enabled = TRUE
                           AND s.last_activity_at >= ?
                           AND NOT EXISTS (
                               SELECT 1 FROM session_summaries ss
@@ -1950,17 +2182,19 @@ class BackgroundWorker:
                     no_compaction = cur.fetchall()
 
                 for row in no_compaction:
+                    if self._maintenance_stop.is_set():
+                        return
                     uid = row["user_id"] if isinstance(row, dict) else row[0]
                     sid = row["session_id"] if isinstance(row, dict) else row[1]
                     if not self._task_queue.cancel_duplicate("summary", uid, sid):
-                        self._task_queue.enqueue(
+                        summary_task = self._task_queue.enqueue(
                             "summary",
                             uid,
                             session_id=sid,
                             payload={"trigger": "close"},
                             priority=2,
                         )
-                        enqueued += 1
+                        enqueued += int(summary_task is not None)
 
                 if enqueued:
                     logger.info(

@@ -1220,10 +1220,9 @@ async def lifespan(app):
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await asyncio.wait_for(notification_dispatcher.close(), timeout=2.0)
 
-        # Close database (synchronous)
+        # A timed-out recovery query retains the database until its thread exits.
         with contextlib.suppress(asyncio.CancelledError, Exception):
-            db = _get_db()
-            db.close()
+            background_worker.close_database()
 
         if _evaluator_backend is not None:
             with contextlib.suppress(asyncio.CancelledError, Exception):

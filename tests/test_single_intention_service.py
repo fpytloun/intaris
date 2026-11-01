@@ -304,3 +304,115 @@ def test_public_history_harness_preserves_recorded_confirmation_link(service):
         assert not [body for stage, body in wire if stage == "extract"]
     finally:
         bridge.close()
+
+
+@pytest.mark.parametrize(
+    "service",
+    [("llm", "source_context", "single", "sqlite")],
+    indirect=True,
+)
+def test_fenced_debug_request_repair_through_recording_reasoning_and_evaluation(
+    service,
+):
+    from tests.test_intention_evidence_boundaries import MESSAGE, REQUEST
+    from tests.test_single_intention import item
+
+    client, app, wire = service
+    sid = create(client)
+    attempts = 0
+
+    def intention_answer(sources):
+        nonlocal attempts
+        attempts += 1
+        msg = sources[-1]["msg"]
+        assert sources[-1]["segments"][1]["kind"] == "embedded_context"
+        return {
+            "title": "Debug restart failure",
+            "intention": "Debug the restart failure.",
+            "items": (
+                [item(MESSAGE, msg=msg)]
+                if attempts == 1
+                else [item(REQUEST, msg=msg), item(MESSAGE, "context", msg=msg)]
+            ),
+            "current": [0],
+        }
+
+    app.state.offline_provider_hooks["intention_answer"] = intention_answer
+    record(client, sid, {"type": "user_message", "data": {"content": MESSAGE}})
+    response = client.post(
+        "/api/v1/reasoning",
+        json={
+            "session_id": sid,
+            "from_events": True,
+            "wait_for_intention": True,
+            "wait_timeout_ms": 10000,
+        },
+    )
+    assert response.status_code == 200, response.text
+    persisted = client.get(f"/api/v1/session/{sid}").json()
+    assert persisted["title"] == "Debug restart failure"
+    result = evaluate(client, sid)
+    artifact = result["evaluation_metadata"]["task_context"]
+    assert artifact["status"] == "ready"
+    assert artifact["items"][0]["kind"] == "request"
+    assert artifact["items"][0]["quote"] == REQUEST
+    assert artifact["items"][1]["kind"] == "context"
+    assert attempts == 2
+    assert not [body for stage, body in wire if stage in {"extract", "mock-error"}]
+
+
+@pytest.mark.parametrize(
+    "service",
+    [
+        ("llm", "source_context", "single", "sqlite"),
+        ("llm", "source_context", "single", "postgresql"),
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize("valid_profile", [False, True])
+def test_paragraph_title_and_failed_profile_fallback_through_api(
+    service, valid_profile
+):
+    from tests.test_paragraph_intention_titles import MESSAGE, REQUEST
+    from tests.test_single_intention import item
+
+    client, app, wire = service
+    sid = create(client)
+    before = client.get(f"/api/v1/session/{sid}").json()
+
+    def intention_answer(sources):
+        return {
+            "title": "Nested sidebar error",
+            "intention": "Investigate the sidebar error.",
+            "items": [
+                item(
+                    REQUEST if valid_profile else "Absent quotation",
+                    msg=sources[-1]["msg"],
+                )
+            ],
+            "current": [0],
+        }
+
+    app.state.offline_provider_hooks["intention_answer"] = intention_answer
+    record(client, sid, {"type": "user_message", "data": {"content": MESSAGE}})
+    response = client.post(
+        "/api/v1/reasoning",
+        json={
+            "session_id": sid,
+            "from_events": True,
+            "wait_for_intention": True,
+            "wait_timeout_ms": 10000,
+        },
+    )
+    assert response.status_code == 200, response.text
+    persisted = client.get(f"/api/v1/session/{sid}").json()
+    assert persisted["title"] == "Nested sidebar error"
+    if not valid_profile:
+        assert persisted["intention"] == before["intention"]
+    artifact = evaluate(client, sid)["evaluation_metadata"]["task_context"]
+    assert artifact["status"] == ("ready" if valid_profile else "raw")
+    if not valid_profile:
+        assert artifact["fallback"] == "raw_sources"
+        assert artifact["items"] == []
+    assert any(source["content"] == MESSAGE for source in artifact["originals"])
+    assert not [body for stage, body in wire if stage in {"extract", "mock-error"}]

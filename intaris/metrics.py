@@ -17,8 +17,14 @@ DEFAULT_LATENCY_BUCKETS_MS = (1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000)
 class Histogram:
     """Thread-safe cumulative histogram with bounded fixed buckets."""
 
-    def __init__(self, buckets_ms: tuple[float, ...] = DEFAULT_LATENCY_BUCKETS_MS):
+    def __init__(
+        self,
+        buckets_ms: tuple[float, ...] = DEFAULT_LATENCY_BUCKETS_MS,
+        *,
+        unit: str = "ms",
+    ):
         self._buckets = tuple(sorted(buckets_ms))
+        self._unit = unit
         self._counts = [0] * len(self._buckets)
         self._count = 0
         self._sum = 0.0
@@ -43,11 +49,13 @@ class Histogram:
             return {
                 "count": count,
                 "sum": round(self._sum, 3),
-                "avg_ms": round(self._sum / count, 3) if count else 0.0,
-                "max_ms": round(self._max, 3),
-                "last_ms": round(self._last, 3),
+                f"avg{'_' + self._unit if self._unit else ''}": (
+                    round(self._sum / count, 3) if count else 0.0
+                ),
+                f"max{'_' + self._unit if self._unit else ''}": round(self._max, 3),
+                f"last{'_' + self._unit if self._unit else ''}": round(self._last, 3),
                 "buckets": {
-                    f"le_{boundary:g}ms": bucket_count
+                    f"le_{boundary:g}{self._unit}": bucket_count
                     for boundary, bucket_count in zip(
                         self._buckets, self._counts, strict=True
                     )

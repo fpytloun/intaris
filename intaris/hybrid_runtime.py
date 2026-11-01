@@ -110,6 +110,17 @@ def _observe_action(tool: str, args: dict, **kwargs) -> dict:
                 facts["operation_contract"] = True
     if runtime_view(context):
         facts["runtime_context"] = runtime_view(context)
+        scripts = facts["runtime_context"].get("executed_scripts")
+        verified = scripts.get("verified") if isinstance(scripts, dict) else None
+        if isinstance(verified, list) and verified:
+            # Bytes hashed by the executor at dispatch, bound to this action by
+            # the context projection: a controller fact that a clause naming a
+            # hash can be checked against, unlike a path-declared digest.
+            facts["verified_asset_digests"] = {
+                row["path"]: row["sha256"]
+                for row in verified
+                if isinstance(row, dict) and "path" in row and "sha256" in row
+            }
     facts["arguments"] = projection_arguments(args)
     if facts["arguments"] != redact(args):
         facts["arguments_complete"] = False
