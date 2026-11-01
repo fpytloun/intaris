@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-01
+
+### Added
+
+- **Independent session participation** -- Sessions can disable behavioral
+  analytics and proactive guardrails independently. Recording and explicit
+  tool evaluation remain available; queued and in-flight derived work is
+  fenced against opt-out, including disable/re-enable races.
+
+- **Storage observability** -- Expose append latency/failures, pending payload
+  bytes and persisted backlog age, actual chunk distributions, and per-operation
+  read decode amplification through existing metrics diagnostics. Stream metrics
+  preserve cancellation and exclude consumer waiting time; scrapes add no storage
+  I/O or payload-derived labels. Existing S3 and cache metrics remain available.
+
+### Changed
+
+- **Session archive efficiency** -- New filesystem and S3 chunks use checksummed
+  Zstandard level 1 by default. Set `EVENT_STORE_COMPRESSION=none` for uncompressed
+  writes. Readers support both formats; upgrade all readers before enabling
+  compression, and do not downgrade while compressed history remains.
+- **Event JSON performance** -- Use `msgspec` for recording payloads and spool
+  JSON, preserving legacy value semantics and established retry/hash identities.
+
+### Fixed
+
+- **Alignment retry fencing** -- Use the alignment reviewer's database for
+  participation checks even when optional evaluator analytics are not configured.
+- **Offline benchmark integrity** -- Refresh source-context fixture identities
+  after public-content reconstruction without claiming renewed model evidence
+  or authorizing live execution.
+- **Intention source fidelity** -- Keep diagnostic blocks out of authority
+  quotations, repair stale prose without dropping validated restrictions, and
+  preserve source paragraph boundaries and title-only updates.
+- **Verified script context** -- Bind executor-observed script digests to the
+  exact evaluated command; paths alone cannot satisfy hash-conditioned grants.
+- **Git search classification** -- Treat search patterns as text while retaining
+  checks on pattern files, target paths, and executable pager options.
+- **Startup recovery responsiveness** -- Reuse participation snapshots per tenant
+  during parent summary recovery and index descendant traversal. Run recovery
+  scans off the API event loop, with progress logs and cooperative shutdown,
+  so large session histories do not prevent the service from starting.
+- **Operator policy review** -- Preserve configured allow/deny effects and all
+  allowance conditions in reviewer instructions without treating policy clauses
+  as original user speech.
+- **Session read amplification** -- Resume audit projection from its durable
+  checkpoint and traverse chunks once during export, filtered forward reads and
+  backfill instead of repeatedly parsing the same payload.
+- **Unattended review failures** -- Apply session resolution policy when an
+  automated restriction claim cannot be verified. Policy blocking retains the
+  validation-failure cause and unknown risk rather than offering unavailable
+  human review. Interactive review and technical-failure handling are unchanged.
+
 ## [0.14.1] - 2026-10-23
 
 ### Fixed

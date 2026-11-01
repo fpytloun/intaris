@@ -56,7 +56,7 @@ GitHub Actions publishes `ghcr.io/fpytloun/intaris:latest` from `main` and
 Before first use, an owner must set the GHCR package visibility to **Public** in
 GitHub Packages settings (`fpytloun/intaris`). Then pull the image with
 `docker pull ghcr.io/fpytloun/intaris:latest` or
-`docker pull ghcr.io/fpytloun/intaris:v0.14.1`.
+`docker pull ghcr.io/fpytloun/intaris:v0.15.0`.
 
 ### Custom Docker Compose
 

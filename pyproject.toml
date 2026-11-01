@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "intaris"
-version = "0.14.1"
+version = "0.15.0"
 description = "Guardrails service for AI agents — safety evaluation, audit, and approval workflows"
 readme = "README.md"
 license = "LicenseRef-BSL-1.1"
@@ -25,6 +25,8 @@ classifiers = [
 ]
 
 dependencies = [
+    "msgspec>=0.19.0",
+    "zstandard>=0.23.0",
     "jsonschema>=4.20",
     "pydantic>=2.12",
     "fastapi>=0.100.0",
