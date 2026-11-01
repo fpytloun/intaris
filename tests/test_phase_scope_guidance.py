@@ -68,4 +68,4 @@ def test_all_three_boundaries_share_phase_scope_without_blanket_override():
         assert "ongoing read-only prohibition" in prompt
         assert "nor an unrelated newer request" in prompt
         assert "latest message wins globally" in prompt
-    assert intention_profile.VERSION == "task-context-single-v14"
+    assert intention_profile.VERSION == "task-context-single-v15"

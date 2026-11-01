@@ -124,7 +124,7 @@ def test_skill_context_reaches_both_l1_formats_and_independent_judge():
 
 
 def test_extraction_contract_preserves_supporting_sources_without_inventing_grants():
-    assert VERSION == "task-context-single-v12"
+    assert VERSION == "task-context-single-v15"
     assert "supporting operations and named sources" in SYSTEM_PROMPT
     assert "Never transfer scope across sources" in SYSTEM_PROMPT
     assert "Keep unaffected restrictions current" in SYSTEM_PROMPT

@@ -17,6 +17,7 @@ from tests.test_hybrid_races import race_store as race_store
         "git diff --ext-diff",
         "git config --get core.pager",
         "git config --list",
+        "git -C /other status",
         "git log --oneline | head -1; git merge-base HEAD origin/main",
     ],
 )
@@ -53,7 +54,7 @@ def test_trusted_git_reads_skip_inference(race_store, command):
         "git show user@host:repo",
         "git --git-dir=/other log",
         "git --work-tree=/other diff",
-        "git -C /other status",
+        "git -C /other commit -m x",
         "GIT_EXTERNAL_DIFF=sh git diff --ext-diff",
         "GIT_CONFIG_COUNT=1 git log",
         "PAGER=sh git log",
