@@ -1243,6 +1243,14 @@ _GIT_GREP_VALUE_OPTIONS = {
 }
 
 
+def _git_subcommand_index(arguments: list[str]) -> int:
+    """Locate the subcommand without treating global option values as operands."""
+    index = 0
+    while index < len(arguments) and arguments[index].startswith("-"):
+        index += 2 if arguments[index] in _GIT_GLOBAL_VALUE_OPTIONS else 1
+    return index
+
+
 def _git_grep_pattern_indexes(arguments: list[str]) -> set[int]:
     """Indexes of `git grep` search patterns among the arguments after `git`.
 
@@ -1252,9 +1260,7 @@ def _git_grep_pattern_indexes(arguments: list[str]) -> set[int]:
     are patterns; tree-ish, pathspecs and `-f` pattern files stay checked.
     """
     clean = [argument.strip("'\"") for argument in arguments]
-    index = 0
-    while index < len(clean) and clean[index].startswith("-"):
-        index += 2 if clean[index] in _GIT_GLOBAL_VALUE_OPTIONS else 1
+    index = _git_subcommand_index(clean)
     if index >= len(clean) or clean[index] != "grep":
         return set()
     patterns: set[int] = set()
@@ -1293,6 +1299,137 @@ def _git_grep_pattern_indexes(arguments: list[str]) -> set[int]:
     return patterns
 
 
+def _git_disclosure_arguments(arguments: list[str]) -> list[str]:
+    """Select operands of Git operations that can output secret-bearing content.
+
+    Branch names, commit messages and authentication configuration used by a
+    write are not disclosure evidence. Unknown operations still undergo normal
+    assessment; this witness does not grant permission or classify them as reads.
+    """
+    clean = [argument.strip("'\"") for argument in arguments]
+    index = _git_subcommand_index(clean)
+    if index >= len(clean):
+        return []
+    subcommand = clean[index]
+    operands = clean[index + 1 :]
+    if subcommand == "credential":
+        # `fill` outputs credentials rather than merely naming a credential helper.
+        return clean[index:] if operands[:1] == ["fill"] else []
+    if subcommand == "stash":
+        if operands[:1] != ["show"]:
+            return []
+        operands = operands[1:]
+    elif subcommand in {"log", "reflog"}:
+        if not any(
+            a
+            in {
+                "-p",
+                "-u",
+                "--patch",
+                "--patch-with-stat",
+                "--patch-with-raw",
+                "-c",
+                "--cc",
+                "--dd",
+                "--remerge-diff",
+                "-W",
+                "--function-context",
+                "--word-diff",
+                "--color-words",
+                "--unified",
+            }
+            or a.startswith(
+                ("-U", "-L", "--unified=", "--word-diff=", "--color-words=")
+            )
+            for a in operands
+        ):
+            return []
+    elif subcommand == "config":
+        # Setters consume values; getters may print a secret from a named key.
+        positional = []
+        skip_value = False
+        for argument in operands:
+            if skip_value:
+                skip_value = False
+            elif argument in {"--file", "-f", "--blob", "--type", "--default"}:
+                skip_value = True
+            elif not argument.startswith("-"):
+                positional.append(argument)
+        if not any(
+            a
+            in {
+                "get",
+                "list",
+                "--get",
+                "--get-all",
+                "--get-regexp",
+                "--get-urlmatch",
+                "--list",
+                "-l",
+            }
+            for a in operands
+        ) and (
+            len(positional) != 1
+            or any(
+                a
+                in {
+                    "--add",
+                    "--unset",
+                    "--unset-all",
+                    "--replace-all",
+                    "--rename-section",
+                    "--remove-section",
+                    "--edit",
+                    "-e",
+                }
+                for a in operands
+            )
+        ):
+            return []
+    elif subcommand not in {"show", "diff", "grep", "blame", "cat-file", "archive"}:
+        return []
+    patterns = _git_grep_pattern_indexes(clean) if subcommand == "grep" else set()
+    result = []
+    positional = False
+    skip_value = False
+    metadata_only = False
+    for position in range(index + 1, len(clean)):
+        argument = clean[position]
+        if argument == "--" and not positional:
+            positional = True
+            continue
+        if not positional:
+            if skip_value:
+                skip_value = False
+                continue
+            if position in patterns:
+                continue
+            # Pickaxe options consume a query string, not a filename. Optional
+            # values (e.g. --pretty) must use '=' and cannot consume the next path.
+            if argument in {"-S", "-G"}:
+                skip_value = True
+                continue
+            if argument.startswith("-"):
+                if subcommand in {"log", "reflog"} and argument.startswith("-L"):
+                    result.append(argument[2:])
+                if subcommand == "diff" and argument in {
+                    "--name-only",
+                    "--name-status",
+                    "--quiet",
+                }:
+                    metadata_only = True
+                # -f names a grep pattern file, which remains a read target.
+                if (
+                    subcommand == "grep"
+                    and argument.startswith("-f")
+                    and len(argument) > 2
+                ):
+                    result.append(argument[2:])
+                continue
+        result.append(argument)
+    return [] if metadata_only else result
+
+
 def secret_argument_disclosure(command: str) -> bool:
     """Recognize explicit secret-bearing output arguments without executing shell."""
     try:
@@ -1316,10 +1453,25 @@ def secret_argument_disclosure(command: str) -> bool:
             if argument and all(char in ";&|()<>\n" for char in argument):
                 break
             segment.append(argument)
-        skipped = _git_grep_pattern_indexes(segment) if name == "git" else set()
-        for position, argument in enumerate(segment):
-            if position in skipped:
-                continue
+        if name == "env":
+            child = _unwrap_read_command(
+                ["env", *(argument.strip("'\"") for argument in segment)]
+            )
+            if child:
+                # With a command, env executes it instead of printing its
+                # environment. Inspect the child operation, not all its args.
+                name = os.path.basename(child[0])
+                if name not in _DISCLOSURE_COMMANDS | {
+                    "sh",
+                    "bash",
+                    "zsh",
+                    "dash",
+                    "ksh",
+                }:
+                    continue
+                segment = child[1:]
+        candidates = _git_disclosure_arguments(segment) if name == "git" else segment
+        for argument in candidates:
             if any(
                 re.search(
                     ("" if pattern.startswith(".") else r"(?<![a-z0-9])")

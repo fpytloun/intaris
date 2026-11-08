@@ -53,3 +53,17 @@ explicit denies, applicable restrictions, floors or human checkpoints.
 `-e`/`--regexp`) are search text, not secret-bearing file operands; pattern
 files (`-f`) and paths still feed disclosure checks. Grep's `-O` /
 `--open-files-in-pager` can execute a command and are not static reads.
+
+Secret-word disclosure evidence is operation-aware. Content reads such as
+`git show HEAD:.env`, diffs of credential files, and credential/config getters
+still require disclosure assessment. Branch/worktree names, commit messages,
+authentication settings used by a push, and filename-only diff output are not
+secret values. They do not establish disclosure merely because they contain
+`credentials` or `token`. This distinction grants no permission to mutate or
+publish: writes, unknown operations, explicit denies, and task restrictions
+continue through ordinary evaluation.
+
+An `env` wrapper with a child command executes that command instead of printing
+environment values. Disclosure inspection follows the child (`env -u PYTHONPATH
+cat .env` still exposes a secret file); credential-related source filenames
+passed to a formatter or test runner are not themselves disclosure evidence.

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-08
+
+### Fixed
+
+- **Operation-aware disclosure checks** -- Distinguish secret-bearing Git output
+  from credential-related branch names, commit messages, authentication settings,
+  and filename-only diffs. Follow the child command of an `env` wrapper instead
+  of treating development filenames as disclosed values. Actual secret reads
+  retain disclosure checks; task restrictions and explicit denies still apply.
+- **Disclosure review explanations** -- Explain when disclosure authorization
+  remains unverified even if an automated reviewer recommends task approval.
+
 ## [0.15.0] - 2026-11-01
 
 ### Added

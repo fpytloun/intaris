@@ -1,13 +1,17 @@
 import json
+import subprocess
 from unittest.mock import Mock
 
 import pytest
 
 from intaris import judge_simulator as simulator
 from intaris.classifier import observe_hybrid, secret_argument_disclosure
+from intaris.config import JudgeConfig
 from intaris.hybrid import evaluate_policy
+from intaris.judge import JudgeReviewer
 from intaris.l1_projection import render
 from intaris.policy_evidence import from_observations
+from tests.test_intent_first_defaults import model_response
 from tests.test_policy_evidence_runtime import runtime as runtime
 from tests.test_user_simulator import answer, state
 
@@ -24,13 +28,66 @@ from tests.test_user_simulator import answer, state
         ("tail credentials.txt", True),
         ("less id_rsa", True),
         ("more passwd.txt", True),
-        ("env API_KEY", True),
+        ("env API_KEY", False),
+        ("env API_KEY=synthetic-only", True),
+        ("env -u PYTHONPATH uv run ruff check src/credentials.py", False),
+        ("env -u API_TOKEN uv run pytest tests/test_credentials.py", False),
+        ("env -u PYTHONPATH cat .env", True),
+        ("env -u PYTHONPATH printenv API_TOKEN", True),
+        ("env -S 'printenv API_TOKEN'", True),
+        ("env -u PYTHONPATH env -u TERM cat credentials.txt", True),
+        ("env -u PYTHONPATH sh -c 'cat credentials.json'", True),
         ("cat PaSsWoRd.txt", True),
         ("printf hello", False),
         ("grep cat TOKEN", False),
         ("pwd && /usr/bin/printenv ORBIT_SERVICE_TOKEN", True),
         ('echo ";" "$AWS_SECRET_ACCESS_KEY"', True),
         ("pwd\nprintenv ORBIT_SERVICE_TOKEN", True),
+        (
+            "git worktree add -b feat/station-credentials ../station-credentials origin/main",
+            False,
+        ),
+        ("git -C /repo worktree add ../credentials origin/main", False),
+        ("git switch -c feat/token-storage", False),
+        ('git commit -m "fix: credential handling"', False),
+        (
+            "git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin HEAD",
+            False,
+        ),
+        ("git config credential.helper manager", False),
+        ("git status --short -- credentials", False),
+        ("git diff --name-status origin/main -- credentials.json", False),
+        ("git log --oneline -- credentials.json", False),
+        ("git show --format=credential HEAD:README.md", False),
+        ("git diff -S credential HEAD -- README.md", False),
+        ("git show HEAD:.env", True),
+        ("git show --pretty credentials.json", True),
+        ("git -C /repo -c credential.helper= show HEAD:credentials.json", True),
+        ("git diff HEAD -- credentials.json", True),
+        ("git diff --check -- credentials.json", True),
+        ("git diff HEAD -- --name-only credentials.json", True),
+        ("git diff -S --name-only HEAD -- credentials.json", True),
+        ("git log -p -- credentials.json", True),
+        ("git log --patch-with-stat -- credentials.json", True),
+        ("git reflog --patch-with-raw -- credentials.json", True),
+        ("git log -c -- credentials.json", True),
+        ("git log --cc -- credentials.json", True),
+        ("git log -U1 -- credentials.json", True),
+        ("git log --unified=1 -- credentials.json", True),
+        ("git log --word-diff -- credentials.json", True),
+        ("git log -L 1,2:credentials.json", True),
+        ("git log -L1,2:credentials.json", True),
+        ("git blame credentials.json", True),
+        ("git cat-file -p HEAD:.env", True),
+        ("git archive HEAD credentials.json", True),
+        ("git config --get remote.origin.token", True),
+        ("git config --get-urlmatch credential https://example.com", True),
+        ("git config remote.origin.token", True),
+        ("git config --global remote.origin.token", True),
+        ("git config --file settings remote.origin.token", True),
+        ("git credential fill", True),
+        ("git worktree add ../credentials; cat .env", True),
+        ("git -c credential.helper= push origin HEAD && printenv API_TOKEN", True),
     ],
 )
 def test_secret_argument_observation(command, expected):
@@ -45,6 +102,144 @@ def test_secret_argument_observation(command, expected):
         assert evidence.observations["effects"].source == "secret_argument"
     else:
         assert "secret_argument" not in facts
+
+
+@pytest.mark.parametrize("profile", ["balanced", "bounded_autonomy"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git fetch origin; git status --short; git worktree add -b feat/station-credentials ../station-credentials origin/main",
+        "git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push origin HEAD",
+        "env -u PYTHONPATH uv run ruff check --fix src/api/credentials.py; env -u PYTHONPATH uv run ruff format src/domain/credentials.py; env -u PYTHONPATH uv run python scripts/openapi.py --write; env -u PYTHONPATH uv run pytest tests/test_credentials.py",
+    ],
+)
+def test_credential_named_development_approves_without_disclosure_gate(
+    runtime, profile, command
+):
+    sessions, audit, _, evaluator, sid = runtime
+    sessions.update_session(sid, user_id="owner", policy={"profile": profile})
+    result = evaluator.evaluate(
+        user_id="owner",
+        session_id=sid,
+        agent_id=None,
+        tool="bash",
+        args={"command": command},
+    )
+    assert result["decision"] == "approve"
+    metadata = audit.get_by_call_id(result["call_id"], user_id="owner")[
+        "evaluation_metadata"
+    ]
+    assert not metadata["policy_evidence"]["observations"].get("secret_argument")
+    assert not metadata["policy_result"]["outstanding_obligations"]
+
+
+def test_disclosure_prompt_explains_remaining_gate_despite_judge_approval():
+    vote = answer().model_copy(
+        update={
+            "explanation": "The user already authorized this task.",
+            "action_summary": "Print the configured credential",
+        }
+    )
+    message = simulator.user_explanation(
+        vote,
+        {"status": "ready"},
+        "escalate",
+        record={"tool": "bash"},
+        triggers=["disclosure.authorization"],
+    )
+    assert "Authorization for that disclosure remains unverified" in message
+    assert "reviewer recommended approval" in message
+    assert "already authorized" not in message
+
+
+def test_diff_check_can_print_a_secret_bearing_line(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "credentials.json").write_text("{}\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "credentials.json"], check=True)
+    (tmp_path / "credentials.json").write_text('{"password": "synthetic-only"} \n')
+    result = subprocess.run(
+        ["git", "-C", str(tmp_path), "diff", "--check", "--", "credentials.json"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "synthetic-only" in result.stdout
+    assert secret_argument_disclosure("git diff --check -- credentials.json")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command,approved",
+    [
+        (
+            "git worktree add -b feat/station-credentials ../station-credentials origin/main",
+            True,
+        ),
+        ("git show HEAD:.env", False),
+        ("git log --patch-with-stat -- credentials.json", False),
+        ("git reflog --patch-with-raw -- credentials.json", False),
+        ("git log -c -- credentials.json", False),
+        ("git log --cc -- credentials.json", False),
+        ("git log -U1 -- credentials.json", False),
+        ("git log -L1,2:credentials.json", False),
+        ("git config --get-urlmatch credential https://example.com", False),
+        ("env -u PYTHONPATH sh -c 'cat credentials.json'", False),
+    ],
+)
+async def test_judge_resolution_keeps_only_real_disclosure_gate(
+    runtime, command, approved
+):
+    sessions, audit, llm, evaluator, sid = runtime
+    sessions.update_session(
+        sid, user_id="owner", policy={"profile": "bounded_autonomy"}
+    )
+    # Force an independent model-severity review so this exercises resolution,
+    # rather than the ordinary low-risk approval covered above.
+    llm.generate.side_effect = lambda *a, **kw: model_response(kw, risk="high")
+    result = evaluator.evaluate(
+        user_id="owner",
+        session_id=sid,
+        agent_id=None,
+        tool="bash",
+        args={"command": command},
+    )
+    assert result["decision"] == "escalate"
+    llm.generate.side_effect = None
+    llm.generate.return_value = answer().model_dump_json()
+    reviewer = JudgeReviewer(
+        llm=llm,
+        config=JudgeConfig(mode="auto"),
+        session_store=sessions,
+        audit_store=audit,
+        evaluator=evaluator,
+    )
+    await reviewer.review_and_resolve(
+        call_id=result["call_id"],
+        user_id="owner",
+        session_id=sid,
+    )
+    record = audit.get_by_call_id(result["call_id"], user_id="owner")
+    assert (record["user_decision"] == "approve") is approved
+    obligations = record["evaluation_metadata"]["policy_result"][
+        "outstanding_obligations"
+    ]
+    assert (
+        "disclosure.authorization" in [o["id"] for o in obligations]
+    ) is not approved
+    # Removing a false disclosure witness never bypasses an explicit tool deny.
+    sessions.update_session(
+        sid,
+        user_id="owner",
+        policy={"profile": "bounded_autonomy", "deny_tools": ["bash"]},
+    )
+    denied = evaluator.evaluate(
+        user_id="owner",
+        session_id=sid,
+        agent_id=None,
+        tool="bash",
+        args={"command": command},
+    )
+    assert denied["decision"] == "deny"
 
 
 @pytest.mark.parametrize(

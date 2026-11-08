@@ -1410,6 +1410,24 @@ def user_explanation(
                 f"{reason} The configured unattended session policy blocks "
                 "this unresolved action."
             )
+    if (
+        decision == "escalate"
+        and answer.basis != REVIEW_UNAVAILABLE
+        and "disclosure.authorization" in (triggers or [])
+    ):
+        return (
+            (f"{policy_reason} " if policy_reason else "")
+            + "Intaris flagged possible secret-bearing output. Authorization for "
+            "that disclosure remains unverified"
+            + (
+                ", although the automated reviewer recommended approval."
+                if answer.user_would == "approve"
+                else "."
+            )
+            + " This is a separate check from whether the action supports your task. "
+            "Review the command's expected output and approve only if any secret "
+            "disclosure is intended, or reject it if the disclosure flag is incorrect."
+        )
     if decision == "approve":
         return "This action is allowed by the verified task scope and policy."
     if decision == "deny":
