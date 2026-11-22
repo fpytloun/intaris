@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-22
+
+### Fixed
+
+- **Declared controller reads** -- A call that matches a controller
+  workflow-step declaration and selects a builtin operation declared as a read
+  now takes the static read path instead of model assessment. Writes, executor
+  and MCP tools, undeclared or mismatched calls, unselected operations, path or
+  secret arguments, and `bash` keep their existing evaluation.
+
 ## [0.15.1] - 2026-11-08
 
 ### Fixed

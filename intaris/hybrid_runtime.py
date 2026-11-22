@@ -29,8 +29,15 @@ from intaris.redactor import redact
 from intaris.sanitize import ANTI_INJECTION_PREAMBLE
 
 
-def _observe_action(tool: str, args: dict, **kwargs) -> dict:
-    """Shared deterministic facts for assessed and operator-bound evaluation."""
+def _observe_action(
+    tool: str, args: dict, *, controller_declared: bool = False, **kwargs
+) -> dict:
+    """Shared deterministic facts for assessed and operator-bound evaluation.
+
+    ``controller_declared`` is true only when this exact call matched a
+    controller workflow-step declaration, which binds the request (and so its
+    tool metadata) to the controller capability for this session.
+    """
     from intaris.classifier import name_effect
     from intaris.effect_scope import external_action
     from intaris.evaluation_context import (
@@ -62,6 +69,26 @@ def _observe_action(tool: str, args: dict, **kwargs) -> dict:
         and (not exact_native or operation.get("mutation_kind") != "read")
     ):
         facts["mutation"] = "unclear"
+    source = (context["tool"].get("source") or {}) if metadata_present else {}
+    if (
+        controller_declared
+        and tool != "bash"
+        and exact_native
+        and operation.get("mutation_kind") == "read"
+        and source.get("type") == "builtin"
+        and facts["mutation"] == "unclear"
+        and not facts["paths"]
+        and not facts.get("secret_argument")
+    ):
+        # The declaring controller executes its builtin tools itself, so the
+        # read contract of the selected operation is the effect proof that the
+        # name allowlist cannot provide for controller tool names.
+        facts.update(
+            mutation="read_only",
+            static_read=True,
+            operation="read",
+            operation_contract=True,
+        )
     if facts["mutation"] == "read_only":
         facts["effects"] = sorted(
             (set(facts.get("effects", [])) - {"unknown"}) | {"read"}
@@ -565,6 +592,7 @@ class HybridRuntime:
         original_facts = _observe_action(
             tool,
             args,
+            controller_declared=bool(workflow.get("matched")),
             policy=policy,
             working_directory=working_directory,
             tool_preferences=tool_preferences,
@@ -1124,6 +1152,7 @@ class HybridRuntime:
         observations = _observe_action(
             tool,
             args,
+            controller_declared=bool(workflow.get("matched")),
             policy=policy,
             working_directory=working_directory,
             tool_preferences=tool_preferences,

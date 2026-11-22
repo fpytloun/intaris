@@ -309,6 +309,87 @@ def test_canonical_vectors():
         )
 
 
+BUILTIN_ARGS = {"artifact_id": "art_" + "0" * 32}
+
+
+def builtin_context(mutation_kind="read", source="builtin", selection="exact"):
+    """Controller tool metadata as the controller sends it for a native tool."""
+    return {
+        "tool": {
+            "name": "artifact_get_content",
+            "description": "Read the exact text content of a saved artifact.",
+            "source": {"type": source},
+            "read_only": mutation_kind == "read",
+            "descriptor": {
+                "authority": "native",
+                "schema_version": "cognis.tool.v2",
+                "schema_hash": "0" * 64,
+                "selection": selection,
+                "selector": {},
+                "operation": {
+                    "name": "artifact_get_content",
+                    "summary": "Read the exact text content of a saved artifact",
+                    "mutation_kind": mutation_kind,
+                    "side_effects": [],
+                },
+            },
+        }
+    }
+
+
+def evaluate_builtin(workflow, *, declared=True, args=BUILTIN_ARGS, **context_changes):
+    _, _, llm, _, _, _ = workflow
+    install(
+        workflow,
+        tool="artifact_get_content",
+        rendered_args_digest=digest(args),
+        evaluated_args_digest=digest(args),
+    )
+    llm.generate.reset_mock()
+    result = evaluate(
+        workflow,
+        tool="artifact_get_content",
+        args=args if declared != "mismatch" else {"artifact_id": "art_" + "1" * 32},
+        context=builtin_context(**context_changes),
+        **({} if declared else {"controller_context": None}),
+    )
+    return result, llm.generate.call_count
+
+
+def test_declared_builtin_read_takes_the_static_read_path_without_the_model(workflow):
+    result, model_calls = evaluate_builtin(workflow)
+    assert result["decision"] == "approve"
+    assert model_calls == 0
+    policy = result["evaluation_metadata"]["policy_result"]
+    assert policy["permission_basis"] == "read_only_static"
+    assert policy["evidence_quality"] == "deterministic"
+    assert result["evaluation_metadata"]["static_facts"]["effects"] == ["read"]
+
+
+@pytest.mark.parametrize(
+    "case,changes",
+    [
+        ("undeclared", {"declared": False}),
+        ("mismatched declaration", {"declared": "mismatch"}),
+        ("write operation", {"mutation_kind": "update"}),
+        ("executor tool", {"source": "executor"}),
+        ("mcp tool", {"source": "mcp"}),
+        ("unselected operation", {"selection": "unknown"}),
+        (
+            "path argument",
+            {"args": {**BUILTIN_ARGS, "path": "/home/user/.ssh/id_ed25519"}},
+        ),
+    ],
+)
+def test_builtin_read_claims_need_a_matching_controller_declaration(
+    workflow, case, changes
+):
+    result, model_calls = evaluate_builtin(workflow, **changes)
+    policy = result["evaluation_metadata"].get("policy_result") or {}
+    assert policy.get("permission_basis") != "read_only_static", case
+    assert model_calls >= 1, case
+
+
 def test_declared_session_cannot_disable_enforcement(workflow):
     sessions, _, _, _, sid, _ = workflow
     install(workflow)
